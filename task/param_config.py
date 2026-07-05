@@ -2,6 +2,8 @@ import json
 import os
 
 import numpy as np
+from scene_prims import L_OBSERVATION_PRIM as L_object_prim_path
+from scene_prims import R_OBSERVATION_PRIM as R_object_prim_path
 
 # ---------------------------------------------------------------------------
 # Per-part data lives in part_init_poses.json next to this file. ONE source
@@ -68,8 +70,8 @@ PART_INIT_POSES = _load_part_init_poses()
 # those parts is pinned in PART_CONFIG to the mesh world xy read from this
 # same file.
 SCENE_USD = "../scene_init.usd"
-L_object_prim_path = "/World/parts/rod_16mm"   # static
-R_object_prim_path = "/World/parts/rod_16mm"
+# L_object_prim_path / R_object_prim_path are now imported from scene_prims
+# at the top of this file.  See scene_prims.py for the rationale.
 
 # Optional path to dump a flattened USD snapshot of the stage when the
 # part iteration finishes (i.e. after all parts in part_order have been
