@@ -13,7 +13,7 @@ import numpy as np
 from isaacsim.core.api.scenes.scene import Scene
 from isaacsim.core.api.tasks import BaseTask
 from isaacsim.core.utils.prims import is_prim_path_valid
-from isaacsim.core.prims import SingleRigidPrim
+from isaacsim.core.prims import SingleXFormPrim
 from isaacsim.core.utils.string import find_unique_string_name
 from isaacsim.robot.manipulators.grippers import ParallelGripper
 
@@ -61,10 +61,24 @@ class PickPlace_scene_bimanual(ABC, BaseTask):
 
         L_name = find_unique_string_name(initial_name="object_L", is_unique_fn=lambda x: not scene.object_exists(x))
         R_name = find_unique_string_name(initial_name="object_R", is_unique_fn=lambda x: not scene.object_exists(x))
-        self._object_L = scene.add(SingleRigidPrim(prim_path=self._L_object_prim_path, name=L_name))
-        self._object_R = scene.add(SingleRigidPrim(prim_path=self._R_object_prim_path, name=R_name))
-        self._task_objects[self._object_L.name] = self._object_L
-        self._task_objects[self._object_R.name] = self._object_R
+        # These are observation anchors only.  SingleRigidPrim is not safe for
+        # the assembly board: Isaac applies RigidBodyAPI when it is absent,
+        # silently turning authored-static collision geometry into a dynamic
+        # body that the arm can knock away.  A transform wrapper provides the
+        # pose interface this task uses without changing physics schemas.
+        # Do not add these handles to Scene or _task_objects. Scene.post_reset
+        # restores every registered prim's default pose, which is another
+        # unwanted transform-write path for an immutable referenced asset.
+        self._object_L = SingleXFormPrim(
+            prim_path=self._L_object_prim_path,
+            name=L_name,
+            reset_xform_properties=False,
+        )
+        self._object_R = SingleXFormPrim(
+            prim_path=self._R_object_prim_path,
+            name=R_name,
+            reset_xform_properties=False,
+        )
 
         self._robot_L, self._robot_R = self.set_robots()
         scene.add(self._robot_L)
@@ -72,7 +86,16 @@ class PickPlace_scene_bimanual(ABC, BaseTask):
         self._task_objects[self._robot_L.name] = self._robot_L
         self._task_objects[self._robot_R.name] = self._robot_R
 
-        self._move_task_objects_to_their_frame()
+        # The stage is already authored in the task/world frame.  BaseTask's
+        # helper rewrites every registered object's pose even for a zero
+        # offset; besides being unnecessary, that would attempt to edit the
+        # static board's composed Xform ops.  Reject non-zero offsets instead
+        # of silently moving an asset whose pose is an evaluation invariant.
+        if not np.allclose(self._offset, 0.0):
+            raise ValueError(
+                "scene-based pick/place does not support a non-zero task "
+                "offset while the assembly board is fixed"
+            )
 
     def get_params(self) -> dict:
         L_pos, L_ori = self._object_L.get_local_pose()
