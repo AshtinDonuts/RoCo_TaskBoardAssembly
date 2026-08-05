@@ -15,6 +15,10 @@ dev = [
     "ty",
 ]
 
+[tool.pytest.ini_options]
+pythonpath = ["task"]
+testpaths = ["tests"]
+
 [tool.uv]
 package = false
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]

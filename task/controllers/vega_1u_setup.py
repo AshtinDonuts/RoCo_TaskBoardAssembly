@@ -251,6 +251,119 @@ def _verify_and_autofix_scene_part_poses():
 # it (and removing the snap joint releases the body with stale velocity
 # from the last run, sending it flying).
 _SCENE_PART_XFORMOPS_SNAPSHOT = {}
+_ASSEMBLY_BOARD_WORLD_XFORM = None
+
+
+def _matrix_max_abs_delta(a, b):
+    """Maximum elementwise difference between two Gf.Matrix4d values."""
+    return max(abs(float(a[i][j]) - float(b[i][j]))
+               for i in range(4) for j in range(4))
+
+
+def enforce_assembly_board_static(stage):
+    """Make the configured assembly-board subtree true static geometry.
+
+    Static collision prims have CollisionAPI but no RigidBodyAPI.  Removing
+    RigidBodyAPI is preferable to making the board kinematic: it cannot react
+    to contacts, and snap_attach resolves its sockets through CollisionAPI.
+    The operation is deliberately restricted to ASSEMBLY_BOARD_PRIM_PATH;
+    loose components under /World/parts retain their dynamic rigid bodies.
+    """
+    global _ASSEMBLY_BOARD_WORLD_XFORM
+    if not bool(getattr(pc, "FIXATE_ASSEMBLY_BOARD", True)):
+        _ASSEMBLY_BOARD_WORLD_XFORM = None
+        print("[setup] assembly-board fixation disabled")
+        return
+
+    board_path = str(getattr(
+        pc, "ASSEMBLY_BOARD_PRIM_PATH", "/World/task_board"))
+    board_sdf = Sdf.Path(board_path)
+    parts_sdf = Sdf.Path("/World/parts")
+    if (not board_sdf.IsAbsolutePath()
+            or board_sdf == Sdf.Path.absoluteRootPath
+            or board_sdf.HasPrefix(parts_sdf)
+            or parts_sdf.HasPrefix(board_sdf)):
+        raise ValueError(
+            "ASSEMBLY_BOARD_PRIM_PATH must be an absolute path that does "
+            f"not overlap /World/parts; got {board_path!r}"
+        )
+
+    board = stage.GetPrimAtPath(board_sdf)
+    if not board or not board.IsValid():
+        raise ValueError(f"assembly board prim is missing: {board_path}")
+
+    removed = []
+    collision_count = 0
+    for prim in Usd.PrimRange(board):
+        if prim.HasAPI(UsdPhysics.CollisionAPI):
+            collision_count += 1
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            removed.append(str(prim.GetPath()))
+            if not prim.RemoveAPI(UsdPhysics.RigidBodyAPI):
+                raise RuntimeError(
+                    f"failed to remove RigidBodyAPI from {prim.GetPath()}"
+                )
+
+    if collision_count == 0:
+        raise RuntimeError(
+            f"assembly board {board_path} has no collision geometry"
+        )
+
+    _ASSEMBLY_BOARD_WORLD_XFORM = (
+        UsdGeom.XformCache().GetLocalToWorldTransform(board))
+    print(f"[setup] assembly board fixed as static geometry: {board_path} "
+          f"(colliders={collision_count}, rigid_bodies_removed={len(removed)})")
+
+
+def verify_assembly_board_static(stage, *, check_pose=True, log=True):
+    """Raise if reset/setup made the board dynamic or moved its root pose."""
+    if not bool(getattr(pc, "FIXATE_ASSEMBLY_BOARD", True)):
+        return
+    board_path = str(getattr(
+        pc, "ASSEMBLY_BOARD_PRIM_PATH", "/World/task_board"))
+    board = stage.GetPrimAtPath(Sdf.Path(board_path))
+    if not board or not board.IsValid():
+        raise RuntimeError(f"assembly board prim disappeared: {board_path}")
+
+    rigid_paths = [str(prim.GetPath()) for prim in Usd.PrimRange(board)
+                   if prim.HasAPI(UsdPhysics.RigidBodyAPI)]
+    if rigid_paths:
+        raise RuntimeError(
+            "assembly board was promoted to a rigid body during setup: "
+            + ", ".join(rigid_paths)
+        )
+
+    if check_pose and _ASSEMBLY_BOARD_WORLD_XFORM is not None:
+        current = UsdGeom.XformCache().GetLocalToWorldTransform(board)
+        delta = _matrix_max_abs_delta(current, _ASSEMBLY_BOARD_WORLD_XFORM)
+        if delta > 1e-9:
+            raise RuntimeError(
+                f"assembly board moved during setup (matrix delta={delta:.3e})"
+            )
+
+    dynamic_parts = 0
+    for name in getattr(pc, "part_order", ()):
+        part = stage.GetPrimAtPath(Sdf.Path(f"/World/parts/{name}"))
+        if not part or not part.IsValid():
+            continue  # import_missing_parts may spawn it after setup.
+        bodies = [prim for prim in Usd.PrimRange(part)
+                  if prim.HasAPI(UsdPhysics.RigidBodyAPI)]
+        if not bodies:
+            raise RuntimeError(f"task component {name!r} is not a rigid body")
+        for body in bodies:
+            enabled_attr = body.GetAttribute("physics:rigidBodyEnabled")
+            kinematic_attr = body.GetAttribute("physics:kinematicEnabled")
+            enabled = True if not enabled_attr else bool(enabled_attr.Get())
+            kinematic = False if not kinematic_attr else bool(kinematic_attr.Get())
+            if not enabled or kinematic:
+                raise RuntimeError(
+                    f"task component {body.GetPath()} must remain dynamic "
+                    f"(enabled={enabled}, kinematic={kinematic})"
+                )
+        dynamic_parts += 1
+    if log:
+        print(f"[setup] verified static assembly board; "
+              f"dynamic task components={dynamic_parts}")
 
 
 def _snapshot_scene_part_xforms():
@@ -307,6 +420,8 @@ def open_scene_and_world():
         )
     open_stage(usd_path=scene_path)
     print(f"[setup] opened scene: {scene_path}")
+    stage = omni.usd.get_context().get_stage()
+    enforce_assembly_board_static(stage)
     # Verify each scene-resident part's mesh world XY against
     # part_init_poses.json. Parts in _AUTOFIX_PARTS (gears) get a
     # delta-based root-translate shift on mismatch — translation commutes
@@ -333,6 +448,7 @@ def _finalize_pick_place_setup(
     flag_robot_state_update: bool = False,
     enable_camera_viewports: bool = True,
     enable_camera_output: bool = True,
+    camera_resolution=(640, 480),
     base_translation_offset=None,
 ):
     """Reset the world, build per-arm PickPlaceControllers, cameras, viewports.
@@ -342,6 +458,8 @@ def _finalize_pick_place_setup(
     """
     # ---- World reset: registers articulations & rigid bodies.
     my_world.reset()
+    verify_assembly_board_static(
+        omni.usd.get_context().get_stage(), check_pose=True)
 
 # ---- Per-arm controllers on the shared /vega_1u articulation.
     task_params = my_world.get_task(task_name).get_params()
@@ -457,22 +575,23 @@ def _finalize_pick_place_setup(
     if enable_camera_output:
         # Wrap each USD camera as an Isaac Sim Camera sensor. Resolution
         # is the sensor buffer size (not authored on the USD prim).
+        sensor_resolution = tuple(int(v) for v in camera_resolution)
         head_depth_camera = Camera(
             prim_path=HEAD_DEPTH_CAMERA_PATH,
             name="HeadDepthCam",
-            resolution=(640, 480),
+            resolution=sensor_resolution,
             frequency=30.0,
         )
         L_wrist_camera = Camera(
             prim_path=L_WRIST_CAMERA_PATH,
             name="LWristCam",
-            resolution=(640, 480),
+            resolution=sensor_resolution,
             frequency=30.0,
         )
         R_wrist_camera = Camera(
             prim_path=R_WRIST_CAMERA_PATH,
             name="RWristCam",
-            resolution=(640, 480),
+            resolution=sensor_resolution,
             frequency=30.0,
         )
         for cam in (head_depth_camera, L_wrist_camera, R_wrist_camera):
@@ -540,6 +659,7 @@ def setup_pick_place_sim(
     flag_robot_state_update: bool = False,
     enable_camera_viewports: bool = True,
     enable_camera_output: bool = True,
+    camera_resolution=(640, 480),
     base_translation_offset=None,
 ):
     """Build the 2-part bimanual pick-and-place world from the pre-built scene.
@@ -578,5 +698,6 @@ def setup_pick_place_sim(
         flag_robot_state_update=flag_robot_state_update,
         enable_camera_viewports=enable_camera_viewports,
         enable_camera_output=enable_camera_output,
+        camera_resolution=camera_resolution,
         base_translation_offset=base_translation_offset,
     )

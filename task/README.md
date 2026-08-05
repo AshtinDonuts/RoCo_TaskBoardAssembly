@@ -112,6 +112,15 @@ executed unless the runner's R-action merge path is extended.
 `task/`. All 9 parts are pre-resident in it, so `import_missing_parts`
 spawns nothing.
 
+**Assembly-board fixation** — `FIXATE_ASSEMBLY_BOARD = True` enforces
+`ASSEMBLY_BOARD_PRIM_PATH = "/World/task_board"` as true static collision
+geometry before physics starts. The task uses `SingleXFormPrim` observation
+anchors; using `SingleRigidPrim` here would apply `RigidBodyAPI` and allow arm
+contact to knock the board away. Startup also verifies that the board stayed
+static through `World.reset()` and that scene-resident task components remain
+enabled, non-kinematic rigid bodies. Override with
+`--no-fixate-assembly-board` only for physics-authoring diagnostics.
+
 **Cameras** — three cameras are baked into the robot USD (head + L/R
 wrist). Two flags here just toggle viewports and sensor binding:
 

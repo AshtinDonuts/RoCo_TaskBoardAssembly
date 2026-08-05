@@ -39,10 +39,27 @@ def _env_float(name):
 
 
 _HEADLESS = _env_flag("ISAACSIM_HEADLESS")
+_RENDER_QUALITY = os.getenv("ISAACSIM_RENDER_QUALITY", "default").strip().lower()
+if _RENDER_QUALITY not in {"default", "low"}:
+    raise ValueError(
+        "ISAACSIM_RENDER_QUALITY must be 'default' or 'low', got "
+        f"{_RENDER_QUALITY!r}"
+    )
 _SIM_CONFIG = {
     "headless": _HEADLESS,
     "multi_gpu": _env_flag("ISAACSIM_MULTI_GPU", default=False),
 }
+if _RENDER_QUALITY == "low":
+    # Keep ray-traced lighting, but remove AA and reduce the interactive
+    # viewport. Policy sensor resolution is reduced separately below.
+    _SIM_CONFIG.update({
+        "renderer": "RaytracedLighting",
+        "anti_aliasing": 0,
+        "width": 960,
+        "height": 540,
+        "window_width": 1100,
+        "window_height": 700,
+    })
 _ACTIVE_GPU = _env_int("ISAACSIM_ACTIVE_GPU")
 _PHYSICS_GPU = _env_int("ISAACSIM_PHYSICS_GPU")
 if _ACTIVE_GPU is not None:
@@ -60,6 +77,7 @@ import numpy as np
 import param_config as pc
 from controllers.vega_1u_setup import (
     restore_scene_part_xforms, setup_pick_place_sim,
+    verify_assembly_board_static,
 )
 from controllers.part_from_usd import DynamicPart
 from isaacsim.core.api.materials.physics_material import PhysicsMaterial
@@ -691,6 +709,13 @@ def _parse_args():
         help="Output video frame rate. Frames are sampled from sim time.",
     )
     parser.add_argument(
+        "--fixate-assembly-board",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enforce /World/task_board as static collision geometry. "
+             "Defaults to pc.FIXATE_ASSEMBLY_BOARD.",
+    )
+    parser.add_argument(
         "--max-steps",
         type=int,
         default=_env_int("ROCO_EVAL_MAX_STEPS"),
@@ -747,14 +772,25 @@ def _load_policy_class(dotted_path: str):
 
 def main():
     args = _parse_args()
+    if args.fixate_assembly_board is not None:
+        pc.FIXATE_ASSEMBLY_BOARD = bool(args.fixate_assembly_board)
     video_recorder = FfmpegVideoRecorder(
         args.record_video,
         fps=args.record_video_fps,
         camera=args.record_video_camera,
     )
     record_period_s = 1.0 / float(max(1, args.record_video_fps))
-    next_record_time_s = 0.0
+    next_record_time_s = None
     camera_output_enabled = bool(pc.enable_camera_output or video_recorder.enabled)
+    camera_viewports_enabled = bool(
+        pc.enable_camera_viewports and _RENDER_QUALITY != "low"
+    )
+    camera_resolution = (320, 240) if _RENDER_QUALITY == "low" else (640, 480)
+    print(
+        f"[setup] render quality={_RENDER_QUALITY}; "
+        f"sensor_resolution={camera_resolution[0]}x{camera_resolution[1]}; "
+        f"camera_viewports={camera_viewports_enabled}"
+    )
     exit_on_complete = bool(_HEADLESS or video_recorder.enabled)
     run_complete = False
     finalized = False
@@ -777,8 +813,9 @@ def main():
         R_target_position=_DUMMY_TARGET,
         joint_opened_position=np.array([pc.PART_DEFAULTS["gripper_open"]]),
         joint_closed_position=np.array([pc.PART_DEFAULTS["gripper_close"]]),
-        enable_camera_viewports=pc.enable_camera_viewports,
+        enable_camera_viewports=camera_viewports_enabled,
         enable_camera_output=camera_output_enabled,
+        camera_resolution=camera_resolution,
     )
 
     # Spawn any pc.part_order entries that aren't already in the loaded scene.
@@ -960,6 +997,11 @@ def main():
         if finalized:
             return
         finalized = True
+        # A static board cannot move under PhysX contact.  Recheck both the
+        # physics schema and its world transform at the end of every bounded
+        # or complete rollout so regressions fail loudly instead of producing
+        # misleading placement scores.
+        verify_assembly_board_static(stage, check_pose=True, log=True)
         metadata = {
             "completion_reason": reason,
             "current_part": current_part,
@@ -1048,7 +1090,7 @@ def main():
         finalized = False
         total_task_steps = 0
         completed_parts = 0
-        next_record_time_s = 0.0
+        next_record_time_s = None
         # Remove any FixedJoints that snap_attach authored on previous
         # iterations. Joints live in USD and persist across my_world.stop()
         # / play(), so without cleanup the bolt (and any other snap part)
@@ -1128,9 +1170,13 @@ def main():
             obs = _build_observation()
             sim_time_s = my_world.current_time_step_index * env_info.physics_dt
             if video_recorder.enabled:
-                if sim_time_s + 1e-9 >= next_record_time_s:
+                if next_record_time_s is None:
                     video_recorder.write(obs.rgb.get(video_recorder.camera))
-                    next_record_time_s += record_period_s
+                    next_record_time_s = sim_time_s + record_period_s
+                elif sim_time_s + 1e-9 >= next_record_time_s:
+                    video_recorder.write(obs.rgb.get(video_recorder.camera))
+                    while next_record_time_s <= sim_time_s + 1e-9:
+                        next_record_time_s += record_period_s
 
             total_task_steps += 1
             if args.max_steps and total_task_steps >= args.max_steps:

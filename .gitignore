@@ -5,6 +5,7 @@ __pycache__/
 
 # uv / virtualenv
 .venv/
+.venv_lerobot/
 
 # type checker
 .ty/
@@ -24,3 +25,6 @@ task/demo.mp4
 
 # ignore Sharpa North files
 robot/sharpa_north/
+
+# ignore any cache
+*cache/

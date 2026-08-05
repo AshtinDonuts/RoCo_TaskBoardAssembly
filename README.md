@@ -314,6 +314,15 @@ uv run python task/run_pick_place.py --results-json out/results.json  # dump per
 uv run python task/run_pick_place.py --record-video artifacts/head.mp4 # record a rollout
 ```
 
+For a faster rendered diffusion evaluation, set `DP_RENDER_QUALITY=low`.
+This uses native 320x240 policy camera sensors, disables the three auxiliary
+camera viewports, and disables antialiasing. Physics and the 10 Hz policy
+cadence are unchanged.
+
+Diffusion evaluations record at 10 FPS by default, matching the world render
+cadence and the policy dataset cadence. Override with `DP_EVAL_FPS` only when
+the world rendering cadence is changed as well.
+
 If you instead have a standalone Omniverse-launcher Isaac Sim, its
 bundled interpreter still works:
 `${ISAAC_SIM}/python.sh task/run_pick_place.py`.
@@ -331,6 +340,10 @@ CLI flags:
 - `--record-video <path>` — writes an MP4 from a task camera. Use
   `--record-video-camera {head,L_wrist,R_wrist}` and
   `--record-video-fps <fps>` to choose the stream and output FPS.
+- `--fixate-assembly-board` / `--no-fixate-assembly-board` — overrides
+  `pc.FIXATE_ASSEMBLY_BOARD`. Fixation is enabled by default and enforces
+  `/World/task_board` as static collision geometry while leaving every loose
+  component under `/World/parts` dynamic.
 - `--max-steps <n>`, `--max-sim-seconds <seconds>`, `--max-parts <n>` —
   bounded eval/smoke-test exits. The runner still writes results JSON
   and closes any video recorder before exiting.

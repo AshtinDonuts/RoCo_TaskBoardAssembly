@@ -68,7 +68,15 @@ PART_INIT_POSES = _load_part_init_poses()
 # those parts is pinned in PART_CONFIG to the mesh world xy read from this
 # same file.
 SCENE_USD = "../scene_init.usd"
-L_object_prim_path = "/World/task_board/task_board_color"   # static
+# The assembly board is collision geometry, never a pickable rigid body.
+# Keep this enabled for evaluation: it removes any accidentally-authored
+# RigidBodyAPI from the board subtree before physics starts and verifies that
+# the task wrappers did not add it back during World.reset().  Loose task
+# components live under /World/parts and are deliberately outside this scope.
+ASSEMBLY_BOARD_PRIM_PATH = "/World/task_board"
+FIXATE_ASSEMBLY_BOARD = True
+
+L_object_prim_path = "/World/task_board/task_board_color"   # static observation anchor
 R_object_prim_path = "/World/task_board/task_board_color"
 
 # Optional path to dump a flattened USD snapshot of the stage when the

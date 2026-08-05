@@ -1,36 +1,19 @@
-"""Worked example: deploy a trained LeRobot Diffusion Policy in the harness.
+"""Deploy a trained LeRobot Diffusion Policy in the RoCo Isaac Sim harness.
 
-This is a REFERENCE you adapt to your own policy — it shows the integration
-pattern, not a plug-and-play checkpoint. The `Policy` interface makes no
-assumption about how `act` produces its action, so a trained network drives
-the same `L.forward(pos, quat, grip)` call the scripted baseline uses.
+The model runs in a separate LeRobot venv (`dp_server.py`) and this adapter
+talks to it over a length-prefixed pickle pipe.
 
-Two things make a modern learned policy awkward to run in-process, and this
-example works around both:
+Action convention (HF dataset revision dc03b003...):
+  14-D = left[xyz + intrinsic XYZ Euler + gripper] + right[...]
+  Euler angles are unwrapped over time (may exceed ±π). Decode with
+  ``Rotation.from_euler("XYZ", ...)`` — not rotation-vector conversion.
 
-  * A torch / lerobot stack usually can't share Isaac Sim's interpreter (numpy
-    1.26 pin, Isaac's own torch build). So the model lives in a SEPARATE
-    process (its own venv) and this adapter talks to it over a stdin/stdout
-    pickle pipe (see `dp_server.py`); lerobot is never imported here.
-  * Each step it rebuilds the training-time `observation.state` + 3 RGB images,
-    gets a 14-D action back, takes the left-arm slice
-    [xyz + rotvec + gripper], converts rotvec->quat, and drives the L-arm IK.
-
-Self-contained by design: it depends only on the public `policy_api` surface
-(`EnvInfo`, `Observation`) plus `param_config`, so it drops into the devkit
-with no other new modules.
-
-NOTE ON THE RIGHT ARM: the public `EnvInfo` exposes `L_controller` but not the
-right-arm end effector, so the 7 state dims for the right EE pose (Rp, Rq) are
-zeroed here unless the harness happens to provide an `R_controller` attribute
-(picked up opportunistically via getattr). A policy trained on the full 44-D
-state that includes the right EE pose should reconstruct those dims from the
-right-arm joints (forward kinematics) — swap `_build_state` accordingly.
-
-Env:
-  DP_CKPT         path to the checkpoint pretrained_model dir (required)
-  DP_SERVER_PY    python for the model's venv (default /lrv/venv/bin/python)
-Run the harness with camera output enabled so `Observation.rgb` is populated.
+Control cadence:
+  Dataset / training are 10 Hz. The harness runs physics at 200 Hz, while one
+  rendered outer-loop iteration can advance multiple physics ticks. The
+  adapter therefore schedules queries from ``obs.step_idx`` rather than by
+  counting calls to ``act``. It consumes one LeRobot ``select_action`` step
+  every 20 physics ticks and holds the absolute IK target between updates.
 """
 from __future__ import annotations
 
@@ -50,6 +33,21 @@ _TASK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # --- Constants inlined so this file has no extra module dependencies. ---
 GRIPPER_OPEN_LIMIT = 0.6649704       # L_gripper joint value at fully open
 _IMG_H, _IMG_W = 240, 320            # RGB size the model was trained at
+PHYSICS_HZ = 200
+CONTROL_HZ = 10
+CONTROL_PERIOD_TICKS = PHYSICS_HZ // CONTROL_HZ  # 20
+
+# Published HF observation.state layout (44-D), documented explicitly.
+STATE_SLICES = {
+    "left_ee_pose": slice(0, 7),       # xyz + qwxyz
+    "right_ee_pose": slice(7, 14),
+    "left_joint_pos": slice(14, 21),
+    "right_joint_pos": slice(21, 28),
+    "left_joint_vel": slice(28, 35),
+    "right_joint_vel": slice(35, 42),
+    "left_gripper": slice(42, 43),
+    "right_gripper": slice(43, 44),
+}
 
 
 def _resize_rgb(img):
@@ -74,11 +72,42 @@ def _resize_rgb(img):
         return out[:_IMG_H, :_IMG_W].astype(np.uint8)
 
 
-def _rotvec_to_quat_wxyz(rx, ry, rz):
-    """Decode the dataset-style rotation-vector orientation output."""
+def euler_xyz_to_quat_wxyz(rx, ry, rz):
+    """Decode unwrapped intrinsic XYZ Euler radians -> quaternion wxyz.
+
+    Values may exceed ±π (dataset applies ``np.unwrap``). SciPy's
+    ``from_euler('XYZ', ...)`` accepts the unwrapped continuous target
+    directly; do not wrap before conversion.
+    """
     from scipy.spatial.transform import Rotation
-    x, y, z, w = Rotation.from_rotvec([rx, ry, rz]).as_quat()
+    x, y, z, w = Rotation.from_euler("XYZ", [rx, ry, rz]).as_quat()
     return np.array([w, x, y, z], dtype=np.float64)
+
+
+def left_action_to_ik_target(action_14: np.ndarray):
+    """Map 14-D policy action -> (pos_xyz, quat_wxyz, gripper_joint).
+
+    Only gripper ratios are clipped to [0, 1]. Position and unwrapped Euler
+    orientation are preserved through model postprocessing as physical units.
+    """
+    a = np.asarray(action_14, dtype=np.float64).reshape(-1)
+    if a.shape[0] != 14:
+        raise ValueError(f"expected 14-D action, got shape {a.shape}")
+    if not np.isfinite(a).all():
+        raise ValueError(f"non-finite action: {a}")
+    pos = a[:3].copy()
+    quat = euler_xyz_to_quat_wxyz(a[3], a[4], a[5])
+    grip = float(np.clip(a[6], 0.0, 1.0)) * GRIPPER_OPEN_LIMIT
+    return pos, quat, grip
+
+
+def camera_payload_from_obs(obs: Observation) -> dict:
+    """Map harness RGB keys to the three HF camera streams (240x320)."""
+    return {
+        "head": _resize_rgb(obs.rgb.get("head")),
+        "left": _resize_rgb(obs.rgb.get("L_wrist")),
+        "right": _resize_rgb(obs.rgb.get("R_wrist")),
+    }
 
 
 class DiffusionLeRobotPolicy(Policy):
@@ -94,10 +123,19 @@ class DiffusionLeRobotPolicy(Policy):
         self._Lg = dof.index(env_info.L_gripper_joint)
         self._Rg = dof.index("R_gripper_joint") if "R_gripper_joint" in dof else None
 
+        # Derive control period from harness physics_dt when available.
+        physics_dt = float(getattr(env_info, "physics_dt", 1.0 / PHYSICS_HZ))
+        period = max(1, int(round((1.0 / CONTROL_HZ) / physics_dt)))
+        self._control_period = period
+
         ckpt = os.environ.get("DP_CKPT")
         if not ckpt:
             raise ValueError("set DP_CKPT to the checkpoint pretrained_model dir")
-        server_py = os.environ.get("DP_SERVER_PY", "/lrv/venv/bin/python")
+        server_py = os.environ.get("DP_SERVER_PY")
+        if not server_py:
+            default_venv = os.path.join(
+                os.path.dirname(_TASK_DIR), ".venv_lerobot", "bin", "python")
+            server_py = default_venv if os.path.isfile(default_venv) else sys.executable
         # CLEAN env: the harness runs in Isaac's interpreter which exports
         # PYTHONPATH / LD_LIBRARY_PATH / CARB_* pointing at Isaac packages. If
         # the model's venv subprocess inherits those it loads Isaac's torch /
@@ -118,6 +156,8 @@ class DiffusionLeRobotPolicy(Policy):
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err,
             env=env, cwd=_TASK_DIR)
         print(f"[dp] spawned inference server (ckpt={ckpt})", flush=True)
+        print(f"[dp] control period={self._control_period} ticks "
+              f"({CONTROL_HZ} Hz @ physics_dt={physics_dt})", flush=True)
         # No handshake; give it a moment to load and check it's alive.
         import time
         time.sleep(2)
@@ -126,6 +166,8 @@ class DiffusionLeRobotPolicy(Policy):
                 f"dp_server died on startup (exit {self._proc.returncode}); "
                 f"see {_log_path}")
         self._last_action = None
+        self._hold_target = None  # (pos, quat, grip)
+        self._last_query_step = None
 
     # ---- length-prefixed pickle pipe ----
     def _send(self, obj):
@@ -147,6 +189,9 @@ class DiffusionLeRobotPolicy(Policy):
     def reset(self, obs: Observation, target: PartTarget) -> None:
         self._send({"cmd": "reset"})
         self._recv()
+        self._last_query_step = None
+        self._hold_target = None
+        self._last_action = None
 
     def _build_state(self, obs: Observation) -> np.ndarray:
         """Rebuild the 44-D training-time observation.state from `obs`."""
@@ -158,7 +203,7 @@ class DiffusionLeRobotPolicy(Policy):
             Lp, Lq = self.L.end_effector.get_world_pose()
         else:
             Lp, Lq = obs.ee_pose_L
-        # R EE pose: not in the public EnvInfo -> zero unless R_controller given.
+        # R EE pose: not in the public EnvInfo -> identity unless R_controller given.
         if self.R is not None:
             Rp, Rq = self.R.end_effector.get_world_pose()
         else:
@@ -172,20 +217,35 @@ class DiffusionLeRobotPolicy(Policy):
             [ratio(q[self._Rg]) if self._Rg is not None else 0.0],
         ]).astype(np.float32)
 
-    def act(self, obs: Observation):
+    def _query_policy(self, obs: Observation) -> np.ndarray:
         state = self._build_state(obs)
+        cams = camera_payload_from_obs(obs)
         self._send({
             "state": state,
-            "head": _resize_rgb(obs.rgb.get("head")),
-            "left": _resize_rgb(obs.rgb.get("L_wrist")),
-            "right": _resize_rgb(obs.rgb.get("R_wrist")),
+            "head": cams["head"],
+            "left": cams["left"],
+            "right": cams["right"],
         })
         a = np.asarray(self._recv()["action"], np.float64)
         self._last_action = a
-        # left arm slice: [x, y, z, rx, ry, rz, gripper_ratio]
-        pos = a[:3]
-        quat = _rotvec_to_quat_wxyz(a[3], a[4], a[5])
-        grip = float(np.clip(a[6], 0, 1)) * GRIPPER_OPEN_LIMIT
+        return a
+
+    def act(self, obs: Observation):
+        # Request one action per training-time interval. A rendered World.step
+        # currently advances 20 physics ticks, so counting act() calls here
+        # would accidentally reduce a 10 Hz policy to 0.5 Hz.
+        step_idx = int(obs.step_idx)
+        query_due = (
+            self._hold_target is None
+            or self._last_query_step is None
+            or step_idx - self._last_query_step >= self._control_period
+            or step_idx < self._last_query_step
+        )
+        if query_due:
+            a = self._query_policy(obs)
+            self._hold_target = left_action_to_ik_target(a)
+            self._last_query_step = step_idx
+        pos, quat, grip = self._hold_target
         return self.L.forward(pos, quat, grip)
 
     def is_done(self, obs: Observation) -> bool:
