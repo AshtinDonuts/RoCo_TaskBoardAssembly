@@ -1,0 +1,284 @@
+[train] Hugging Face model access OK
+./scripts/train_pi05.sh: line 189: git: command not found
+[train] strategy=full mode=smoke steps=1
+[train] batch_per_device=1 processes=1 output=/scratchdata1/users/a1865590/RoCoIROS26/RoCo_TaskBoardAssembly/outputs/pi05_verification/full_smoke_20260805_183447
+WARNING:lerobot.configs.policies:Device 'mps' is not available. Switching to 'cuda'.
+WARNING:lerobot.configs.policies:Device 'mps' is not available. Switching to 'cuda'.
+INFO 2026-08-05 18:37:51 ot_train.py:228 {'batch_size': 1,
+ 'checkpoint_path': None,
+ 'cudnn_deterministic': False,
+ 'dataset': {'depth_output_unit': 'mm',
+             'episodes': [0, 1, 2],
+             'eval_split': 0.0,
+             'image_transforms': {'enable': False,
+                                  'max_num_transforms': 3,
+                                  'random_order': False,
+                                  'tfs': {'affine': {'kwargs': {'degrees': [-5.0,
+                                                                            5.0],
+                                                                'translate': [0.05,
+                                                                              0.05]},
+                                                     'type': 'RandomAffine',
+                                                     'weight': 1.0},
+                                          'brightness': {'kwargs': {'brightness': [0.8,
+                                                                                   1.2]},
+                                                         'type': 'ColorJitter',
+                                                         'weight': 1.0},
+                                          'contrast': {'kwargs': {'contrast': [0.8,
+                                                                               1.2]},
+                                                       'type': 'ColorJitter',
+                                                       'weight': 1.0},
+                                          'hue': {'kwargs': {'hue': [-0.05,
+                                                                     0.05]},
+                                                  'type': 'ColorJitter',
+                                                  'weight': 1.0},
+                                          'saturation': {'kwargs': {'saturation': [0.5,
+                                                                                   1.5]},
+                                                         'type': 'ColorJitter',
+                                                         'weight': 1.0},
+                                          'sharpness': {'kwargs': {'sharpness': [0.5,
+                                                                                 1.5]},
+                                                        'type': 'SharpnessJitter',
+                                                        'weight': 1.0}}},
+             'repo_id': 'rocochallenge2025/rocochallenge2026_Industrial_Assembly',
+             'return_uint8': False,
+             'revision': 'dc03b003f94d184b2b20465ed986456ee1bf2a3c',
+             'root': None,
+             'streaming': False,
+             'use_imagenet_stats': False,
+             'video_backend': 'pyav'},
+ 'env': None,
+ 'env_eval_freq': 0,
+ 'eval': {'batch_size': 50,
+          'n_episodes': 50,
+          'recording': False,
+          'recording_private': False,
+          'recording_repo_id': None,
+          'use_async_envs': True},
+ 'eval_steps': 0,
+ 'job': {'detach': False,
+         'image': 'huggingface/lerobot-gpu:latest',
+         'tags': [],
+         'target': None,
+         'timeout': '2d'},
+ 'job_name': 'roco_pi05_full_smoke',
+ 'log_freq': 1,
+ 'max_eval_samples': 0,
+ 'num_workers': 0,
+ 'optimizer': {'betas': [0.9, 0.95],
+               'eps': 1e-08,
+               'grad_clip_norm': 1.0,
+               'lr': 2.5e-05,
+               'type': 'adamw',
+               'weight_decay': 0.01},
+ 'output_dir': '/scratchdata1/users/a1865590/RoCoIROS26/RoCo_TaskBoardAssembly/outputs/pi05_verification/full_smoke_20260805_183447',
+ 'peft': None,
+ 'persistent_workers': True,
+ 'policy': {'action_expert_variant': 'gemma_300m',
+            'action_feature_names': None,
+            'chunk_size': 50,
+            'compile_mode': 'max-autotune',
+            'compile_model': False,
+            'device': 'cuda',
+            'dtype': 'bfloat16',
+            'empty_cameras': 0,
+            'freeze_vision_encoder': False,
+            'gradient_checkpointing': True,
+            'image_resolution': [224, 224],
+            'input_features': None,
+            'license': None,
+            'max_action_dim': 32,
+            'max_period': 4.0,
+            'max_state_dim': 44,
+            'min_period': 0.004,
+            'n_action_steps': 10,
+            'n_obs_steps': 1,
+            'normalization_mapping': {'ACTION': <NormalizationMode.QUANTILES: 'QUANTILES'>,
+                                      'STATE': <NormalizationMode.QUANTILES: 'QUANTILES'>,
+                                      'VISUAL': <NormalizationMode.IDENTITY: 'IDENTITY'>},
+            'num_inference_steps': 10,
+            'optimizer_betas': [0.9, 0.95],
+            'optimizer_eps': 1e-08,
+            'optimizer_grad_clip_norm': 1.0,
+            'optimizer_lr': 2.5e-05,
+            'optimizer_weight_decay': 0.01,
+            'output_features': None,
+            'paligemma_variant': 'gemma_2b',
+            'pretrained_path': 'lerobot/pi05_base',
+            'pretrained_revision': None,
+            'private': None,
+            'push_to_hub': False,
+            'relative_exclude_joints': ['gripper'],
+            'repo_id': None,
+            'rtc_config': None,
+            'scheduler_decay_lr': 2.5e-06,
+            'scheduler_decay_steps': 1,
+            'scheduler_warmup_steps': 1,
+            'tags': None,
+            'time_sampling_beta_alpha': 1.5,
+            'time_sampling_beta_beta': 1.0,
+            'time_sampling_offset': 0.001,
+            'time_sampling_scale': 0.999,
+            'tokenizer_max_length': 200,
+            'train_expert_only': False,
+            'type': 'pi05',
+            'use_amp': False,
+            'use_peft': False,
+            'use_relative_actions': False},
+ 'prefetch_factor': 4,
+ 'rename_map': {},
+ 'resume': False,
+ 'reward_model': None,
+ 'sample_weighting': None,
+ 'save_checkpoint': True,
+ 'save_checkpoint_to_hub': False,
+ 'save_freq': 1,
+ 'scheduler': {'decay_lr': 2.5e-06,
+               'num_decay_steps': 1,
+               'num_warmup_steps': 1,
+               'peak_lr': 2.5e-05,
+               'type': 'cosine_decay_with_warmup'},
+ 'seed': 1000,
+ 'steps': 1,
+ 'tolerance_s': 0.0001,
+ 'use_policy_training_preset': True,
+ 'wandb': {'add_tags': True,
+           'disable_artifact': False,
+           'enable': False,
+           'entity': None,
+           'mode': None,
+           'notes': None,
+           'project': 'lerobot',
+           'run_id': None}}
+INFO 2026-08-05 18:37:51 ot_train.py:236 Logs will be saved locally.
+INFO 2026-08-05 18:37:51 ot_train.py:254 Creating dataset
+INFO 2026-08-05 18:55:21 ot_train.py:288 Creating policy
+INFO 2026-08-05 18:57:23 ing_pi05.py:611 Enabled gradient checkpointing for PI05Pytorch model
+WARNING 2026-08-05 18:58:12 ng_pi05.py:1109 Vision embedding key might need handling: paligemma_with_expert.paligemma.model.vision_tower.vision_model.embeddings.patch_embedding.bias
+WARNING 2026-08-05 18:58:12 ng_pi05.py:1109 Vision embedding key might need handling: paligemma_with_expert.paligemma.model.vision_tower.vision_model.embeddings.patch_embedding.weight
+The PI05 model is a direct port of the OpenPI implementation. 
+This implementation follows the original OpenPI structure for compatibility. 
+Original implementation: https://github.com/Physical-Intelligence/openpi
+Loading model from: lerobot/pi05_base
+✓ Loaded state dict from model.safetensors
+Remapped 812 state dict keys
+All keys loaded successfully!
+Traceback (most recent call last):
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 250, in handle_request
+    resp = self._pool.handle_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpcore/_sync/connection_pool.py", line 256, in handle_request
+    raise exc from None
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpcore/_sync/connection_pool.py", line 236, in handle_request
+    response = connection.handle_request(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpcore/_sync/connection.py", line 101, in handle_request
+    raise exc
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpcore/_sync/connection.py", line 78, in handle_request
+    stream = self._connect(request)
+             ^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpcore/_sync/connection.py", line 124, in _connect
+    stream = self._network_backend.connect_tcp(**kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpcore/_backends/sync.py", line 207, in connect_tcp
+    with map_exceptions(exc_map):
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/a1865590/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpcore/_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ConnectError: [Errno 101] Network is unreachable
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/src/lerobot/processor/pipeline.py", line 1126, in _instantiate_step
+    return step_class(**merged_cfg)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<string>", line 10, in __init__
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/src/lerobot/processor/tokenizer_processor.py", line 111, in __post_init__
+    self.input_tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/transformers/models/auto/tokenization_auto.py", line 792, in from_pretrained
+    return tokenizer_class.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/transformers/tokenization_utils_base.py", line 1729, in from_pretrained
+    return cls._from_pretrained(
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/transformers/tokenization_utils_base.py", line 1918, in _from_pretrained
+    tokenizer = cls(*init_inputs, **init_kwargs)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/transformers/models/gemma/tokenization_gemma.py", line 99, in __init__
+    super().__init__(
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/transformers/tokenization_utils_tokenizers.py", line 477, in __init__
+    self._tokenizer = self._patch_mistral_regex(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/transformers/tokenization_utils_tokenizers.py", line 1297, in _patch_mistral_regex
+    is_local or (not is_local and is_base_mistral(pretrained_model_name_or_path))
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/transformers/tokenization_utils_tokenizers.py", line 1287, in is_base_mistral
+    model = model_info(model_id)
+            ^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py", line 88, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/huggingface_hub/hf_api.py", line 3289, in model_info
+    r = get_session().get(path, headers=headers, timeout=timeout, params=params)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1053, in get
+    return self.request(
+           ^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpx/_client.py", line 825, in request
+    return self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpx/_client.py", line 914, in send
+    response = self._send_handling_auth(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpx/_client.py", line 942, in _send_handling_auth
+    response = self._send_handling_redirects(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpx/_client.py", line 979, in _send_handling_redirects
+    response = self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1014, in _send_single_request
+    response = transport.handle_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 249, in handle_request
+    with map_httpcore_exceptions():
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/a1865590/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ConnectError: [Errno 101] Network is unreachable
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/hpcfs/users/a1865590/RoCoIROS26/lerobot/.venv/bin/lerobot-train", line 10, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/src/lerobot/scripts/lerobot_train.py", line 769, in main
+    train()
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/src/lerobot/configs/parser.py", line 320, in wrapper_inner
+    response = fn(cfg, *args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/src/lerobot/scripts/lerobot_train.py", line 353, in train
+    preprocessor, postprocessor = make_pre_post_processors(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/src/lerobot/policies/factory.py", line 305, in make_pre_post_processors
+    preprocessor = PolicyProcessorPipeline.from_pretrained(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/src/lerobot/processor/pipeline.py", line 733, in from_pretrained
+    steps, validated_overrides = cls._build_steps_with_overrides(
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/src/lerobot/processor/pipeline.py", line 975, in _build_steps_with_overrides
+    steps, remaining_override_keys = cls._build_steps_from_config(loaded_config, overrides)
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/src/lerobot/processor/pipeline.py", line 1002, in _build_steps_from_config
+    processor_step = cls._instantiate_step(step_entry, step_class, step_key, overrides)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratchdata1/users/a1865590/RoCoIROS26/lerobot/src/lerobot/processor/pipeline.py", line 1129, in _instantiate_step
+    raise ValueError(
+ValueError: Failed to instantiate processor step 'tokenizer_processor' with config: {'max_length': 200, 'task_key': 'task', 'padding_side': 'right', 'padding': 'max_length', 'truncation': True, 'tokenizer_name': 'google/paligemma-3b-pt-224'}. Error: [Errno 101] Network is unreachable
