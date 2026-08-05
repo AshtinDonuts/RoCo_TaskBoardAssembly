@@ -93,6 +93,9 @@ The Isaac-side adapter rebuilds the training observation from
 length-prefixed pickle pipe, and converts the returned action into an
 Isaac `ArticulationAction`. The model server must run under the model
 environment's Python, selected with `DP_SERVER_PY` or `PI05_SERVER_PY`.
+The pinned dataset action orientation is unwrapped intrinsic XYZ Euler.
+Both learned adapters schedule commands at 10 Hz from the physics step index;
+the pi0.5 server accepts standalone and LoRA checkpoints.
 
 For pi0.5, prefer the wrapper from the repo root:
 
@@ -101,6 +104,9 @@ LEROBOT_ROOT=/path/to/lerobot \
 PI05_EVAL_MAX_STEPS=500 \
 ./scripts/eval_pi05_roco.sh /path/to/checkpoint/pretrained_model
 ```
+
+Training and SLURM recipes are in
+[`docs/pi05_baseline_quickstart.md`](../docs/pi05_baseline_quickstart.md).
 
 The current runner holds the R arm at its initial pose, so learned
 policies that output 14-D bimanual actions only have their left 7-D slice

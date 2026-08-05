@@ -11,16 +11,25 @@ inference and sends observations from the RoCo task runner to it.
   eval script expects it at `../lerobot_roco_pi05` relative to this repo.
 - Hugging Face auth available through `HF_HOME/token` or `HF_TOKEN`.
 - A pi0.5 checkpoint directory containing `config.json` and
-  `model.safetensors`, for example a LeRobot `pretrained_model` checkpoint.
+  `model.safetensors`, or a LeRobot LoRA `pretrained_model` directory containing
+  `adapter_config.json` and its adapter weights.
 
 The adapter expects the RoCo dataset action layout:
 
 ```text
-left xyz + left rotvec + left gripper + right xyz + right rotvec + right gripper
+left xyz + left intrinsic-XYZ Euler + left gripper +
+right xyz + right intrinsic-XYZ Euler + right gripper
 ```
+
+Euler angles in the pinned dataset are unwrapped and can exceed ±π. The
+adapter defaults to this convention. Set `PI05_ACTION_ROTATION=rotvec` only for
+an older checkpoint that was explicitly trained on rotation-vector actions.
 
 The current task runner still holds the R arm fixed, so only the left 7-D
 slice is executed during rollout.
+
+For environment creation and full/LoRA training, see
+[`pi05_baseline_quickstart.md`](pi05_baseline_quickstart.md).
 
 ## Smoke Eval
 
@@ -71,9 +80,15 @@ PI05_EVAL_RESULTS=artifacts/pi05_eval_results.json \
 - `ISAACSIM_ACTIVE_GPU`, `ISAACSIM_PHYSICS_GPU`: GPUs used by Isaac Sim.
 - `PI05_EVAL_CAMERA`: one of `head`, `L_wrist`, or `R_wrist`.
 - `PI05_EVAL_FPS`: output video FPS.
+- `PI05_EVAL_DIR`: timestamped output directory override.
+- `PI05_RENDER_QUALITY`: `default` or `low`.
+- `PI05_ACTION_ROTATION`: `euler_xyz` (default) or legacy `rotvec`.
 - `PI05_EVAL_MAX_SIM_SECONDS`: stop after this many simulated seconds.
 - `PI05_EVAL_MAX_STEPS`: stop after this many task-control steps.
 - `PI05_EVAL_MAX_PARTS`: stop after this many completed parts.
+
+Videos default to 10 FPS, matching the dataset and policy cadence. The adapter
+also schedules model actions at 10 Hz from the physics step index.
 
 Isaac Sim may print `Failed to create change watch ... errno=28` when the
 system inotify watch limit is exhausted. In headless smoke eval this is noisy

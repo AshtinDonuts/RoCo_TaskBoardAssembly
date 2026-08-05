@@ -26,6 +26,8 @@ CAMERAS = (
     "observation.images.right_hand",
 )
 IMG_HW = (240, 320)
+TASK_TEXT = "assemble parts onto the task board"
+QUANTILE_FIELDS = ("q01", "q10", "q50", "q90", "q99")
 
 
 def _finite_stats(stats: dict, key: str) -> None:
@@ -45,6 +47,11 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=None, help="Local dataset root override")
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--json-out", type=Path, default=None)
+    parser.add_argument(
+        "--require-pi05",
+        action="store_true",
+        help="Also enforce the language and normalization contract required by pi0.5",
+    )
     args = parser.parse_args()
 
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -86,6 +93,19 @@ def main() -> int:
     assert state.isfinite().all().item()
     assert action.isfinite().all().item()
 
+    task = sample.get("task")
+    task_ok = isinstance(task, str) and task.strip() == TASK_TEXT
+    if args.require_pi05 and not task_ok:
+        raise AssertionError(f"expected task={TASK_TEXT!r}, got {task!r}")
+
+    quantile_fields = {
+        key: [field for field in QUANTILE_FIELDS if field in meta.stats[key]]
+        for key in ("observation.state", "action")
+    }
+    has_pi05_quantiles = all(
+        len(quantile_fields[key]) == len(QUANTILE_FIELDS) for key in quantile_fields
+    )
+
     for cam in CAMERAS:
         img = sample[cam]
         assert img.ndim == 3 and img.shape[0] == 3, (cam, img.shape)
@@ -114,6 +134,12 @@ def main() -> int:
         "action_dim": ACTION_DIM,
         "cameras": list(CAMERAS),
         "image_hw": list(IMG_HW),
+        "task": task,
+        "task_ok": task_ok,
+        "action_orientation": "intrinsic_xyz_euler_unwrapped",
+        "quantile_fields": quantile_fields,
+        "has_pi05_quantiles": has_pi05_quantiles,
+        "pi05_normalization": "quantiles" if has_pi05_quantiles else "mean_std",
         "ok": True,
     }
     print(json.dumps(report, indent=2))
@@ -127,6 +153,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"[validate] FAILED: {exc}", file=sys.stderr)
         raise

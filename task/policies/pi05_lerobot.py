@@ -1,4 +1,10 @@
-"""Deploy a LeRobot Pi0.5 policy in the Isaac Sim harness."""
+"""Deploy a LeRobot pi0.5 policy in the Isaac Sim harness.
+
+The pinned RoCo dataset stores 14-D actions as left/right
+``xyz + intrinsic XYZ Euler + gripper``. Euler angles are unwrapped and may
+exceed ±π. Older local checkpoints that learned rotation vectors can opt in
+with ``PI05_ACTION_ROTATION=rotvec``.
+"""
 from __future__ import annotations
 
 import os
@@ -7,13 +13,25 @@ import struct
 import subprocess
 
 import numpy as np
-
 from policy_api import EnvInfo, Observation, PartTarget, Policy
 
 _TASK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 GRIPPER_OPEN_LIMIT = 0.6649704
 _IMG_H, _IMG_W = 240, 320
+PHYSICS_HZ = 200
+CONTROL_HZ = 10
+CONTROL_PERIOD_TICKS = PHYSICS_HZ // CONTROL_HZ
+STATE_SLICES = {
+    "left_ee_pose": slice(0, 7),
+    "right_ee_pose": slice(7, 14),
+    "left_joint_pos": slice(14, 21),
+    "right_joint_pos": slice(21, 28),
+    "left_joint_vel": slice(28, 35),
+    "right_joint_vel": slice(35, 42),
+    "left_gripper": slice(42, 43),
+    "right_gripper": slice(43, 44),
+}
 
 
 def _resize_rgb(img):
@@ -35,18 +53,58 @@ def _resize_rgb(img):
         import cv2
 
         return cv2.resize(a, (_IMG_W, _IMG_H), interpolation=cv2.INTER_AREA).astype(np.uint8)
-    except Exception:
+    except Exception:  # noqa: BLE001
         ys = max(1, a.shape[0] // _IMG_H)
         xs = max(1, a.shape[1] // _IMG_W)
         out = a[::ys, ::xs, :3]
         return out[:_IMG_H, :_IMG_W].astype(np.uint8)
 
 
-def _rotvec_to_quat_wxyz(rx, ry, rz):
+def euler_xyz_to_quat_wxyz(rx, ry, rz):
+    from scipy.spatial.transform import Rotation
+
+    x, y, z, w = Rotation.from_euler("XYZ", [rx, ry, rz]).as_quat()
+    return np.array([w, x, y, z], dtype=np.float64)
+
+
+def rotvec_to_quat_wxyz(rx, ry, rz):
     from scipy.spatial.transform import Rotation
 
     x, y, z, w = Rotation.from_rotvec([rx, ry, rz]).as_quat()
     return np.array([w, x, y, z], dtype=np.float64)
+
+
+def left_action_to_ik_target(action_14, rotation="euler_xyz"):
+    action = np.asarray(action_14, np.float64).reshape(-1)
+    if action.shape != (14,):
+        raise ValueError(f"expected 14-D action, got shape {action.shape}")
+    if not np.isfinite(action).all():
+        raise ValueError("pi0.5 action contains non-finite values")
+    if rotation == "euler_xyz":
+        quat = euler_xyz_to_quat_wxyz(*action[3:6])
+    elif rotation == "rotvec":
+        quat = rotvec_to_quat_wxyz(*action[3:6])
+    else:
+        raise ValueError(f"unsupported PI05_ACTION_ROTATION={rotation!r}")
+    grip = float(np.clip(action[6], 0, 1)) * GRIPPER_OPEN_LIMIT
+    return action[:3].copy(), quat, grip
+
+
+def camera_payload_from_obs(obs: Observation) -> dict:
+    return {
+        "head": _resize_rgb(obs.rgb.get("head")),
+        "left": _resize_rgb(obs.rgb.get("L_wrist")),
+        "right": _resize_rgb(obs.rgb.get("R_wrist")),
+    }
+
+
+def query_due(step_idx, last_query_step, has_target, period):
+    return (
+        not has_target
+        or last_query_step is None
+        or step_idx - last_query_step >= period
+        or step_idx < last_query_step
+    )
 
 
 class Pi05LeRobotPolicy(Policy):
@@ -58,6 +116,11 @@ class Pi05LeRobotPolicy(Policy):
         self.R = getattr(env_info, "R_controller", None)
         if self.L is None:
             raise ValueError("Pi05LeRobotPolicy requires env_info.L_controller")
+        physics_dt = float(getattr(env_info, "physics_dt", 1.0 / PHYSICS_HZ))
+        self._control_period = max(1, round((1.0 / CONTROL_HZ) / physics_dt))
+        self._rotation = os.environ.get("PI05_ACTION_ROTATION", "euler_xyz")
+        if self._rotation not in ("euler_xyz", "rotvec"):
+            raise ValueError("PI05_ACTION_ROTATION must be euler_xyz or rotvec")
 
         dof = list(env_info.dof_names)
         self._Li = [dof.index(j) for j in env_info.L_arm_joints]
@@ -98,7 +161,7 @@ class Pi05LeRobotPolicy(Policy):
             env["CUDA_VISIBLE_DEVICES"] = cuda_devices
 
         log_path = os.environ.get("PI05_SERVER_LOG", os.path.join(_TASK_DIR, "pi05_server.log"))
-        self._err = open(log_path, "w")
+        self._err = open(log_path, "w")  # noqa: SIM115 - kept open for subprocess lifetime
         self._proc = subprocess.Popen(
             [server_py, server_script, ckpt],
             stdin=subprocess.PIPE,
@@ -111,6 +174,11 @@ class Pi05LeRobotPolicy(Policy):
             self.close()
             raise RuntimeError("failed to open pi0.5 sidecar pipes")
         print(f"[pi05] spawned inference server (ckpt={ckpt})", flush=True)
+        print(
+            f"[pi05] control={CONTROL_HZ}Hz period={self._control_period} "
+            f"rotation={self._rotation}",
+            flush=True,
+        )
         import time
 
         time.sleep(2)
@@ -119,6 +187,8 @@ class Pi05LeRobotPolicy(Policy):
             raise RuntimeError(
                 f"pi05_server died on startup (exit {self._proc.returncode}); see {log_path}"
             )
+        self._last_query_step = None
+        self._hold_target = None
 
     def _send(self, obj):
         if self._proc is None or self._proc.stdin is None:
@@ -147,6 +217,8 @@ class Pi05LeRobotPolicy(Policy):
         reply = self._recv()
         if not reply.get("ok"):
             raise RuntimeError(f"pi05 reset failed: {reply!r}")
+        self._last_query_step = None
+        self._hold_target = None
 
     def _build_state(self, obs: Observation) -> np.ndarray:
         q = np.asarray(obs.joint_positions, np.float64)
@@ -179,23 +251,28 @@ class Pi05LeRobotPolicy(Policy):
         ).astype(np.float32)
 
     def act(self, obs: Observation):
+        step_idx = int(obs.step_idx)
+        if not query_due(
+            step_idx,
+            self._last_query_step,
+            self._hold_target is not None,
+            self._control_period,
+        ):
+            pos, quat, grip = self._hold_target
+            return self.L.forward(pos, quat, grip)
+
+        cameras = camera_payload_from_obs(obs)
         self._send(
             {
                 "state": self._build_state(obs),
-                "head": _resize_rgb(obs.rgb.get("head")),
-                "left": _resize_rgb(obs.rgb.get("L_wrist")),
-                "right": _resize_rgb(obs.rgb.get("R_wrist")),
+                **cameras,
                 "task": os.environ.get("PI05_TASK", "assemble parts onto the task board"),
             }
         )
         action = np.asarray(self._recv()["action"], np.float64).reshape(-1)
-        if action.size < 7:
-            raise RuntimeError(f"pi0.5 action has {action.size} values, expected at least 7")
-        if not np.isfinite(action[:7]).all():
-            raise RuntimeError(f"pi0.5 action contains non-finite values: {action[:7]}")
-        pos = action[:3]
-        quat = _rotvec_to_quat_wxyz(action[3], action[4], action[5])
-        grip = float(np.clip(action[6], 0, 1)) * GRIPPER_OPEN_LIMIT
+        pos, quat, grip = left_action_to_ik_target(action, self._rotation)
+        self._hold_target = (pos, quat, grip)
+        self._last_query_step = step_idx
         return self.L.forward(pos, quat, grip)
 
     def is_done(self, obs: Observation) -> bool:
@@ -207,16 +284,16 @@ class Pi05LeRobotPolicy(Policy):
             try:
                 proc.terminate()
                 proc.wait(timeout=2)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 try:
                     proc.kill()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
             self._proc = None
         try:
             if self._err is not None:
                 self._err.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         self._err = None
 

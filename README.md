@@ -19,7 +19,9 @@ AssemblyTask/
 ├── README.md                 # this file (organizer-facing overview)
 ├── PARTS.md                  # participant-facing parts/scoring reference
 ├── docs/
-│   └── pi05_eval.md          # pi0.5 checkpoint eval recipe
+│   ├── diffusion_baseline_quickstart.md
+│   ├── pi05_baseline_quickstart.md # full/LoRA pi0.5 training guide
+│   └── pi05_eval.md                 # pi0.5 checkpoint eval recipe
 ├── pyproject.toml            # uv project: Isaac Sim 5.1.0 + numpy deps, resolver settings
 ├── uv.lock                   # pinned dependency graph (uv sync reproduces .venv/ from this)
 ├── .python-version           # pins CPython 3.11 for uv
@@ -383,14 +385,15 @@ head/L-wrist/R-wrist RGB images from the public `Observation` surface. The
 runner also provides `EnvInfo.R_controller`, so adapters can recover the
 right-arm end-effector pose when matching datasets that include it.
 
-The current learned-policy adapters expect a 14-D action:
+The pinned training dataset uses a 14-D action:
 
 ```text
-left xyz + left rotvec + left gripper + right xyz + right rotvec + right gripper
+left xyz + left intrinsic-XYZ Euler + left gripper +
+right xyz + right intrinsic-XYZ Euler + right gripper
 ```
 
 The runner still holds the R arm at its initial pose by default, so these
-adapters execute only the left-arm slice `[xyz + rotvec + gripper]`. Extend the
+adapters execute only the left-arm slice `[xyz + Euler + gripper]`. Extend the
 runner's R-action path before treating the right half of the action as active
 bimanual control.
 
@@ -415,4 +418,6 @@ PI05_EVAL_MAX_STEPS=500 \
 
 The pi0.5 launcher writes both an MP4 rollout and a results JSON by default.
 See [`docs/pi05_eval.md`](docs/pi05_eval.md) for Hugging Face auth, GPU
-selection, headless mode, and output-path options.
+selection, headless mode, and output-path options. See
+[`docs/pi05_baseline_quickstart.md`](docs/pi05_baseline_quickstart.md) for
+full fine-tuning, LoRA, SLURM, checkpoint validation, and evaluation.
