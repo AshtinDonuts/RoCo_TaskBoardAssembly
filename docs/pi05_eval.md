@@ -4,6 +4,9 @@ This repo can evaluate a LeRobot pi0.5 checkpoint through an Isaac Sim
 policy adapter. The adapter starts a small sidecar process for pi0.5
 inference and sends observations from the RoCo task runner to it.
 
+For the reference finetuning setup and training launcher, see
+[`pi05_baseline_training.md`](pi05_baseline_training.md).
+
 ## Prerequisites
 
 - RoCo repo dependencies installed with `uv sync`.

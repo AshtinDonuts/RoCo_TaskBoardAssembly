@@ -1,0 +1,129 @@
+diff --git a/src/lerobot/common/train_utils.py b/src/lerobot/common/train_utils.py
+index b26196f1..c790b07a 100644
+--- a/src/lerobot/common/train_utils.py
++++ b/src/lerobot/common/train_utils.py
+@@ -15,6 +15,7 @@
+ # limitations under the License.
+ from pathlib import Path
+ 
++import torch
+ from huggingface_hub import HfApi, snapshot_download
+ from torch.optim import Optimizer
+ from torch.optim.lr_scheduler import LRScheduler
+@@ -285,6 +286,28 @@ def load_fsdp_optimizer_state(model, optimizer, checkpoint_dir: Path) -> None:
+     with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, state_cfg, optim_cfg):
+         sharded_osd = FSDP.optim_state_dict_to_load(model=model, optim=optimizer, optim_state_dict=full_osd)
+     optimizer.load_state_dict(sharded_osd)
++    _align_optimizer_slot_tensors(optimizer)
++
++
++def _align_optimizer_slot_tensors(optimizer) -> None:
++    """Align restored optimizer slot tensors with their parameters after FSDP resharding.
++
++    Some PyTorch/Accelerate/FSDP combinations restore Adam slot tensors on a different device than
++    the flattened parameter. Keep the saved dtype because FSDP may produce fp32 gradients for bf16
++    parameters, and Adam's moment tensors must follow the gradient dtype on the scalar path.
++    """
++    base_optimizer = getattr(optimizer, "optimizer", optimizer)
++    for group in base_optimizer.param_groups:
++        group["foreach"] = False
++        for param in group["params"]:
++            state = base_optimizer.state.get(param)
++            if not state:
++                continue
++            for key, value in list(state.items()):
++                if key == "step" or not torch.is_tensor(value):
++                    continue
++                if value.device != param.device:
++                    state[key] = value.to(device=param.device)
+ 
+ 
+ def push_checkpoint_to_hub(
+diff --git a/src/lerobot/policies/pi05/modeling_pi05.py b/src/lerobot/policies/pi05/modeling_pi05.py
+index aabd04c6..8e5e1275 100644
+--- a/src/lerobot/policies/pi05/modeling_pi05.py
++++ b/src/lerobot/policies/pi05/modeling_pi05.py
+@@ -17,6 +17,7 @@
+ import builtins
+ import logging
+ import math
++import os
+ from collections import deque
+ from pathlib import Path
+ from typing import TYPE_CHECKING, Literal, TypedDict, Unpack
+@@ -412,6 +413,9 @@ class PaliGemmaWithExpertModel(
+         else:
+             raise ValueError(f"Invalid precision: {precision}")
+ 
++        if os.environ.get("LEROBOT_PI05_FSDP_UNIFORM_DTYPE") == "1":
++            return
++
+         # Keep full vision path in float32 so we never toggle (toggle causes optimizer
+         # "same dtype" error). Saves memory vs full float32; more memory than only 3 params.
+         params_to_keep_float32 = [
+@@ -444,10 +448,14 @@ class PaliGemmaWithExpertModel(
+             self.paligemma.eval()
+ 
+     def embed_image(self, image: torch.Tensor):
+-        # Vision tower and multi_modal_projector are kept in float32 (params_to_keep_float32).
++        # Vision tower is normally kept in float32, but FSDP full fine-tuning can force uniform bf16.
+         out_dtype = image.dtype
+-        if image.dtype != torch.float32:
+-            image = image.to(torch.float32)
++        if os.environ.get("LEROBOT_PI05_FSDP_UNIFORM_DTYPE") == "1":
++            vision_dtype = torch.float32
++        else:
++            vision_dtype = next(self.paligemma.model.vision_tower.parameters()).dtype
++        if image.dtype != vision_dtype:
++            image = image.to(vision_dtype)
+         image_outputs = self.paligemma.model.get_image_features(image)
+         features = image_outputs.pooler_output
+         if features.dtype != out_dtype:
+@@ -592,6 +600,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
+         self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
+         self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
+ 
++        if config.dtype == "bfloat16" and os.environ.get("LEROBOT_PI05_FSDP_UNIFORM_DTYPE") == "1":
++            self.to(dtype=torch.bfloat16)
++
+         # Initialize gradient checkpointing flag
+         self.gradient_checkpointing_enabled = False
+ 
+diff --git a/src/lerobot/scripts/lerobot_train.py b/src/lerobot/scripts/lerobot_train.py
+index 6e845852..0cc41a22 100644
+--- a/src/lerobot/scripts/lerobot_train.py
++++ b/src/lerobot/scripts/lerobot_train.py
+@@ -152,6 +152,7 @@ def update_policy(
+         )
+ 
+     # Optimizer step
++    _align_adam_slots_to_grads(optimizer)
+     with lock if lock is not None else nullcontext():
+         optimizer.step()
+ 
+@@ -174,6 +175,25 @@ def update_policy(
+     return train_metrics, output_dict
+ 
+ 
++def _align_adam_slots_to_grads(optimizer) -> None:
++    """Make restored Adam state compatible with the current FSDP gradient dtype/device."""
++    base_optimizer = getattr(optimizer, "optimizer", optimizer)
++    for group in base_optimizer.param_groups:
++        group["foreach"] = False
++        for param in group["params"]:
++            if param.grad is None:
++                continue
++            state = base_optimizer.state.get(param)
++            if not state:
++                continue
++            grad = param.grad
++            for key, value in list(state.items()):
++                if key == "step" or not torch.is_tensor(value) or not torch.is_floating_point(value):
++                    continue
++                if value.device != grad.device or value.dtype != grad.dtype:
++                    state[key] = value.to(device=grad.device, dtype=grad.dtype)
++
++
+ @parser.wrap()
+ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
+     """
