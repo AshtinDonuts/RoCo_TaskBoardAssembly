@@ -762,11 +762,10 @@ def main():
     completed_parts = 0
 
     # The task signature still requires L/R object prim paths. Point both
-    # at a STATIC prim so the task's SingleRigidPrim wrapper never aliases
-    # a part that snap_attach later joint-locks — that aliasing was what
-    # invalidated the physics tensor view mid-snap. L/R_target_position
-    # are stored as observation labels we never query, so a dummy zero
-    # vector is fine.
+    # at a static board anchor wrapped as SingleXFormPrim: this avoids both
+    # mutating the board into a rigid body and aliasing a dynamic part that
+    # snap_attach later joint-locks. L/R_target_position are stored as
+    # observation labels we never query, so a dummy zero vector is fine.
     _DUMMY_TARGET = np.zeros(3, dtype=np.float64)
     (my_world, my_controller, my_robots,
      head_depth_camera, L_wrist_camera, R_wrist_camera,

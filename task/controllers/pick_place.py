@@ -13,7 +13,7 @@ import numpy as np
 from isaacsim.core.api.scenes.scene import Scene
 from isaacsim.core.api.tasks import BaseTask
 from isaacsim.core.utils.prims import is_prim_path_valid
-from isaacsim.core.prims import SingleRigidPrim
+from isaacsim.core.prims import SingleXFormPrim
 from isaacsim.core.utils.string import find_unique_string_name
 from isaacsim.robot.manipulators.grippers import ParallelGripper
 
@@ -61,8 +61,21 @@ class PickPlace_scene_bimanual(ABC, BaseTask):
 
         L_name = find_unique_string_name(initial_name="object_L", is_unique_fn=lambda x: not scene.object_exists(x))
         R_name = find_unique_string_name(initial_name="object_R", is_unique_fn=lambda x: not scene.object_exists(x))
-        self._object_L = scene.add(SingleRigidPrim(prim_path=self._L_object_prim_path, name=L_name))
-        self._object_R = scene.add(SingleRigidPrim(prim_path=self._R_object_prim_path, name=R_name))
+        # These paths are observation anchors, not simulated pick objects.
+        # Using SingleRigidPrim here would apply RigidBodyAPI to a static
+        # board prim in Isaac Sim 5.1, making the task board dynamic.
+        self._object_L = scene.add(
+            SingleXFormPrim(
+                prim_path=self._L_object_prim_path,
+                name=L_name,
+            )
+        )
+        self._object_R = scene.add(
+            SingleXFormPrim(
+                prim_path=self._R_object_prim_path,
+                name=R_name,
+            )
+        )
         self._task_objects[self._object_L.name] = self._object_L
         self._task_objects[self._object_R.name] = self._object_R
 

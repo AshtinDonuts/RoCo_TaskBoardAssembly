@@ -208,21 +208,27 @@ places: `param_config.INIT_JOINT_TARGETS["L_arm_j*"]`, all three
 `vega_1u_L_arm_description*.yaml` `default_q`s, and (if R IK is ever
 used) the R yamls' `cspace_to_urdf_rules` L-fixed values.
 
-### 2. SingleRigidPrim task wrappers vs snap_attach FixedJoint
+### 2. Task observation wrappers must not author rigid bodies
 
 The task (`PickPlaceTask_scene_bimanual.set_up_scene`) wraps
-`L_object_prim_path` / `R_object_prim_path` as `SingleRigidPrim`s for
-observation tracking. If either path points at a part that
-`snap_attach` later authors a `FixedJoint` on, the two views fight,
-PhysX rebuilds the simulation tensor view, and the next call to
-`get_dof_positions()` / `get_world_pose()` throws `Failed to get …
-from backend`.
+`L_object_prim_path` / `R_object_prim_path` only so their poses are
+available in task params/observations. These wrappers must stay
+non-physical. In Isaac Sim 5.1, constructing `SingleRigidPrim` for a
+prim that lacks `UsdPhysics.RigidBodyAPI` authors that API during
+initialization. When the observation path is the static task board
+(`/World/task_board/task_board_color`), that side effect converts the
+board into a dynamic rigid body and lets it drift during no-action
+rollouts.
 
-**Fix:** point both paths at a *static* prim that snap will never
-target. `param_config.py` currently ships pointing both at
-`/World/task_board/task_board_color` (`L_object_prim_path` /
-`R_object_prim_path`), which is static collision geometry and is never
-snapped.
+**Fix:** wrap these observation anchors with `SingleXFormPrim`. Dynamic
+parts are still represented by `SingleRigidPrim` in `part_from_usd.py`;
+only the task board observation anchors use XForm wrappers.
+
+The earlier failure mode still applies to dynamic parts: if either path
+points at a part that `snap_attach` later authors a `FixedJoint` on, the
+two views fight, PhysX rebuilds the simulation tensor view, and the next
+call to `get_dof_positions()` / `get_world_pose()` can throw
+`Failed to get ... from backend`.
 
 ### 3. DomeLight `color_0C0C0C.exr` texture errors
 
