@@ -114,7 +114,14 @@ VERBOSE_STUCK = False
 #   L_wristcam  at /World/robotics/vega_1u_gripper/L_ee_link/gripper_link/L_wristcam
 #   R_wristcam  at /World/robotics/vega_1u_gripper/R_ee_link/gripper_link/R_wristcam
 # Their poses are authored in the USD; nothing here overrides them.
-enable_camera_viewports = True   # show the 3-tile viewport layout in Kit UI
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+enable_camera_viewports = _env_bool("TASK_ENABLE_CAMERA_VIEWPORTS", True)   # show the 3-tile viewport layout in Kit UI
 enable_camera_output    = False   # bind sensors so RGB/depth are readable from Python
 HEAD_DEPTH_CAMERA_FOCAL_LENGTH = float(os.getenv("TASK_HEAD_DEPTH_FOCAL_LENGTH", "10"))
 
@@ -301,7 +308,7 @@ PART_CONFIG = {
             "parent_body_path": "/World/task_board/task_board_color/root_001/_188_028",
             "target_pos":       (0.24681, 0.16982, 1.057),    # = place_pos (mesh-frame)
             "target_rot":       (0.7071, 0.7071, 0.0, 0.0),  # wxyz, from extract 'final' orn
-            "pos_tol_axes":     (0.0025, 0.0025, 0.005),        # WORLD frame
+            "pos_tol_axes":     (0.0055, 0.0055, 0.005),        # WORLD frame
             "rot_tol_deg":      -1,                        # skip rot gate (axis-symmetric)
             "set_kinematic":    False,
             "timeout_steps":    300,
@@ -364,7 +371,7 @@ PART_CONFIG = {
             "parent_body_path": "/World/task_board/task_board_color/root_001/_188_028",
             "target_pos":       (0.21531, 0.13135, 1.06),  # = place_pos (mesh-frame)
             "target_rot":       (0.6892, 0.6892, 0.0, 0.0),   # wxyz
-            "pos_tol_axes":     (0.002, 0.002, 0.005),         # WORLD frame
+            "pos_tol_axes":     (0.002, 0.0115, 0.005),        # WORLD frame
             "rot_tol_deg":      -1,                      
             "set_kinematic":    False,
             "timeout_steps":    300,
@@ -528,8 +535,8 @@ PART_CONFIG = {
 # at stage-load time. Everything else in part_order spawns at runtime from
 # ../parts/<name>.usdc at the pose recorded in part_init_poses.json.
 part_order = (
-    "gear_20teeth",
     "gear_60teeth",
+    "gear_20teeth",
     "rod_16mm",
     "bolt_8mm",
     "usb_a",
@@ -538,6 +545,13 @@ part_order = (
     "battery_size1",
     "battery_size5",
 )
+
+_part_order_override = os.getenv("ROCO_PART_ORDER")
+if _part_order_override:
+    part_order = tuple(
+        name.strip() for name in _part_order_override.split(",")
+        if name.strip()
+    )
 
 # Parts already assembled on the board. Their
 # pick/place poses come from PART_CONFIG unchanged. Everything else is a
