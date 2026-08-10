@@ -396,7 +396,7 @@ PART_CONFIG = {
         # Lands in the gear_60teeth slot (gear_60teeth was deleted from
         # scene_base.usd; gear_20teeth substitutes for it).
         "pick_pos":       np.array([0.14366, -0.043, 1.04]),
-        "place_pos":      np.array([ 0.1972314984643313, -0.09598882384960386, 1.05398]),
+        "place_pos":      np.array([ 0.1972314984643313, -0.09598882384960386, 1.05798]),
         # Final settled pose for grading (gear sinks onto the rack post
         # after release; values measured from a known-good run).
         "grade_pos":      np.array([ 0.1972314984643313,
