@@ -3,6 +3,9 @@
 Reads 50 Hz leader samples over localhost JSON IPC, retargets relative
 Cartesian motion onto the DexMate left arm through Lula IK, and streams
 10 Hz LeRobot v3 frames to an isolated recorder sidecar.
+
+Task success is logged only. The operator (or the episode timer) decides
+whether an attempt is saved.
 """
 from __future__ import annotations
 
@@ -10,7 +13,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import yaml
@@ -21,12 +24,12 @@ if _TASK_DIR not in sys.path:
     sys.path.insert(0, _TASK_DIR)
 
 from policy_api import EnvInfo, Observation, PartTarget, Policy  # noqa: E402
+from teleop.episode import EpisodeEvent, EpisodeSession  # noqa: E402
 from teleop.leader_client import LeaderClient  # noqa: E402
 from teleop.protocol import DEFAULT_HOST, DEFAULT_PORT, parse_endpoint  # noqa: E402
 from teleop.recorder_client import RecorderClient  # noqa: E402
 from teleop.retarget import CartesianRetargeter, RetargetConfig  # noqa: E402
 from teleop.schema import (  # noqa: E402
-    GRIPPER_OPEN_LIMIT,
     RECORD_HZ,
     encode_jpeg,
     gripper_ratio,
@@ -40,6 +43,8 @@ try:
     from isaacsim.core.utils.types import ArticulationAction
 except Exception:  # pragma: no cover - template import in non-Isaac tests
     ArticulationAction = None  # type: ignore
+
+RECORDING_CMDS = {"save_episode", "rerecord_episode", "stop_recording"}
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
@@ -58,7 +63,23 @@ def _ee_pose(controller, fallback) -> tuple:
     return np.asarray(pos, dtype=np.float64), T.normalize_quat_wxyz(quat)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    return float(raw)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    return int(raw)
+
+
 class AlohaTeleopPolicy(Policy):
+    is_human_recording = True
+
     def __init__(self, env_info: EnvInfo) -> None:
         super().__init__(env_info)
         self.L = env_info.L_controller
@@ -80,6 +101,18 @@ class AlohaTeleopPolicy(Policy):
         ))
         raw = _load_yaml(cfg_path) if cfg_path.exists() else {}
         self._cfg = raw
+        rec_cfg = raw.get("recording") or {}
+        self._session = EpisodeSession(
+            episode_time_s=_env_float(
+                "ROCO_EPISODE_TIME_S", float(rec_cfg.get("episode_time_s", 600.0))
+            ),
+            warmup_time_s=_env_float(
+                "ROCO_WARMUP_TIME_S", float(rec_cfg.get("warmup_time_s", 5.0))
+            ),
+            num_episodes=_env_int(
+                "ROCO_NUM_EPISODES", int(rec_cfg.get("num_episodes", 1))
+            ),
+        )
         self._retarget = CartesianRetargeter(RetargetConfig.from_dict(raw.get("retarget")))
         endpoint = os.environ.get("ALOHA_LEADER_ENDPOINT", raw.get("leader_endpoint", f"{DEFAULT_HOST}:{DEFAULT_PORT}"))
         host, port = parse_endpoint(str(endpoint))
@@ -103,7 +136,12 @@ class AlohaTeleopPolicy(Policy):
         self._last_status_s = 0.0
         self._frames_sent = 0
         self._drops = 0
-        self._latencies_ms = []
+        self._latencies_ms: List[float] = []
+        self._part_events: List[Dict[str, Any]] = []
+        self._episode_seq = 0
+        self._reset_requested = False
+        self._closed = False
+        self._logged_snap = False
 
         self._recorder = None
         server_py = os.environ.get("LEROBOT_SERVER_PY")
@@ -133,14 +171,35 @@ class AlohaTeleopPolicy(Policy):
 
         print(
             f"[aloha_teleop] waiting for leader at {host}:{port}; "
-            "close the leader gripper or send cmd=start",
+            "close the leader gripper or send cmd=start. "
+            f"episode_time={self._session.episode_time_s:g}s "
+            f"warmup={self._session.warmup_time_s:g}s "
+            f"num_episodes={self._session.num_episodes}. "
+            "Right=save  Left=rerecord  Esc=stop",
             flush=True,
         )
+
+    @property
+    def in_warmup(self) -> bool:
+        return self._session.is_warmup
+
+    def freeze_parts(self) -> bool:
+        return self._abort or self._session.is_warmup or self._session.done
+
+    def session_done(self) -> bool:
+        return self._session.done
+
+    def take_reset_request(self) -> bool:
+        if self._reset_requested:
+            self._reset_requested = False
+            return True
+        return False
 
     def reset(self, obs: Observation, target: PartTarget) -> None:
         self._target = target
         self._part_done = False
         self._paused = False
+        self._logged_snap = False
         left_pos, left_quat = _ee_pose(self.L, obs.ee_pose_L)
         right_pos, right_quat = _ee_pose(self.R, (np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0])))
         self._last_left_pos = left_pos
@@ -150,6 +209,11 @@ class AlohaTeleopPolicy(Policy):
         self._right_quat = right_quat
         self._retarget.disengage()
         self._ik_fail_streak = 0
+        self._part_events.append({
+            "event": "part_start",
+            "name": target.name,
+            "release_mode": target.release_mode,
+        })
         print(
             f"[aloha_teleop] part={target.name} release={target.release_mode} "
             f"pick={target.pick_pos} place={target.place_pos}",
@@ -157,15 +221,31 @@ class AlohaTeleopPolicy(Policy):
         )
 
     def act(self, obs: Observation):
+        now = time.monotonic()
+        if self._session.phase == "idle" and not self._session.done:
+            self._handle_episode_event(self._session.start(now), now)
+
         sample = self._leader.latest()
         cmd = self._leader.pop_cmd() if sample is not None else "none"
         self._apply_cmd(cmd)
+        self._handle_episode_event(self._session.step(cmd, now), now)
+        self._note_snap(obs)
 
         left_pos, left_quat = _ee_pose(self.L, obs.ee_pose_L)
         right_pos, right_quat = _ee_pose(self.R, (self._right_pos, self._right_quat))
         age = self._leader.age_s()
-        hold = self._estop or self._paused or self._abort
+        hold = (
+            self._estop
+            or self._paused
+            or self._abort
+            or self._session.is_warmup
+            or self._session.done
+        )
         reason = "tracking"
+        if self._session.is_warmup:
+            reason = "warmup"
+        elif self._abort:
+            reason = "abort_hold"
         if sample is None or age > self._stale_pause_s:
             hold = True
             reason = "stale_pause" if sample is not None else "no_sample"
@@ -208,14 +288,14 @@ class AlohaTeleopPolicy(Policy):
         else:
             self._ik_fail_streak = 0
 
-        if obs.step_idx % self._record_stride == 0:
+        if self._session.is_recording and obs.step_idx % self._record_stride == 0:
             self._record(obs, left_pos, left_quat, right_pos, right_quat)
-        self._maybe_log(obs, sample, reason, age)
+        self._maybe_log(obs, sample, reason, age, now)
         return action
 
     def is_done(self, obs: Observation) -> bool:
-        if self._abort:
-            return True
+        if self._abort or self._session.is_warmup or self._session.done:
+            return False
         if self._target is None:
             return False
         if self._target.release_mode == "snap":
@@ -223,7 +303,7 @@ class AlohaTeleopPolicy(Policy):
         return bool(self._part_done)
 
     def _apply_cmd(self, cmd: str) -> None:
-        if cmd in (None, "none"):
+        if cmd in (None, "none") or cmd in RECORDING_CMDS:
             return
         if cmd == "start":
             self._paused = False
@@ -236,8 +316,17 @@ class AlohaTeleopPolicy(Policy):
             self._retarget.disengage()
         elif cmd == "part_done":
             self._part_done = True
+            self._part_events.append({
+                "event": "part_done",
+                "name": None if self._target is None else self._target.name,
+            })
         elif cmd == "abort":
             self._abort = True
+            self._part_events.append({
+                "event": "abort",
+                "name": None if self._target is None else self._target.name,
+            })
+            print("[aloha_teleop] task abort: holding robot; recording continues", flush=True)
         elif cmd == "estop":
             self._estop = True
             self._paused = True
@@ -246,6 +335,113 @@ class AlohaTeleopPolicy(Policy):
             self._part_done = False
             self._paused = False
             self._estop = False
+
+    def _note_snap(self, obs: Observation) -> None:
+        if self._logged_snap or not getattr(obs, "snap_fired", False):
+            return
+        self._logged_snap = True
+        self._part_events.append({
+            "event": "snap_fired",
+            "name": None if self._target is None else self._target.name,
+        })
+
+    def _handle_episode_event(self, ev: EpisodeEvent, now: float) -> None:
+        if ev.is_noop:
+            return
+        print(
+            f"[aloha_teleop] episode {ev.kind} reason={ev.reason} "
+            f"attempt={ev.attempt_index} saved={ev.saved_episodes}",
+            flush=True,
+        )
+        if ev.kind == "warmup_start":
+            self._episode_seq = 0
+            self._abort = False
+            self._part_done = False
+            self._frames_sent = 0
+            self._drops = 0
+            return
+        if ev.kind == "record_start":
+            self._episode_seq = 0
+            if self._recorder is not None:
+                reply = self._recorder.send({
+                    "cmd": "begin_episode",
+                    "episode_index": ev.episode_index,
+                    "attempt_index": ev.attempt_index,
+                })
+                if not reply or not reply.get("ok"):
+                    print(f"[aloha_teleop] begin_episode failed: {reply}", flush=True)
+            return
+        if ev.kind == "save":
+            self._commit_episode(ev, now)
+            return
+        if ev.kind == "discard":
+            self._discard_episode(ev, now)
+            return
+        if ev.kind == "session_end":
+            self._session.mark_done()
+            return
+
+    def _commit_episode(self, ev: EpisodeEvent, now: float) -> None:
+        duration_s = self._session.elapsed_episode_s(now)
+        frames = 0
+        if self._recorder is not None:
+            reply = self._recorder.send({
+                "cmd": "save_episode",
+                "reason": ev.reason,
+                "attempt_index": ev.attempt_index,
+                "duration_s": duration_s,
+                "task_log": self._task_log(),
+                "results_json": os.environ.get("LEROBOT_RESULTS_JSON"),
+                "stats": self._stats(),
+            })
+            if reply and reply.get("ok"):
+                frames = int(reply.get("frames") or 0)
+            else:
+                print(f"[aloha_teleop] save_episode failed: {reply}", flush=True)
+        self._session.complete_save(frames, ev.end_session, ev.reason)
+        if self._session.needs_reset:
+            self._part_events = []
+            self._reset_requested = True
+        print(
+            f"[aloha_teleop] saved frames={frames} "
+            f"episodes={self._session.saved_episodes}/{self._session.num_episodes} "
+            f"duration={duration_s:.1f}s",
+            flush=True,
+        )
+
+    def _discard_episode(self, ev: EpisodeEvent, now: float) -> None:
+        if self._recorder is not None:
+            reply = self._recorder.send({
+                "cmd": "discard_episode",
+                "reason": ev.reason,
+                "attempt_index": ev.attempt_index,
+                "duration_s": self._session.elapsed_episode_s(now),
+                "task_log": self._task_log(),
+            })
+            if not reply or not reply.get("ok"):
+                print(f"[aloha_teleop] discard_episode failed: {reply}", flush=True)
+        self._session.complete_discard()
+        if self._session.needs_reset:
+            self._part_events = []
+            self._reset_requested = True
+        print("[aloha_teleop] discarded attempt; resetting for rerecord", flush=True)
+
+    def _task_log(self) -> Dict[str, Any]:
+        return {
+            "aborted": bool(self._abort),
+            "current_part": None if self._target is None else self._target.name,
+            "events": list(self._part_events),
+        }
+
+    def _stats(self) -> Dict[str, Any]:
+        return {
+            "frames": self._frames_sent,
+            "drops": self._drops,
+            "p95_latency_ms": (
+                float(np.percentile(self._latencies_ms, 95)) if self._latencies_ms else None
+            ),
+            "leader_hz": self._leader.hz,
+        }
 
     def _record(self, obs: Observation, left_pos, left_quat, right_pos, right_quat) -> None:
         if self._recorder is None:
@@ -277,12 +473,13 @@ class AlohaTeleopPolicy(Policy):
             "left_hand": resize_rgb(obs.rgb.get("L_wrist") if obs.rgb else None),
             "right_hand": resize_rgb(obs.rgb.get("R_wrist") if obs.rgb else None),
         }
+        timestamp_s = float(self._episode_seq) / float(RECORD_HZ)
         try:
             reply = self._recorder.send({
                 "cmd": "frame",
                 "step_idx": int(obs.step_idx),
-                "timestamp_s": float(obs.step_idx * self._dt),
-                "seq": int(self._frames_sent),
+                "timestamp_s": timestamp_s,
+                "seq": int(self._episode_seq),
                 "state": state.tolist(),
                 "action": action.tolist(),
                 "images": {k: encode_jpeg(v) for k, v in images.items()},
@@ -290,6 +487,7 @@ class AlohaTeleopPolicy(Policy):
                 "release_mode": None if self._target is None else self._target.release_mode,
             })
             if reply and reply.get("ok"):
+                self._episode_seq += 1
                 self._frames_sent += 1
             else:
                 self._drops += 1
@@ -297,17 +495,22 @@ class AlohaTeleopPolicy(Policy):
             self._drops += 1
             print(f"[aloha_teleop] recorder frame drop: {exc}", flush=True)
 
-    def _maybe_log(self, obs: Observation, sample, reason: str, age: float) -> None:
-        now = time.time()
+    def _maybe_log(self, obs: Observation, sample, reason: str, age: float, now: float) -> None:
         if now - self._last_status_s < 1.0:
             return
         self._last_status_s = now
         p95 = 0.0
         if self._latencies_ms:
             p95 = float(np.percentile(self._latencies_ms, 95))
+        extra = ""
+        if self._session.is_warmup:
+            extra = f" warmup_left={self._session.remaining_warmup_s(now):.1f}s"
+        elif self._session.is_recording:
+            extra = f" rec_left={self._session.remaining_episode_s(now):.1f}s"
         print(
             f"[aloha_teleop] t={obs.step_idx * self._dt:6.2f}s part="
             f"{getattr(self._target, 'name', None)} reason={reason} "
+            f"phase={self._session.phase}{extra} "
             f"leader_hz={self._leader.hz:5.1f} age={age:.3f}s "
             f"p95_lat_ms={p95:.1f} frames={self._frames_sent} drops={self._drops} "
             f"connected={self._leader.connected}",
@@ -315,33 +518,33 @@ class AlohaTeleopPolicy(Policy):
         )
 
     def finalize(self, results_json: Optional[str] = None, success: Optional[bool] = None) -> None:
-        if self._recorder is None:
+        del success  # task success must not decide whether data is kept
+        if self._closed:
             return
+        self._closed = True
+        if self._recorder is not None:
+            try:
+                self._recorder.send({
+                    "cmd": "finalize_session",
+                    "reason": "session_end",
+                    "results_json": results_json or os.environ.get("LEROBOT_RESULTS_JSON"),
+                    "stats": self._stats(),
+                    "task_log": self._task_log(),
+                })
+            except Exception as exc:
+                print(f"[aloha_teleop] finalize_session failed: {exc}", flush=True)
+            try:
+                self._recorder.close()
+            except Exception:
+                pass
+            self._recorder = None
         try:
-            self._recorder.send({
-                "cmd": "end_episode",
-                "results_json": results_json,
-                "success": success,
-                "stats": {
-                    "frames": self._frames_sent,
-                    "drops": self._drops,
-                    "p95_latency_ms": (
-                        float(np.percentile(self._latencies_ms, 95)) if self._latencies_ms else None
-                    ),
-                    "leader_hz": self._leader.hz,
-                },
-            })
-        finally:
-            self._recorder.close()
             self._leader.close()
+        except Exception:
+            pass
 
     def __del__(self):
         try:
-            if self._recorder is not None:
-                self._recorder.close()
-        except Exception:
-            pass
-        try:
-            self._leader.close()
+            self.finalize()
         except Exception:
             pass

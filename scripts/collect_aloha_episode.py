@@ -54,6 +54,9 @@ def _isaac_env(extra: dict) -> dict:
         "LEROBOT_SERVER_PY": str(LEROBOT_PYTHON),
         "LEROBOT_SERVER_SCRIPT": str(ROOT / "tools" / "lerobot_recorder" / "server.py"),
         "ROCO_COMMIT": _git_commit(),
+        "ROCO_EPISODE_TIME_S": os.environ.get("ROCO_EPISODE_TIME_S", "600"),
+        "ROCO_WARMUP_TIME_S": os.environ.get("ROCO_WARMUP_TIME_S", "5"),
+        "ROCO_NUM_EPISODES": os.environ.get("ROCO_NUM_EPISODES", "1"),
     }
     for key in (
         "XDG_RUNTIME_DIR",
@@ -78,6 +81,26 @@ def main() -> int:
     parser.add_argument("--run-id", default=time.strftime("%Y%m%d_%H%M%S"))
     parser.add_argument("--max-parts", type=int, default=0)
     parser.add_argument("--max-sim-seconds", type=float, default=0.0)
+    parser.add_argument(
+        "--episode-time-s",
+        type=float,
+        default=float(os.environ.get("ROCO_EPISODE_TIME_S", "600")),
+        help="Wall-clock recording duration per episode (default 600 s). "
+             "Right arrow saves earlier.",
+    )
+    parser.add_argument(
+        "--warmup-time-s",
+        type=float,
+        default=float(os.environ.get("ROCO_WARMUP_TIME_S", "5")),
+        help="Wall-clock warmup before each episode (default 5 s). "
+             "No frames are recorded during warmup.",
+    )
+    parser.add_argument(
+        "--num-episodes",
+        type=int,
+        default=int(os.environ.get("ROCO_NUM_EPISODES", "1")),
+        help="Episodes to save in this session (default 1).",
+    )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument("--synthetic", action="store_true",
@@ -104,6 +127,10 @@ def main() -> int:
         "LEROBOT_OUTPUT_ROOT": str(args.output_root),
         "ALOHA_TELEOP_RUN_ID": args.run_id,
         "LEROBOT_SERVER_LOG": str(results.parent / "recorder.log"),
+        "LEROBOT_RESULTS_JSON": str(results),
+        "ROCO_EPISODE_TIME_S": str(args.episode_time_s),
+        "ROCO_WARMUP_TIME_S": str(args.warmup_time_s),
+        "ROCO_NUM_EPISODES": str(args.num_episodes),
     }
     if args.headless:
         extra["ISAACSIM_HEADLESS"] = "1"
@@ -129,6 +156,12 @@ def main() -> int:
         print("Synthetic leader:")
         print(f"  {sys.executable} {ROOT / 'scripts' / 'synthetic_leader.py'}")
     print("Isaac command:", " ".join(cmd), flush=True)
+    print(
+        f"Recording: episode_time={args.episode_time_s:g}s "
+        f"warmup={args.warmup_time_s:g}s num_episodes={args.num_episodes} "
+        "(Right=save  Left=rerecord  Esc=stop)",
+        flush=True,
+    )
 
     proc = subprocess.run(cmd, cwd=str(ROOT / "task"), env=_isaac_env(extra))
     print(f"harness exit={proc.returncode} results={results}")

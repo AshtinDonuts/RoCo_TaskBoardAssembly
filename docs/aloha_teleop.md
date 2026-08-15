@@ -99,9 +99,13 @@ Terminal 2, Isaac + recorder:
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 python3 /home/khw/RoCo_TaskBoardAssembly/scripts/collect_aloha_episode.py
+# optional:
+#   --episode-time-s 600 --warmup-time-s 5 --num-episodes 1
 ```
 
 ### Operator keys (leader terminal)
+
+Task / robot keys do **not** save or discard data:
 
 | Key | Action |
 | --- | --- |
@@ -110,21 +114,32 @@ python3 /home/khw/RoCo_TaskBoardAssembly/scripts/collect_aloha_episode.py
 | p | pause (hold last DexMate target) |
 | u | resume |
 | n | mark current gravity-settled (`open`) part done |
-| x | abort remaining parts |
+| x | abort remaining parts (hold the robot; recording continues) |
 | e | emergency hold (deadman off) |
 | s | start |
 
+LeRobot-style recording keys. Task success is logged only; it never decides whether an episode is kept:
+
+| Key | Action |
+| --- | --- |
+| Right arrow | save the current episode early |
+| Left arrow | discard this attempt and rerecord after warmup |
+| Esc | save (if recording) and stop the session |
+| episode timer | auto-save at `--episode-time-s` (default **600 s**) |
+
+There is a **5 s warmup** (`--warmup-time-s`) before every episode, including rerecords. No dataset frames are written during warmup. Completing all 9 parts does not save or end recording; the robot holds until you save, rerecord, stop, or hit the episode timer.
+
+ROS command topic: `/aloha_isaac_teleop/command` (`std_msgs/String`). Recording names: `save_episode`, `rerecord_episode`, `stop_recording` (aliases `save`, `rerecord`, `stop`).
+
 Snap parts advance automatically when the harness snap gate fires. `open`
 parts (gears, batteries) wait for `n`.
-
-ROS command topic: `/aloha_isaac_teleop/command` (`std_msgs/String`).
 
 ## Synthetic leader (no hardware)
 
 ```bash
 python3 /home/khw/RoCo_TaskBoardAssembly/scripts/synthetic_leader.py
 python3 /home/khw/RoCo_TaskBoardAssembly/scripts/collect_aloha_episode.py \
-  --synthetic --max-parts 1 --max-sim-seconds 30
+  --synthetic --max-parts 1 --episode-time-s 20 --warmup-time-s 2
 ```
 
 ## Calibration
@@ -146,22 +161,26 @@ at 500 ms.
 - images 240×320 RGB: `observation.images.head|left_hand|right_hand`
 
 Actions are the **post-clamp targets sent to IK**, not raw leader readings.
-Successful 9/9 episodes are moved to `runs/datasets/`. Failed or interrupted
-episodes go to `runs/quarantine/`.
+Human recordings are written to `runs/datasets/<repo>_<name>/<run_id>/` whenever
+the operator saves (or the episode timer fires), including failed or partial
+task attempts. Per-part success is stored in `episodes.jsonl` and `results.json`
+for logging only. Quarantine is used only when a session saves **zero** episodes
+(interrupt before the first save).
 
 Inspect:
 
 ```bash
 conda run -n lerobot python \
   /home/khw/RoCo_TaskBoardAssembly/tools/lerobot_recorder/inspect_dataset.py \
-  /home/khw/RoCo_TaskBoardAssembly/runs/datasets/<repo>
+  /home/khw/RoCo_TaskBoardAssembly/runs/datasets/<repo>_<name>/<run_id>
 ```
 
 ## Emergency and recovery
 
 - `e` or a stale leader stream holds the last safe DexMate target.
-- Ctrl-C in either terminal restores leader torque on shutdown.
-- Interrupted recordings land in `runs/quarantine/<run_id>` with `stats.json`.
+- Ctrl-C in either terminal restores leader torque on shutdown and discards the
+  unsaved episode buffer. Already saved episodes in this session are kept.
+- Sessions with no saved episodes land in `runs/quarantine/<run_id>` with `stats.json`.
 - Re-run `scripts/preflight.py` after a driver change.
 
 ## Tests that do not need hardware or Isaac

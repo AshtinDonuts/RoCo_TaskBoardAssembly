@@ -811,6 +811,14 @@ def main():
         L_robot.set_joint_positions(full_q)
         L_robot.set_joint_velocities(np.zeros(len(dof_names)))
 
+    def _command_arms(L_action):
+        R_action_positions = [None] * len(dof_names)
+        for j_idx, val in zip(R_arm_dof_indices, R_arm_hold_q.tolist()):
+            R_action_positions[j_idx] = float(val)
+        R_action = ArticulationAction(joint_positions=R_action_positions)
+        merged = merge_bimanual_actions(L_action, R_action, dof_names)
+        articulation_controller.apply_action(merged)
+
     _apply_init_joint_targets()
 
     # R: latch init pose, command those joints every step.
@@ -841,6 +849,11 @@ def main():
     policy_class = _load_policy_class(args.policy)
     policy = policy_class(env_info)
     print(f"[setup] policy: {policy_class.__module__}.{policy_class.__name__}")
+    recording_mode = bool(getattr(policy, "is_human_recording", False))
+    if recording_mode:
+        exit_on_complete = False
+        print("[setup] human recording mode: task success is logged only; "
+              "Right=save  Left=rerecord  Esc=stop", flush=True)
 
     # Snap attacher lifecycle (env-owned success detector).
     stage = omni.usd.get_context().get_stage()
@@ -954,6 +967,26 @@ def main():
             extra=dict(cfg),
         )
 
+    def _log_task_grade(reason="complete"):
+        """Write results JSON for logging. Does not end the recording session."""
+        metadata = {
+            "completion_reason": reason,
+            "current_part": current_part,
+            "completed_parts": int(completed_parts),
+            "total_task_steps": int(total_task_steps),
+            "sim_time_s": (
+                float(my_world.current_time_step_index * env_info.physics_dt)
+                if my_world is not None else None
+            ),
+            "max_steps": args.max_steps,
+            "max_sim_seconds": args.max_sim_seconds,
+            "max_parts": args.max_parts,
+            "snap_fired_parts": sorted(snap_fired_parts),
+        }
+        _grade_task(stage, snap_fired_parts,
+                    results_json_path=args.results_json,
+                    metadata=metadata)
+
     def _finalize_iteration(reason="complete"):
         nonlocal finalized
         if finalized:
@@ -996,6 +1029,11 @@ def main():
 
         if args.max_parts and completed_parts >= args.max_parts:
             current_part = None
+            if recording_mode:
+                print(f"[setup] reached max-parts={args.max_parts}; "
+                      "holding and continuing recording.", flush=True)
+                _log_task_grade("max_parts")
+                return None
             run_complete = True
             print(f"[setup] reached max-parts={args.max_parts}; ending early.")
             _finalize_iteration("max_parts")
@@ -1005,6 +1043,11 @@ def main():
             current_part = next(parts_iter)
         except StopIteration:
             current_part = None
+            if recording_mode:
+                print("[setup] All parts done; holding until save/rerecord/stop "
+                      "or episode timeout.", flush=True)
+                _log_task_grade("complete")
+                return None
             run_complete = True
             print("[setup] All parts done.")
             _finalize_iteration("complete")
@@ -1076,7 +1119,7 @@ def main():
         while simulation_app.is_running():
             my_world.step(render=True)
 
-            if run_complete and exit_on_complete:
+            if run_complete and (exit_on_complete or recording_mode):
                 break
 
             if not my_world.is_playing():
@@ -1084,6 +1127,14 @@ def main():
                     reset_needed = True
                 if not exit_on_complete:
                     continue
+
+            if recording_mode and getattr(policy, "session_done", lambda: False)():
+                run_complete = True
+                print("[setup] recording session complete.", flush=True)
+                _finalize_iteration("recording_complete")
+                break
+            if recording_mode and getattr(policy, "take_reset_request", lambda: False)():
+                reset_needed = True
 
             if reset_needed:
                 my_world.reset()
@@ -1121,7 +1172,16 @@ def main():
                           f"starting task.")
                 continue
 
+            if recording_mode and getattr(policy, "in_warmup", False):
+                _apply_init_joint_targets()
+                obs = _build_observation()
+                _command_arms(policy.act(obs))
+                continue
+
             if current_part is None:
+                if recording_mode:
+                    obs = _build_observation()
+                    _command_arms(policy.act(obs))
                 continue
 
             obs = _build_observation()
@@ -1166,24 +1226,19 @@ def main():
                 or snap_tick_count >= PER_PART_TIMEOUT_STEPS
             )
 
-            if policy.is_done(obs) or is_snap_done or is_timeout:
+            frozen = recording_mode and bool(
+                getattr(policy, "freeze_parts", lambda: False)()
+            )
+            if not frozen and (policy.is_done(obs) or is_snap_done or is_timeout):
                 if is_timeout:
                     print(f"[setup] {current_part}: per-part timeout "
                           f"({PER_PART_TIMEOUT_STEPS} steps) — advancing.")
                 _start_next_part()
                 continue
 
-            L_action = policy.act(obs)
-
-            R_action_positions = [None] * len(dof_names)
-            for j_idx, val in zip(R_arm_dof_indices, R_arm_hold_q.tolist()):
-                R_action_positions[j_idx] = float(val)
-            R_action = ArticulationAction(joint_positions=R_action_positions)
-
-            merged = merge_bimanual_actions(L_action, R_action, dof_names)
-            articulation_controller.apply_action(merged)
-
-            part_step_count += 1
+            _command_arms(policy.act(obs))
+            if not frozen:
+                part_step_count += 1
     finally:
         if not finalized:
             try:

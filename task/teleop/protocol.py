@@ -14,7 +14,7 @@ import json
 import socket
 import struct
 import time
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 PROTOCOL_VERSION = 1
 DEFAULT_HOST = "127.0.0.1"
@@ -32,7 +32,38 @@ COMMANDS = (
     "abort",
     "part_done",
     "estop",
+    "save_episode",
+    "rerecord_episode",
+    "stop_recording",
 )
+
+# Local to the leader bridge; never sent on the wire.
+LOCAL_COMMANDS = ("clutch_toggle",)
+
+CHAR_TO_CMD = {
+    " ": "clutch_toggle",
+    "r": "recenter",
+    "p": "pause",
+    "u": "resume",
+    "n": "part_done",
+    "x": "abort",
+    "e": "estop",
+    "s": "start",
+}
+
+LINE_ALIASES = {
+    "save": "save_episode",
+    "right": "save_episode",
+    "rerecord": "rerecord_episode",
+    "left": "rerecord_episode",
+    "stop": "stop_recording",
+    "esc": "stop_recording",
+}
+
+_ARROW_CMD = {
+    ord("C"): "save_episode",
+    ord("D"): "rerecord_episode",
+}
 
 REQUIRED_SAMPLE_KEYS = (
     "type",
@@ -47,6 +78,95 @@ REQUIRED_SAMPLE_KEYS = (
     "deadman",
     "cmd",
 )
+
+
+def map_operator_token(token: str) -> Optional[str]:
+    """Map a typed line or single character to a command name."""
+    if token is None:
+        return None
+    if token[:1] == " " and token.strip() == "":
+        return "clutch_toggle"
+    raw = token.strip()
+    if not raw:
+        return None
+    low = raw.lower()
+    if low in LINE_ALIASES:
+        return LINE_ALIASES[low]
+    if low in COMMANDS or low in LOCAL_COMMANDS:
+        return low
+    if len(raw) == 1:
+        return CHAR_TO_CMD.get(raw, CHAR_TO_CMD.get(raw.lower()))
+    return None
+
+
+class KeyDecoder:
+    """Decode operator keys from raw TTY bytes (cbreak / non-canonical).
+
+    LeRobot-compatible recording keys:
+      right arrow -> save_episode
+      left arrow  -> rerecord_episode
+      Esc         -> stop_recording
+    """
+
+    def __init__(self, esc_timeout_s: float = 0.05) -> None:
+        self.esc_timeout_s = float(esc_timeout_s)
+        self._state = "idle"
+        self._esc_t0 = 0.0
+
+    def feed(self, data: bytes, now: Optional[float] = None) -> List[str]:
+        now = time.monotonic() if now is None else now
+        out: List[str] = []
+        for byte in data:
+            out.extend(self._feed_byte(byte, now))
+        return out
+
+    def poll_timeout(self, now: Optional[float] = None) -> List[str]:
+        now = time.monotonic() if now is None else now
+        if self._state == "esc" and (now - self._esc_t0) >= self.esc_timeout_s:
+            self._state = "idle"
+            return ["stop_recording"]
+        return []
+
+    def _feed_byte(self, byte: int, now: float) -> List[str]:
+        if self._state == "idle":
+            if byte == 0x1B:
+                self._state = "esc"
+                self._esc_t0 = now
+                return []
+            if byte in (0x00, 0x0A, 0x0D):
+                return []
+            try:
+                char = chr(byte)
+            except ValueError:
+                return []
+            mapped = CHAR_TO_CMD.get(char, CHAR_TO_CMD.get(char.lower()))
+            return [mapped] if mapped else []
+
+        if self._state == "esc":
+            if byte == ord("["):
+                self._state = "csi"
+                return []
+            if byte == ord("O"):
+                self._state = "ss3"
+                return []
+            if byte == 0x1B:
+                self._esc_t0 = now
+                return ["stop_recording"]
+            self._state = "idle"
+            rest = self._feed_byte(byte, now)
+            return ["stop_recording"] + rest
+
+        if self._state in ("csi", "ss3"):
+            if byte in (ord("0"), ord("1"), ord("2"), ord("3"), ord("4"),
+                        ord("5"), ord("6"), ord("7"), ord("8"), ord("9"),
+                        ord(";")):
+                return []
+            self._state = "idle"
+            cmd = _ARROW_CMD.get(byte)
+            return [cmd] if cmd else []
+
+        self._state = "idle"
+        return []
 
 
 class ProtocolError(ValueError):
