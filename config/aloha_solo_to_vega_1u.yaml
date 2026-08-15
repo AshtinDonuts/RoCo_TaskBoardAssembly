@@ -1,0 +1,48 @@
+leader_endpoint: "127.0.0.1:19850"
+leader_rate_hz: 50
+record_hz: 10
+max_ik_fail_streak: 15
+
+# Physical ALOHA Solo leader (wx250s). Follower is never launched.
+leader:
+  robot: aloha_solo
+  name: leader_solo
+  model: aloha_wx250s
+  fps: 50
+  start_arm_pose: [0.0, -0.6, 0.5, 0.0, 1.2, 0.0]
+  gripper_joint_open: 0.8298
+  gripper_joint_close: -0.0552
+  gripper_close_thresh: 0.0
+  gravity_compensation: true
+
+# Relative Cartesian map from ALOHA EE deltas onto DexMate left EE.
+# Tune axes_perm / axes_sign after the first empty-space session so that
+# pushing the leader forward/right/up moves DexMate the same way in Isaac.
+retarget:
+  axes_perm: [0, 1, 2]
+  axes_sign: [1.0, 1.0, 1.0]
+  translation_gain: 1.0
+  rotation_gain: 1.0
+  workspace_min: [-0.20, -0.70, 0.02]
+  workspace_max: [0.70, 0.70, 0.70]
+  max_lin_vel: 0.35
+  max_ang_vel: 1.2
+  max_lin_acc: 2.0
+  gripper_open_limit: 0.6649704
+  gripper_close: 0.0
+  gripper_hysteresis: 0.03
+  stale_hold_s: 0.10
+  stale_pause_s: 0.50
+
+operator:
+  clutch_default: false
+  deadman_default: true
+  keys:
+    clutch_toggle: " "
+    recenter: "r"
+    pause: "p"
+    resume: "u"
+    part_done: "n"
+    abort: "x"
+    estop: "e"
+    start: "s"

@@ -1,0 +1,21 @@
+{
+  "challenge_repo": "https://github.com/rocochallenge/RoCo_TaskBoardAssembly",
+  "challenge_commit": "45dd6ad6e0792faf3450bdd2f81bb143b11bc43f",
+  "isaac_sim": "5.1.0.0",
+  "python_isaac": "3.11",
+  "lerobot": "0.6.1",
+  "python_ros": "3.10",
+  "ros_distro": "humble",
+  "embodiment": "DexMate vega_1u_gripper parallel grippers",
+  "physical_input": "ALOHA Solo leader_solo (wx250s), follower never launched",
+  "dataset": {
+    "format": "lerobot v3",
+    "fps": 10,
+    "observation.state": 44,
+    "action": 14,
+    "images": ["observation.images.head", "observation.images.left_hand", "observation.images.right_hand"],
+    "image_size": [240, 320, 3],
+    "action_rotation": "rotvec"
+  },
+  "driver_strategy": "smoke-test NVIDIA 595.84; fall back to 580.65.06+ if Isaac Sim 5.1 crashes"
+}

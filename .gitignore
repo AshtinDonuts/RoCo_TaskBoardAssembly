@@ -13,7 +13,10 @@ __pycache__/
 logs/
 outputs/
 artifacts/
+runs/
+datasets/
 task/*_server.log
+task/teleop_recorder.log
 
 # editor
 .vscode/

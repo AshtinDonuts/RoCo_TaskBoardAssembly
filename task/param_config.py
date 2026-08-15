@@ -88,7 +88,7 @@ RESULTS_JSON_PATH = None
 # policy to finish a single part before forcibly advancing to the next.
 # Prevents a stuck / buggy policy from hanging the eval. The baseline
 # scripted policy typically completes a part in 600-1500 steps.
-PER_PART_TIMEOUT_STEPS = 3000
+PER_PART_TIMEOUT_STEPS = int(os.getenv("ROCO_PER_PART_TIMEOUT_STEPS", "3000"))
 
 # Physics warmup: number of my_world.step() iterations to run before the
 # pick-and-place task starts (after each reset / first play). Lets PhysX
@@ -122,7 +122,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 enable_camera_viewports = _env_bool("TASK_ENABLE_CAMERA_VIEWPORTS", True)   # show the 3-tile viewport layout in Kit UI
-enable_camera_output    = False   # bind sensors so RGB/depth are readable from Python
+enable_camera_output    = _env_bool("TASK_ENABLE_CAMERA_OUTPUT", False)   # bind sensors so RGB/depth are readable from Python
 HEAD_DEPTH_CAMERA_FOCAL_LENGTH = float(os.getenv("TASK_HEAD_DEPTH_FOCAL_LENGTH", "10"))
 
 # IK c-space size per arm. Three modes per side, picked by the

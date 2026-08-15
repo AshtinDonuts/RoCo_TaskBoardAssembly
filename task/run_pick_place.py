@@ -1185,6 +1185,16 @@ def main():
 
             part_step_count += 1
     finally:
+        if not finalized:
+            try:
+                _finalize_iteration("interrupted")
+            except Exception as exc:
+                print(f"[setup] finalize on interrupt failed: {exc}", flush=True)
+        if hasattr(policy, "finalize"):
+            try:
+                policy.finalize(results_json=args.results_json)
+            except Exception as exc:
+                print(f"[setup] policy.finalize failed: {exc}", flush=True)
         video_recorder.close()
         simulation_app.close()
 
