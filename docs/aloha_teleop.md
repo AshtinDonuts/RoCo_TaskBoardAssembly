@@ -100,9 +100,9 @@ Terminal 2, Isaac + recorder:
 export PATH="$HOME/.local/bin:$PATH"
 python3 /home/khw/RoCo_TaskBoardAssembly/scripts/collect_aloha_episode.py
 # optional:
+#   --export-config config/teleop_export.json
 #   --episode-time-s 600 --warmup-time-s 5 --num-episodes 1
 ```
-
 ### Operator keys (leader terminal)
 
 Task / robot keys do **not** save or discard data:
@@ -184,11 +184,22 @@ at 500 ms.
 
 ## Dataset contract
 
-10 Hz rows, challenge-compatible:
+Export settings live in [`config/teleop_export.json`](../config/teleop_export.json)
+(`--export-config` / `ALOHA_EXPORT_CONFIG`). Sample rate and mp4 fps are the same
+value (`export.fps`, default **10**). With `export.playback_clock: wall` (default),
+frames are wall-clock gated so **1 s of teleop ≈ 1 s of mp4 replay**, matching
+what the operator saw. Use `sim` only when you want physics-time gating.
+
+Challenge-compatible defaults:
 
 - `observation.state` 44-D: left EE pose, right EE pose, 7+7 q, 7+7 qd, 2 gripper ratios
 - `action` 14-D: left `xyz + rotvec + gripper` + right home `xyz + rotvec + gripper`
 - images 240×320 RGB: `observation.images.head|left_hand|right_hand`
+
+Retarget / leader / keyboard speeds stay in
+[`config/aloha_solo_to_vega_1u.yaml`](../config/aloha_solo_to_vega_1u.yaml)
+(`paths.teleop_yaml`). Session timers (`episode_time_s`, `warmup_time_s`,
+`num_episodes`) come from the export JSON (overridable by CLI / env).
 
 Actions are the **post-clamp targets sent to IK**, not raw leader readings.
 Human recordings are written to `runs/datasets/<repo>_<name>/<run_id>/` whenever

@@ -41,6 +41,7 @@ keyboard:
   ang_vel_rps: 0.8
 
 recording:
+  # Session timers prefer config/teleop_export.json; kept here for reference only.
   episode_time_s: 600
   warmup_time_s: 5
   num_episodes: 1

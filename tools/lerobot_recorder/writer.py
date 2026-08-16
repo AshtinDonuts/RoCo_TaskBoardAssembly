@@ -13,11 +13,15 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence, Tuple
 
-IMG_H, IMG_W = 240, 320
+DEFAULT_IMG_H, DEFAULT_IMG_W = 240, 320
 STATE_DIM, ACTION_DIM = 44, 14
-IMAGE_KEYS = ("head", "left_hand", "right_hand")
+DEFAULT_IMAGE_KEYS = ("head", "left_hand", "right_hand")
+
+# Back-compat aliases for tests / importers.
+IMG_H, IMG_W = DEFAULT_IMG_H, DEFAULT_IMG_W
+IMAGE_KEYS = DEFAULT_IMAGE_KEYS
 
 
 def _decode_jpeg(payload: bytes):
@@ -38,14 +42,24 @@ def _decode_jpeg(payload: bytes):
     return np.asarray(Image.open(BytesIO(payload)).convert("RGB"))
 
 
-def _validate_frame(msg: Dict[str, Any], prev_ts, prev_seq):
+def _validate_frame(
+    msg: Dict[str, Any],
+    prev_ts,
+    prev_seq,
+    *,
+    img_h: int,
+    img_w: int,
+    image_keys: Sequence[str],
+    state_dim: int,
+    action_dim: int,
+):
     import numpy as np
 
     state = np.asarray(msg["state"], dtype=np.float32).reshape(-1)
     action = np.asarray(msg["action"], dtype=np.float32).reshape(-1)
-    if state.size != STATE_DIM:
+    if state.size != state_dim:
         raise ValueError(f"state dim {state.size}")
-    if action.size != ACTION_DIM:
+    if action.size != action_dim:
         raise ValueError(f"action dim {action.size}")
     if not np.all(np.isfinite(state)) or not np.all(np.isfinite(action)):
         raise ValueError("non-finite state/action")
@@ -58,19 +72,29 @@ def _validate_frame(msg: Dict[str, Any], prev_ts, prev_seq):
     if prev_seq is not None and seq < prev_seq:
         raise ValueError("seq went backwards")
     images = {}
-    for key in IMAGE_KEYS:
-        raw = msg["images"][key]
+    payload = msg.get("images") or {}
+    for key in image_keys:
+        if key not in payload:
+            raise ValueError(f"missing image {key}")
+        raw = payload[key]
         if isinstance(raw, (bytes, bytearray)):
             frame = _decode_jpeg(bytes(raw))
         else:
             frame = np.asarray(raw, dtype=np.uint8)
-        if frame.shape != (IMG_H, IMG_W, 3):
+        if frame.shape != (img_h, img_w, 3):
             raise ValueError(f"{key} shape {frame.shape}")
         images[key] = frame
     return state, action, images, ts, seq
 
 
-def _feature_spec():
+def _feature_spec(
+    *,
+    img_h: int,
+    img_w: int,
+    image_keys: Sequence[str],
+    state_dim: int,
+    action_dim: int,
+):
     state_names = (
         [f"left_ee_{n}" for n in ("x", "y", "z", "qw", "qx", "qy", "qz")]
         + [f"right_ee_{n}" for n in ("x", "y", "z", "qw", "qx", "qy", "qz")]
@@ -84,35 +108,48 @@ def _feature_spec():
         [f"left_{n}" for n in ("x", "y", "z", "rx", "ry", "rz", "gripper")]
         + [f"right_{n}" for n in ("x", "y", "z", "rx", "ry", "rz", "gripper")]
     )
-    return {
-        "observation.state": {"dtype": "float32", "shape": (STATE_DIM,), "names": state_names},
-        "action": {"dtype": "float32", "shape": (ACTION_DIM,), "names": action_names},
-        "observation.images.head": {
-            "dtype": "video",
-            "shape": (IMG_H, IMG_W, 3),
-            "names": ["height", "width", "channels"],
-        },
-        "observation.images.left_hand": {
-            "dtype": "video",
-            "shape": (IMG_H, IMG_W, 3),
-            "names": ["height", "width", "channels"],
-        },
-        "observation.images.right_hand": {
-            "dtype": "video",
-            "shape": (IMG_H, IMG_W, 3),
-            "names": ["height", "width", "channels"],
-        },
+    if state_dim != len(state_names) or action_dim != len(action_names):
+        raise ValueError(
+            f"contract mismatch state_dim={state_dim} action_dim={action_dim}"
+        )
+    features = {
+        "observation.state": {"dtype": "float32", "shape": (state_dim,), "names": state_names},
+        "action": {"dtype": "float32", "shape": (action_dim,), "names": action_names},
     }
+    for key in image_keys:
+        features[f"observation.images.{key}"] = {
+            "dtype": "video",
+            "shape": (img_h, img_w, 3),
+            "names": ["height", "width", "channels"],
+        }
+    return features
 
 
-def _create_dataset(root: Path, repo_id: str, fps: float, robot_type: str):
+def _create_dataset(
+    root: Path,
+    repo_id: str,
+    fps: float,
+    robot_type: str,
+    *,
+    img_h: int,
+    img_w: int,
+    image_keys: Sequence[str],
+    state_dim: int,
+    action_dim: int,
+):
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     kwargs = dict(
         repo_id=repo_id,
         fps=fps,
         robot_type=robot_type,
-        features=_feature_spec(),
+        features=_feature_spec(
+            img_h=img_h,
+            img_w=img_w,
+            image_keys=image_keys,
+            state_dim=state_dim,
+            action_dim=action_dim,
+        ),
         use_videos=True,
         image_writer_threads=4,
     )
@@ -147,43 +184,78 @@ class EpisodeWriter:
         self.task = "Industrial Task Board Assembly"
         self._log_path: Optional[Path] = None
         self._finalized = False
+        self.fps = 10.0
+        self.img_h = DEFAULT_IMG_H
+        self.img_w = DEFAULT_IMG_W
+        self.image_keys: Tuple[str, ...] = DEFAULT_IMAGE_KEYS
+        self.state_dim = STATE_DIM
+        self.action_dim = ACTION_DIM
+        self.vcodec = "av1"
+        self.pix_fmt = "yuv420p"
 
     def init(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         root = Path(msg.get("root") or "runs").expanduser().resolve()
         run_id = msg.get("run_id") or time.strftime("%Y%m%d_%H%M%S")
         repo_id = msg.get("repo_id") or "local/roco_aloha_teleop"
+        self.fps = float(msg.get("fps", 10))
+        if self.fps <= 0:
+            raise ValueError(f"fps must be > 0, got {self.fps}")
+        self.img_h = int(msg.get("image_height", DEFAULT_IMG_H))
+        self.img_w = int(msg.get("image_width", DEFAULT_IMG_W))
+        if self.img_h <= 0 or self.img_w <= 0:
+            raise ValueError(f"invalid image size {self.img_w}x{self.img_h}")
+        cameras = msg.get("cameras") or list(DEFAULT_IMAGE_KEYS)
+        if not isinstance(cameras, (list, tuple)) or not cameras:
+            raise ValueError("cameras must be a non-empty list")
+        self.image_keys = tuple(str(c) for c in cameras)
+        self.state_dim = int(msg.get("state_dim", STATE_DIM))
+        self.action_dim = int(msg.get("action_dim", ACTION_DIM))
+        if self.state_dim != STATE_DIM or self.action_dim != ACTION_DIM:
+            raise ValueError(
+                f"unsupported contract state_dim={self.state_dim} "
+                f"action_dim={self.action_dim}"
+            )
+        self.vcodec = str(msg.get("vcodec") or "av1")
+        self.pix_fmt = str(msg.get("pix_fmt") or "yuv420p")
         self.staging = root / "staging" / run_id
         self.final_root = root / "datasets" / repo_id.replace("/", "_") / run_id
         self.quarantine = root / "quarantine" / run_id
         if self.staging.exists():
             shutil.rmtree(self.staging)
         self.staging.parent.mkdir(parents=True, exist_ok=True)
+        create_kwargs = dict(
+            root=self.staging,
+            repo_id=repo_id,
+            fps=int(round(self.fps)),
+            robot_type=msg.get("robot_type") or "vega_1u_gripper",
+            img_h=self.img_h,
+            img_w=self.img_w,
+            image_keys=self.image_keys,
+            state_dim=self.state_dim,
+            action_dim=self.action_dim,
+        )
         try:
-            self.dataset = _create_dataset(
-                self.staging,
-                repo_id=repo_id,
-                fps=int(msg.get("fps", 10)),
-                robot_type=msg.get("robot_type") or "vega_1u_gripper",
-            )
+            self.dataset = _create_dataset(**create_kwargs)
         except FileExistsError:
             shutil.rmtree(self.staging, ignore_errors=True)
-            self.dataset = _create_dataset(
-                self.staging,
-                repo_id=repo_id,
-                fps=int(msg.get("fps", 10)),
-                robot_type=msg.get("robot_type") or "vega_1u_gripper",
-            )
+            self.dataset = _create_dataset(**create_kwargs)
         self.task = msg.get("task") or self.task
         self.meta = {
             "run_id": run_id,
             "repo_id": repo_id,
             "challenge_commit": msg.get("challenge_commit"),
             "config_path": msg.get("config_path"),
+            "export_config_path": msg.get("export_config_path"),
+            "playback_clock": msg.get("playback_clock"),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "schema": {
-                "observation.state": STATE_DIM,
-                "action": ACTION_DIM,
-                "images": f"{IMG_H}x{IMG_W}x3",
+                "observation.state": self.state_dim,
+                "action": self.action_dim,
+                "images": f"{self.img_h}x{self.img_w}x3",
+                "cameras": list(self.image_keys),
+                "fps": self.fps,
+                "vcodec": self.vcodec,
+                "pix_fmt": self.pix_fmt,
                 "rotation": "rotvec",
             },
         }
@@ -191,7 +263,10 @@ class EpisodeWriter:
             json.dumps(self.meta, indent=2), encoding="utf-8"
         )
         self._log_path = self.staging / "episodes.jsonl"
-        sys.stderr.write(f"[recorder] staging {self.staging}\n")
+        sys.stderr.write(
+            f"[recorder] staging {self.staging} fps={self.fps:g} "
+            f"image={self.img_w}x{self.img_h}\n"
+        )
         sys.stderr.flush()
         return {"ok": True, "staging": str(self.staging)}
 
@@ -222,18 +297,26 @@ class EpisodeWriter:
         if not self.episode_active:
             return {"ok": False, "error": "no active episode"}
         try:
-            state, action, images, ts, seq = _validate_frame(msg, self.prev_ts, self.prev_seq)
+            state, action, images, ts, seq = _validate_frame(
+                msg,
+                self.prev_ts,
+                self.prev_seq,
+                img_h=self.img_h,
+                img_w=self.img_w,
+                image_keys=self.image_keys,
+                state_dim=self.state_dim,
+                action_dim=self.action_dim,
+            )
         except Exception as exc:
             self.n_drop += 1
             return {"ok": False, "error": str(exc)}
         frame = {
             "observation.state": state,
             "action": action,
-            "observation.images.head": images["head"],
-            "observation.images.left_hand": images["left_hand"],
-            "observation.images.right_hand": images["right_hand"],
             "task": self.task,
         }
+        for key in self.image_keys:
+            frame[f"observation.images.{key}"] = images[key]
         self.dataset.add_frame(frame)
         self.prev_ts = ts
         self.prev_seq = seq

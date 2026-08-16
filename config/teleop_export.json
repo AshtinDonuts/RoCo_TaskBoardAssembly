@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "export": {
+    "fps": 10,
+    "playback_clock": "wall",
+    "image": {
+      "height": 240,
+      "width": 320,
+      "jpeg_quality": 90,
+      "cameras": ["head", "left_hand", "right_hand"]
+    },
+    "video": {
+      "vcodec": "av1",
+      "pix_fmt": "yuv420p"
+    },
+    "dataset": {
+      "repo_id": "local/roco_aloha_teleop",
+      "robot_type": "vega_1u_gripper",
+      "task": "Industrial Task Board Assembly",
+      "state_dim": 44,
+      "action_dim": 14
+    }
+  },
+  "session": {
+    "episode_time_s": 600,
+    "warmup_time_s": 5,
+    "num_episodes": 1
+  },
+  "paths": {
+    "output_root": "runs",
+    "teleop_yaml": "config/aloha_solo_to_vega_1u.yaml"
+  }
+}

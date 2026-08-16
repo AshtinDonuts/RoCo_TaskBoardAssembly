@@ -31,8 +31,8 @@ from teleop.leader_client import LeaderClient  # noqa: E402
 from teleop.protocol import DEFAULT_HOST, DEFAULT_PORT, parse_endpoint  # noqa: E402
 from teleop.recorder_client import RecorderClient  # noqa: E402
 from teleop.retarget import CartesianRetargeter, RetargetConfig  # noqa: E402
+from teleop.export_config import load_export_config  # noqa: E402
 from teleop.schema import (  # noqa: E402
-    RECORD_HZ,
     encode_jpeg,
     gripper_ratio,
     pack_action,
@@ -95,25 +95,30 @@ class AlohaTeleopPolicy(Policy):
         self._Rg = dof.index("R_gripper_joint") if "R_gripper_joint" in dof else None
         self._n_dof = len(dof)
         self._dt = float(env_info.physics_dt)
-        self._record_stride = max(1, int(round((1.0 / RECORD_HZ) / self._dt)))
+        self._export = load_export_config()
+        # Sample + encode at the same fps. Wall clock (default) keeps mp4
+        # realtime with the operator; sim clock gates on physics time.
+        self._record_fps = float(self._export.fps)
+        self._record_period_s = float(self._export.record_period_s)
+        self._playback_clock = str(self._export.export.playback_clock)
+        self._img_h = int(self._export.img_h)
+        self._img_w = int(self._export.img_w)
+        self._jpeg_quality = int(self._export.export.image.jpeg_quality)
+        self._cameras = tuple(self._export.export.image.cameras)
+        self._next_record_wall: Optional[float] = None
+        self._next_record_sim: Optional[float] = None
+        self._last_act_wall: Optional[float] = None
 
-        cfg_path = Path(os.environ.get(
-            "ALOHA_TELEOP_CONFIG",
-            os.path.join(_REPO_ROOT, "config", "aloha_solo_to_vega_1u.yaml"),
-        ))
+        cfg_path = Path(
+            os.environ.get("ALOHA_TELEOP_CONFIG", str(self._export.paths.teleop_yaml))
+        )
         raw = _load_yaml(cfg_path) if cfg_path.exists() else {}
         self._cfg = raw
-        rec_cfg = raw.get("recording") or {}
+        sess = self._export.session
         self._session = EpisodeSession(
-            episode_time_s=_env_float(
-                "ROCO_EPISODE_TIME_S", float(rec_cfg.get("episode_time_s", 600.0))
-            ),
-            warmup_time_s=_env_float(
-                "ROCO_WARMUP_TIME_S", float(rec_cfg.get("warmup_time_s", 5.0))
-            ),
-            num_episodes=_env_int(
-                "ROCO_NUM_EPISODES", int(rec_cfg.get("num_episodes", 1))
-            ),
+            episode_time_s=_env_float("ROCO_EPISODE_TIME_S", float(sess.episode_time_s)),
+            warmup_time_s=_env_float("ROCO_WARMUP_TIME_S", float(sess.warmup_time_s)),
+            num_episodes=_env_int("ROCO_NUM_EPISODES", int(sess.num_episodes)),
         )
         self._retarget = CartesianRetargeter(RetargetConfig.from_dict(raw.get("retarget")))
         self._keyboard_mode = os.environ.get("ALOHA_KEYBOARD_TELEOP", "").lower() in {
@@ -177,7 +182,6 @@ class AlohaTeleopPolicy(Policy):
         self._latencies_ms: List[float] = []
         self._part_events: List[Dict[str, Any]] = []
         self._episode_seq = 0
-        self._next_record_step: Optional[int] = None
         self._reset_requested = False
         self._closed = False
         self._logged_snap = False
@@ -198,34 +202,36 @@ class AlohaTeleopPolicy(Policy):
                 os.path.join(_TASK_DIR, "teleop_recorder.log"),
             )
             self._recorder = RecorderClient(server_py, server_script, log_path)
-            init = self._recorder.send({
+            init_msg = {
                 "cmd": "init",
-                "repo_id": os.environ.get("LEROBOT_REPO_ID", "local/roco_aloha_teleop"),
-                "root": os.environ.get("LEROBOT_OUTPUT_ROOT", os.path.join(_REPO_ROOT, "runs")),
-                "fps": RECORD_HZ,
-                "run_id": os.environ.get("ALOHA_TELEOP_RUN_ID", time.strftime("%Y%m%d_%H%M%S")),
-                "task": "Industrial Task Board Assembly",
-                "robot_type": "vega_1u_gripper",
+                "root": os.environ.get(
+                    "LEROBOT_OUTPUT_ROOT", str(self._export.paths.output_root)
+                ),
+                "run_id": os.environ.get(
+                    "ALOHA_TELEOP_RUN_ID", time.strftime("%Y%m%d_%H%M%S")
+                ),
                 "challenge_commit": os.environ.get("ROCO_COMMIT", ""),
                 "config_path": str(cfg_path),
-            })
+            }
+            init_msg.update(self._export.recorder_init_fields())
+            init_msg["repo_id"] = os.environ.get(
+                "LEROBOT_REPO_ID", init_msg["repo_id"]
+            )
+            init = self._recorder.send(init_msg)
             if not init or not init.get("ok"):
                 raise RuntimeError(f"recorder init failed: {init}")
-        if not self._keyboard_mode:
-            print(
-                f"[aloha_teleop] episode_time={self._session.episode_time_s:g}s "
-                f"warmup={self._session.warmup_time_s:g}s "
-                f"num_episodes={self._session.num_episodes}",
-                flush=True,
-            )
-        else:
-            print(
-                f"[aloha_teleop] episode_time={self._session.episode_time_s:g}s "
-                f"warmup={self._session.warmup_time_s:g}s "
-                f"num_episodes={self._session.num_episodes}. "
-                "Hold i/k/... in the Isaac window after warmup.",
-                flush=True,
-            )
+        suffix = ""
+        if self._keyboard_mode:
+            suffix = ". Hold i/k/... in the Isaac window after warmup."
+        print(
+            f"[aloha_teleop] export={self._export.source_path} "
+            f"fps={self._record_fps:g} clock={self._playback_clock} "
+            f"image={self._img_w}x{self._img_h} "
+            f"episode_time={self._session.episode_time_s:g}s "
+            f"warmup={self._session.warmup_time_s:g}s "
+            f"num_episodes={self._session.num_episodes}{suffix}",
+            flush=True,
+        )
 
     @property
     def in_warmup(self) -> bool:
@@ -282,10 +288,15 @@ class AlohaTeleopPolicy(Policy):
 
     def act(self, obs: Observation):
         now = time.monotonic()
+        if self._last_act_wall is None:
+            wall_dt = self._dt
+        else:
+            wall_dt = max(1e-4, min(0.1, now - self._last_act_wall))
+        self._last_act_wall = now
         if self._session.phase == "idle" and not self._session.done:
             self._handle_episode_event(self._session.start(now), now)
 
-        sample = self._read_leader_sample()
+        sample = self._read_leader_sample(wall_dt=wall_dt)
         cmd = "none" if sample is None else (sample.get("cmd") or "none")
         self._apply_cmd(cmd)
         self._handle_episode_event(self._session.step(cmd, now), now)
@@ -352,20 +363,44 @@ class AlohaTeleopPolicy(Policy):
         else:
             self._ik_fail_streak = 0
 
-        if self._session.is_recording:
-            if self._next_record_step is None:
-                self._next_record_step = int(obs.step_idx)
-            if int(obs.step_idx) >= self._next_record_step:
-                self._record(obs, left_pos, left_quat, right_pos, right_quat)
-                self._next_record_step = int(obs.step_idx) + self._record_stride
+        if self._session.is_recording and self._should_record_frame(obs, now):
+            self._record(obs, left_pos, left_quat, right_pos, right_quat)
         self._maybe_log(obs, sample, reason, age, now)
         return action
 
-    def _read_leader_sample(self) -> Optional[Dict[str, Any]]:
+    def _advance_record_deadline(self, deadline: float, now: float) -> float:
+        next_t = deadline + self._record_period_s
+        if now >= next_t:
+            missed = int((now - next_t) / self._record_period_s) + 1
+            next_t += missed * self._record_period_s
+        return next_t
+
+    def _should_record_frame(self, obs: Observation, now: float) -> bool:
+        if self._playback_clock == "sim":
+            sim_t = float(obs.step_idx) * self._dt
+            if self._next_record_sim is None:
+                self._next_record_sim = sim_t
+            if sim_t + 1e-12 < self._next_record_sim:
+                return False
+            self._next_record_sim = self._advance_record_deadline(
+                self._next_record_sim, sim_t
+            )
+            return True
+        if self._next_record_wall is None:
+            self._next_record_wall = now
+        if now + 1e-9 < self._next_record_wall:
+            return False
+        self._next_record_wall = self._advance_record_deadline(
+            self._next_record_wall, now
+        )
+        return True
+
+    def _read_leader_sample(self, wall_dt: Optional[float] = None) -> Optional[Dict[str, Any]]:
         if self._keyboard_mode and self._kbd_ee is not None and self._kbd_input is not None:
             self._maybe_upgrade_keyboard_backend()
             held = self._kbd_input.poll_held()
-            moved = self._kbd_ee.apply_holds(held, self._dt)
+            kbd_dt = float(self._dt if wall_dt is None else wall_dt)
+            moved = self._kbd_ee.apply_holds(held, kbd_dt)
             for edge in self._kbd_input.pop_edges():
                 self._kbd_ee.apply_edge(edge)
             sample = self._kbd_ee.take_sample()
@@ -468,7 +503,8 @@ class AlohaTeleopPolicy(Policy):
         )
         if ev.kind == "warmup_start":
             self._episode_seq = 0
-            self._next_record_step = None
+            self._next_record_wall = None
+            self._next_record_sim = None
             self._abort = False
             self._part_done = False
             self._frames_sent = 0
@@ -476,7 +512,8 @@ class AlohaTeleopPolicy(Policy):
             return
         if ev.kind == "record_start":
             self._episode_seq = 0
-            self._next_record_step = None
+            self._next_record_wall = None
+            self._next_record_sim = None
             if self._recorder is not None:
                 reply = self._recorder.send({
                     "cmd": "begin_episode",
@@ -586,12 +623,16 @@ class AlohaTeleopPolicy(Policy):
             self._right_quat,
             0.0,
         )
-        images = {
-            "head": resize_rgb(obs.rgb.get("head") if obs.rgb else None),
-            "left_hand": resize_rgb(obs.rgb.get("L_wrist") if obs.rgb else None),
-            "right_hand": resize_rgb(obs.rgb.get("R_wrist") if obs.rgb else None),
-        }
-        timestamp_s = float(self._episode_seq) / float(RECORD_HZ)
+        rgb = obs.rgb or {}
+        images = {}
+        for cam in self._cameras:
+            obs_key = self._export.obs_camera_key(cam)
+            images[cam] = resize_rgb(
+                rgb.get(obs_key),
+                height=self._img_h,
+                width=self._img_w,
+            )
+        timestamp_s = float(self._episode_seq) / float(self._record_fps)
         try:
             reply = self._recorder.send({
                 "cmd": "frame",
@@ -600,7 +641,10 @@ class AlohaTeleopPolicy(Policy):
                 "seq": int(self._episode_seq),
                 "state": state.tolist(),
                 "action": action.tolist(),
-                "images": {k: encode_jpeg(v) for k, v in images.items()},
+                "images": {
+                    k: encode_jpeg(v, quality=self._jpeg_quality)
+                    for k, v in images.items()
+                },
                 "part_name": None if self._target is None else self._target.name,
                 "release_mode": None if self._target is None else self._target.release_mode,
             })

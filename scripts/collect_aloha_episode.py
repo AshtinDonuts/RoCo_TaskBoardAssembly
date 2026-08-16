@@ -23,6 +23,11 @@ from typing import Optional
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "task"))
 
+from teleop.export_config import (  # noqa: E402
+    DEFAULT_EXPORT_CONFIG,
+    load_export_config,
+)
+
 ISAAC_PYTHON = ROOT / ".venv" / "bin" / "python"
 LEROBOT_PYTHON = Path.home() / "miniconda3" / "envs" / "lerobot" / "bin" / "python"
 MIN_FREE_RAM_GB = 12.0
@@ -59,7 +64,6 @@ def _isaac_env(extra: dict) -> dict:
         "ALOHA_LEADER_ENDPOINT": os.environ.get(
             "ALOHA_LEADER_ENDPOINT", f"{LEADER_HOST}:{LEADER_PORT}"
         ),
-        "ALOHA_TELEOP_CONFIG": str(ROOT / "config" / "aloha_solo_to_vega_1u.yaml"),
         "LEROBOT_SERVER_PY": str(LEROBOT_PYTHON),
         "LEROBOT_SERVER_SCRIPT": str(ROOT / "tools" / "lerobot_recorder" / "server.py"),
         "ROCO_COMMIT": _git_commit(),
@@ -90,31 +94,58 @@ def wait_for_listen(host: str, port: int, timeout_s: float = 5.0) -> None:
 
 
 def main() -> int:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument(
+        "--export-config",
+        type=Path,
+        default=Path(os.environ.get("ALOHA_EXPORT_CONFIG", str(DEFAULT_EXPORT_CONFIG))),
+    )
+    pre_args, _ = pre.parse_known_args()
+    try:
+        export_cfg = load_export_config(pre_args.export_config)
+    except Exception as exc:
+        print(f"Failed to load export config {pre_args.export_config}: {exc}", file=sys.stderr)
+        return 2
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--repo-id", default="local/roco_aloha_teleop")
-    parser.add_argument("--output-root", type=Path, default=ROOT / "runs")
+    parser.add_argument(
+        "--export-config",
+        type=Path,
+        default=pre_args.export_config,
+        help="Teleop/data-export JSON (fps, image size, session defaults).",
+    )
+    parser.add_argument("--repo-id", default=export_cfg.export.dataset.repo_id)
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=export_cfg.paths.output_root,
+    )
     parser.add_argument("--run-id", default=time.strftime("%Y%m%d_%H%M%S"))
     parser.add_argument("--max-parts", type=int, default=0)
     parser.add_argument("--max-sim-seconds", type=float, default=0.0)
     parser.add_argument(
         "--episode-time-s",
         type=float,
-        default=float(os.environ.get("ROCO_EPISODE_TIME_S", "600")),
-        help="Wall-clock recording duration per episode (default 600 s). "
-             "Right arrow saves earlier.",
+        default=float(
+            os.environ.get("ROCO_EPISODE_TIME_S", str(export_cfg.session.episode_time_s))
+        ),
+        help="Wall-clock recording duration per episode. Right arrow saves earlier.",
     )
     parser.add_argument(
         "--warmup-time-s",
         type=float,
-        default=float(os.environ.get("ROCO_WARMUP_TIME_S", "5")),
-        help="Wall-clock warmup before each episode (default 5 s). "
-             "No frames are recorded during warmup.",
+        default=float(
+            os.environ.get("ROCO_WARMUP_TIME_S", str(export_cfg.session.warmup_time_s))
+        ),
+        help="Wall-clock warmup before each episode. No frames during warmup.",
     )
     parser.add_argument(
         "--num-episodes",
         type=int,
-        default=int(os.environ.get("ROCO_NUM_EPISODES", "1")),
-        help="Episodes to save in this session (default 1).",
+        default=int(
+            os.environ.get("ROCO_NUM_EPISODES", str(export_cfg.session.num_episodes))
+        ),
+        help="Episodes to save in this session.",
     )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--skip-preflight", action="store_true")
@@ -132,6 +163,12 @@ def main() -> int:
     if args.synthetic and args.keyboard:
         print("Use only one of --synthetic or --keyboard.", file=sys.stderr)
         return 2
+    if args.export_config.resolve() != export_cfg.source_path:
+        try:
+            export_cfg = load_export_config(args.export_config)
+        except Exception as exc:
+            print(f"Failed to load export config {args.export_config}: {exc}", file=sys.stderr)
+            return 2
 
     mem = _mem_available_gb()
     if not args.skip_preflight and mem < MIN_FREE_RAM_GB:
@@ -154,6 +191,8 @@ def main() -> int:
     results = args.output_root / args.run_id / "results.json"
     results.parent.mkdir(parents=True, exist_ok=True)
     extra = {
+        "ALOHA_EXPORT_CONFIG": str(export_cfg.source_path),
+        "ALOHA_TELEOP_CONFIG": str(export_cfg.paths.teleop_yaml),
         "LEROBOT_REPO_ID": args.repo_id,
         "LEROBOT_OUTPUT_ROOT": str(args.output_root),
         "ALOHA_TELEOP_RUN_ID": args.run_id,
@@ -223,6 +262,12 @@ def main() -> int:
             return 2
 
     print("Isaac command:", " ".join(cmd), flush=True)
+    print(
+        f"Export config: {export_cfg.source_path} "
+        f"fps={export_cfg.fps:g} clock={export_cfg.export.playback_clock} "
+        f"image={export_cfg.img_w}x{export_cfg.img_h}",
+        flush=True,
+    )
     print(
         f"Recording: episode_time={args.episode_time_s:g}s "
         f"warmup={args.warmup_time_s:g}s num_episodes={args.num_episodes} "
