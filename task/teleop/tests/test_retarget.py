@@ -93,6 +93,36 @@ def test_axes_sign_and_perm():
     np.testing.assert_allclose(pos, origin + np.array([-0.04, 0.10, 0.0]), atol=1e-6)
 
 
+def test_headcam_axes_map_leader_forward_into_image():
+    """Leader +X (away from operator) must move DexMate into the headcam view."""
+    cfg = RetargetConfig(
+        axes_map=(
+            (0.0, 0.57358151, 0.81914849),
+            (-1.0, 0.0, 0.0),
+            (0.0, -0.81914849, 0.57358151),
+        ),
+        translation_gain=1.0,
+        max_lin_vel=10.0,
+        max_ang_vel=10.0,
+        max_lin_acc=0.0,
+    )
+    r = CartesianRetargeter(cfg)
+    origin = np.array([0.2, 0.1, 0.9])
+    r.capture_origins([0, 0, 0], _identity_quat(), origin, _identity_quat())
+    pos, *_ = r.step(
+        leader_pos=[0.10, 0.0, 0.0],
+        leader_quat=_identity_quat(),
+        gripper_norm=0.0,
+        dt=0.05,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=origin,
+        current_dex_quat=_identity_quat(),
+    )
+    # Into headcam ≈ world -Y at INIT head pitch.
+    np.testing.assert_allclose(pos, origin + np.array([0.0, -0.10, 0.0]), atol=1e-5)
+
+
 def test_workspace_clamp_and_rate_limit():
     cfg = RetargetConfig(
         workspace_min=(0.0, -0.1, 0.0),

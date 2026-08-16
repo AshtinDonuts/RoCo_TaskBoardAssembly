@@ -156,7 +156,18 @@ class AlohaTeleopPolicy(Policy):
             )
         # Primary retarget used by recenter / reset operator cmds.
         self._retarget = self._retarget_R
-
+        if retarget_cfg.axes_map is not None:
+            print(
+                "[aloha_teleop] retarget frame=headcam_view (axes_map); "
+                "leader +X → into image, +Y/+Z → image left/up",
+                flush=True,
+            )
+        else:
+            print(
+                f"[aloha_teleop] retarget axes_perm={retarget_cfg.axes_perm} "
+                f"axes_sign={retarget_cfg.axes_sign}",
+                flush=True,
+            )
         self._kbd_ee: Optional[KeyboardEE] = None
         self._kbd_input: Optional[KeyboardInput] = None
         self._leader_R: Optional[LeaderClient] = None
@@ -207,6 +218,8 @@ class AlohaTeleopPolicy(Policy):
                 f"[aloha_teleop] control_arms={self._control_arms} "
                 f"active={self.active_arms}; "
                 "close a leader gripper or send cmd=start. "
+                "Clutch must be ON (Space on leader terminal) for EE motion; "
+                "gripper still maps when clutch is OFF. "
                 f"episode_time={self._session.episode_time_s:g}s "
                 f"warmup={self._session.warmup_time_s:g}s "
                 f"num_episodes={self._session.num_episodes}. "
@@ -893,11 +906,13 @@ class AlohaTeleopPolicy(Policy):
         connected = True if self._keyboard_mode else (
             False if self._leader_R is None else self._leader_R.connected
         )
+        clutch = None if sample is None else sample.get("clutch")
         print(
             f"[aloha_teleop] t={obs.step_idx * self._dt:6.2f}s part="
             f"{getattr(self._target, 'name', None)} reason={reason} "
             f"phase={self._session.phase}{extra} "
             f"arms={self._control_arms} "
+            f"clutch={clutch} "
             f"ik_ok={self._last_ik_ok} "
             f"track_err_mm={self._last_tracking_err_m * 1000.0:.1f} "
             f"target={[round(float(v), 3) for v in target]} "
@@ -908,6 +923,13 @@ class AlohaTeleopPolicy(Policy):
             f"connected={connected}",
             flush=True,
         )
+        if reason == "clutch_off":
+            print(
+                "[aloha_teleop] EE held (clutch OFF). Press Space on the "
+                "leader terminal to engage; gripper-only motion is expected "
+                "while clutch is off.",
+                flush=True,
+            )
 
     def finalize(self, results_json: Optional[str] = None, success: Optional[bool] = None) -> None:
         del success  # task success must not decide whether data is kept

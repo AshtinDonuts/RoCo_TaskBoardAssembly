@@ -10,11 +10,13 @@ from .protocol import COMMANDS
 from . import transforms as T
 
 # Keys not used by clutch / recording / part-done / estop.
+# Translation tokens are world-frame and match the headcam view:
+# into-scene = -Y, image-right = -X, up = +Z (level approx of retarget.axes_map).
 EE_KEY_TO_CMD: Dict[str, str] = {
-    "i": "ee+y",
-    "k": "ee-y",
-    "j": "ee-x",
-    "l": "ee+x",
+    "i": "ee-y",
+    "k": "ee+y",
+    "j": "ee+x",
+    "l": "ee-x",
     "t": "ee+z",
     "g": "ee-z",
     "q": "ee+yaw",
@@ -28,7 +30,7 @@ EE_KEY_TO_CMD: Dict[str, str] = {
 }
 
 KEYBOARD_HELP = (
-    "EEF translate (hold): i/k fwd/back  j/l left/right  t/g up/down\n"
+    "EEF translate (hold, headcam view): i/k into/out  j/l left/right  t/g up/down\n"
     "EEF rotate (hold):    q/a yaw  w/d pitch  z/c roll\n"
     "Gripper:              f close  v open  (binary)\n"
     "Task: space=clutch  r=recenter  p=pause  u=resume  n=part_done  "

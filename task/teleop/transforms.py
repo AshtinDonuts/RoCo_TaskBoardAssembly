@@ -148,6 +148,12 @@ def apply_axes_map(vec: Sequence[float], perm: Sequence[int], signs: Sequence[fl
     return s * v[p]
 
 
+def apply_axes_matrix(vec: Sequence[float], axes_map: Sequence[Sequence[float]]) -> np.ndarray:
+    """Apply a 3x3 linear map: out = axes_map @ vec."""
+    m = np.asarray(axes_map, dtype=np.float64).reshape(3, 3)
+    return m @ as_vec(vec, 3)
+
+
 def clamp_vec(vec: Sequence[float], lo: Sequence[float], hi: Sequence[float]) -> np.ndarray:
     return np.minimum(as_vec(hi, 3), np.maximum(as_vec(lo, 3), as_vec(vec, 3)))
 

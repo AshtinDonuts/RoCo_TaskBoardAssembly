@@ -13,6 +13,9 @@ from . import transforms as T
 class RetargetConfig:
     axes_perm: Tuple[int, int, int] = (0, 1, 2)
     axes_sign: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    # Optional 3x3: DexMate_delta = axes_map @ leader_delta.
+    # When set, replaces axes_perm/axes_sign (used for head-camera view).
+    axes_map: Optional[Tuple[Tuple[float, float, float], ...]] = None
     translation_gain: float = 1.0
     rotation_gain: float = 1.0
     workspace_min: Tuple[float, float, float] = (-1.5, -1.5, 0.02)
@@ -36,11 +39,20 @@ class RetargetConfig:
             kwargs["axes_perm"] = tuple(int(v) for v in kwargs["axes_perm"])
         if "axes_sign" in kwargs:
             kwargs["axes_sign"] = tuple(float(v) for v in kwargs["axes_sign"])
+        if "axes_map" in kwargs and kwargs["axes_map"] is not None:
+            m = np.asarray(kwargs["axes_map"], dtype=np.float64).reshape(3, 3)
+            kwargs["axes_map"] = tuple(tuple(float(x) for x in row) for row in m)
         if "workspace_min" in kwargs:
             kwargs["workspace_min"] = tuple(float(v) for v in kwargs["workspace_min"])
         if "workspace_max" in kwargs:
             kwargs["workspace_max"] = tuple(float(v) for v in kwargs["workspace_max"])
         return cls(**kwargs)
+
+    def map_leader_vec(self, vec: Sequence[float]) -> np.ndarray:
+        """Map a leader-base vector into DexMate world/stage axes."""
+        if self.axes_map is not None:
+            return T.apply_axes_matrix(vec, self.axes_map)
+        return T.apply_axes_map(vec, self.axes_perm, self.axes_sign)
 
 
 @dataclass
@@ -165,7 +177,7 @@ class CartesianRetargeter:
         st = self.state
         cfg = self.cfg
         dp = T.as_vec(leader_pos, 3) - st.leader_origin_pos
-        dp_m = T.apply_axes_map(dp, cfg.axes_perm, cfg.axes_sign) * cfg.translation_gain
+        dp_m = cfg.map_leader_vec(dp) * cfg.translation_gain
         pos = st.dex_origin_pos + dp_m
 
         q_rel = T.quat_multiply_wxyz(
@@ -173,7 +185,7 @@ class CartesianRetargeter:
             T.normalize_quat_wxyz(leader_quat),
         )
         rotvec = T.quat_wxyz_to_rotvec(q_rel) * cfg.rotation_gain
-        rotvec_m = T.apply_axes_map(rotvec, cfg.axes_perm, cfg.axes_sign)
+        rotvec_m = cfg.map_leader_vec(rotvec)
         quat = T.quat_multiply_wxyz(st.dex_origin_quat, T.rotvec_to_quat_wxyz(rotvec_m))
         return pos, quat
 

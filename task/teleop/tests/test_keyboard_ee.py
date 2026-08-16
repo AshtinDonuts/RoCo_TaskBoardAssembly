@@ -12,7 +12,8 @@ def test_ee_keys_do_not_collide_with_task_keys():
 
 def test_key_decoder_extra_chars_motion():
     dec = KeyDecoder(extra_chars=EE_KEY_TO_CMD)
-    assert dec.feed(b"i", now=1.0) == ["ee+y"]
+    assert dec.feed(b"i", now=1.0) == ["ee-y"]
+    assert dec.feed(b"l", now=1.0) == ["ee-x"]
     assert dec.feed(b"f", now=1.0) == ["grip_close"]
     assert dec.feed(b"v", now=1.0) == ["grip_open"]
     assert dec.feed(b"n", now=1.0) == ["part_done"]

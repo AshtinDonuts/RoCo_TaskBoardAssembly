@@ -98,7 +98,9 @@ For `"dual"`, run two leader bridges on the ports in
 `control.leader_endpoints` (left + right); Isaac connects to both.
 
 Close the leader gripper (or press `s`) after the arm reaches the start pose.
-Backdrive then enables. Gravity compensation after that close is **off by
+Backdrive then enables. **Clutch starts ON** after that (DexMate EE tracks
+leader deltas). Press Space to toggle; with clutch OFF only the gripper still
+maps — EE holds. Gravity compensation after that close is **off by
 default**; set `control.gravity_compensation: true` in
 [`config/teleop_export.json`](../config/teleop_export.json) (or launch with
 `gravity_compensation:=true`) to enable it.
@@ -118,7 +120,7 @@ Task / robot keys do **not** save or discard data:
 
 | Key | Action |
 | --- | --- |
-| space | clutch toggle (captures origins on engage) |
+| space | clutch toggle (captures origins on engage; **must be ON for EE motion**) |
 | r | recenter / recapture origins |
 | p | pause (hold last DexMate target) |
 | u | resume |
@@ -171,8 +173,8 @@ After Isaac opens, click the viewport, wait for warmup, then hold:
 
 | Key | Action |
 | --- | --- |
-| i / k | EE forward / back |
-| j / l | EE left / right |
+| i / k | EE into / out of headcam view |
+| j / l | EE left / right in headcam view |
 | t / g | EE up / down |
 | q / a | yaw |
 | w / d | pitch |
@@ -187,11 +189,12 @@ arm stays held (no second keyboard stream).
 
 ## Calibration
 
-After empty-space teleop, edit
+Leader deltas are mapped through `retarget.axes_map` in
 [`config/aloha_solo_to_vega_1u.yaml`](../config/aloha_solo_to_vega_1u.yaml)
-`retarget.axes_perm` and `axes_sign` so that pushing the leader forward/right/up
-moves DexMate the same way in Isaac. Keep rotation gains ≤ 1 until the map
-feels natural.
+so motion matches the **head camera view** (into-image / image-left-right /
+image-up), including the INIT `head_j1` pitch. If the robot root is rotated
+in the stage, recompute that 3×3 (or fall back to `axes_perm` / `axes_sign`).
+Keep rotation gains ≤ 1 until the map feels natural.
 
 **Distance units:** both the physical ALOHA leader EE (Interbotix FK) and the
 DexMate stage use **meters**. `retarget.translation_gain` scales leader meter

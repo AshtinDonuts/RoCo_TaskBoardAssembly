@@ -14,23 +14,11 @@ import threading
 import time
 from typing import Dict, Optional, Set
 
+from .keyboard_ee import EE_KEY_TO_CMD
+
 # Motion / gripper are level-triggered (held). Task/record are edge-triggered.
-HOLD_KEYS = {
-    "i": "ee+y",
-    "k": "ee-y",
-    "j": "ee-x",
-    "l": "ee+x",
-    "t": "ee+z",
-    "g": "ee-z",
-    "q": "ee+yaw",
-    "a": "ee-yaw",
-    "w": "ee+pitch",
-    "d": "ee-pitch",
-    "z": "ee+roll",
-    "c": "ee-roll",
-    "f": "grip_close",
-    "v": "grip_open",
-}
+# Keep in sync with keyboard_ee.EE_KEY_TO_CMD (headcam-view world axes).
+HOLD_KEYS = dict(EE_KEY_TO_CMD)
 
 EDGE_CHARS = {
     " ": "clutch_toggle",
