@@ -118,3 +118,43 @@ def test_gripper_hysteresis():
     c = r.map_gripper(0.5)
     assert a == b
     assert c > a
+
+
+def test_accel_limit_does_not_overshoot_stopped_target():
+    """Coast/overshoot after the leader stops caused keyboard EE drift."""
+    cfg = RetargetConfig(
+        max_lin_vel=1.0,
+        max_ang_vel=10.0,
+        max_lin_acc=0.5,
+    )
+    r = CartesianRetargeter(cfg)
+    origin = np.array([0.0, 0.0, 0.2])
+    r.capture_origins([0, 0, 0], _identity_quat(), origin, _identity_quat())
+    # Build up velocity toward a far target.
+    for _ in range(20):
+        r.step(
+            leader_pos=[0.5, 0.0, 0.0],
+            leader_quat=_identity_quat(),
+            gripper_norm=0.0,
+            dt=0.05,
+            clutch=True,
+            deadman=True,
+            current_dex_pos=origin,
+            current_dex_quat=_identity_quat(),
+        )
+    assert float(np.linalg.norm(r.state.last_lin_vel)) > 0.05
+    stop = r.state.last_pos.copy()
+    # Leader freezes at the current commanded pose: must not keep coasting.
+    for _ in range(30):
+        pos, *_ = r.step(
+            leader_pos=stop - origin,  # relative map: dex = origin + leader
+            leader_quat=_identity_quat(),
+            gripper_norm=0.0,
+            dt=0.05,
+            clutch=True,
+            deadman=True,
+            current_dex_pos=stop,
+            current_dex_quat=_identity_quat(),
+        )
+    np.testing.assert_allclose(pos, stop, atol=1e-6)
+    np.testing.assert_allclose(r.state.last_lin_vel, 0.0, atol=1e-9)

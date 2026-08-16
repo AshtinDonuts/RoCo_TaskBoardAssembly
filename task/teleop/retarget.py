@@ -188,6 +188,7 @@ class CartesianRetargeter:
         prev_quat = self.state.last_quat
         max_dp = self.cfg.max_lin_vel * dt
         desired_dp = pos - prev_pos
+        desired_dist = float(np.linalg.norm(desired_dp))
         limited_dp = T.limit_delta(desired_dp, max_dp)
         if self.cfg.max_lin_acc > 0.0:
             max_dv = self.cfg.max_lin_acc * dt
@@ -196,6 +197,15 @@ class CartesianRetargeter:
             dv = T.limit_delta(dv, max_dv)
             vel = self.state.last_lin_vel + dv
             limited_dp = vel * dt
+            # Never integrate past the commanded target (accel limiting used to
+            # coast/overshoot after the leader stopped).
+            step = float(np.linalg.norm(limited_dp))
+            if desired_dist <= T.EPS:
+                limited_dp = np.zeros(3, dtype=np.float64)
+                vel = np.zeros(3, dtype=np.float64)
+            elif step > desired_dist and step > T.EPS:
+                limited_dp = limited_dp * (desired_dist / step)
+                vel = np.zeros(3, dtype=np.float64)
             self.state.last_lin_vel = vel
         else:
             self.state.last_lin_vel = limited_dp / dt

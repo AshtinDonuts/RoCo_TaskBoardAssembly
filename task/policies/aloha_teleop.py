@@ -187,6 +187,7 @@ class AlohaTeleopPolicy(Policy):
         self._logged_snap = False
         self._last_kbd_move_log_s = 0.0
         self._kbd_backend_retried = False
+        self._kbd_motion_active = False
         self._last_ik_ok = True
         self._last_tracking_err_m = 0.0
 
@@ -330,11 +331,27 @@ class AlohaTeleopPolicy(Policy):
             quat = self._last_left_quat if self._last_left_quat is not None else left_quat
             grip = self._last_left_grip
         else:
+            # Keyboard leader pose advances with wall_dt; rate-limit with the
+            # same clock. On key release, resync origins so we do not coast
+            # toward a virtual-leader backlog built while rate-limited.
+            if (
+                self._keyboard_mode
+                and not self._kbd_motion_active
+                and self._retarget.state.engaged
+                and self._last_left_pos is not None
+                and self._last_left_quat is not None
+            ):
+                self._retarget.capture_origins(
+                    sample["ee_pos"],
+                    sample["ee_quat_wxyz"],
+                    self._last_left_pos,
+                    self._last_left_quat,
+                )
             pos, quat, grip, info = self._retarget.step(
                 leader_pos=sample["ee_pos"],
                 leader_quat=sample["ee_quat_wxyz"],
                 gripper_norm=sample["gripper_norm"],
-                dt=self._dt,
+                dt=wall_dt,
                 clutch=bool(sample["clutch"]) and not self._paused,
                 deadman=bool(sample["deadman"]) and not self._estop,
                 current_dex_pos=left_pos,
@@ -399,6 +416,9 @@ class AlohaTeleopPolicy(Policy):
         if self._keyboard_mode and self._kbd_ee is not None and self._kbd_input is not None:
             self._maybe_upgrade_keyboard_backend()
             held = self._kbd_input.poll_held()
+            self._kbd_motion_active = any(
+                t.startswith("ee+") or t.startswith("ee-") for t in held
+            )
             kbd_dt = float(self._dt if wall_dt is None else wall_dt)
             moved = self._kbd_ee.apply_holds(held, kbd_dt)
             for edge in self._kbd_input.pop_edges():
@@ -414,6 +434,7 @@ class AlohaTeleopPolicy(Policy):
                     flush=True,
                 )
             return sample
+        self._kbd_motion_active = False
         if self._leader is None:
             return None
         sample = self._leader.latest()
