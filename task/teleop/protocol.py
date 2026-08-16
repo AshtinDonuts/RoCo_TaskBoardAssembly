@@ -108,10 +108,11 @@ class KeyDecoder:
       Esc         -> stop_recording
     """
 
-    def __init__(self, esc_timeout_s: float = 0.05) -> None:
+    def __init__(self, esc_timeout_s: float = 0.05, extra_chars: Optional[Dict[str, str]] = None) -> None:
         self.esc_timeout_s = float(esc_timeout_s)
         self._state = "idle"
         self._esc_t0 = 0.0
+        self._extra_chars = dict(extra_chars or {})
 
     def feed(self, data: bytes, now: Optional[float] = None) -> List[str]:
         now = time.monotonic() if now is None else now
@@ -140,7 +141,10 @@ class KeyDecoder:
             except ValueError:
                 return []
             mapped = CHAR_TO_CMD.get(char, CHAR_TO_CMD.get(char.lower()))
-            return [mapped] if mapped else []
+            if mapped:
+                return [mapped]
+            extra = self._extra_chars.get(char, self._extra_chars.get(char.lower()))
+            return [extra] if extra else []
 
         if self._state == "esc":
             if byte == ord("["):

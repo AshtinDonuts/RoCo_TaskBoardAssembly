@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Emit synthetic ALOHA leader samples so Isaac can be tested without hardware."""
+"""Emit synthetic ALOHA leader samples so Isaac can be tested without hardware.
+
+This process blocks until killed. Prefer:
+
+    python3 scripts/collect_aloha_episode.py --synthetic ...
+
+which starts this leader in the background and then launches Isaac.
+"""
 from __future__ import annotations
 
 import argparse

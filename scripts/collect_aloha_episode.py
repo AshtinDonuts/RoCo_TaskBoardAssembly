@@ -3,20 +3,31 @@
 
 Does not import Isaac Sim or LeRobot. Starts the challenge harness under
 the uv/Isaac environment and points it at the isolated LeRobot sidecar.
+
+``--synthetic`` and ``--keyboard`` start a virtual leader in this process
+so you do not need a second blocking terminal before Isaac launches.
 """
 from __future__ import annotations
 
 import argparse
 import os
+import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "task"))
+
 ISAAC_PYTHON = ROOT / ".venv" / "bin" / "python"
 LEROBOT_PYTHON = Path.home() / "miniconda3" / "envs" / "lerobot" / "bin" / "python"
 MIN_FREE_RAM_GB = 12.0
+LEADER_HOST = "127.0.0.1"
+LEADER_PORT = 19850
 
 
 def _mem_available_gb() -> float:
@@ -36,42 +47,46 @@ def _git_commit() -> str:
 
 
 def _isaac_env(extra: dict) -> dict:
-    env = {
-        "HOME": os.environ.get("HOME", str(Path.home())),
-        "USER": os.environ.get("USER", ""),
-        "DISPLAY": os.environ.get("DISPLAY", ""),
-        "XAUTHORITY": os.environ.get("XAUTHORITY", ""),
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
-        "PATH": "/usr/local/bin:/usr/bin:/bin:" + str(ROOT / ".venv" / "bin"),
+    env = os.environ.copy()
+    env.update({
         "OMNI_KIT_ACCEPT_EULA": "YES",
         "ACCEPT_EULA": "Y",
         "PRIVACY_CONSENT": "Y",
+        "PYTHONUNBUFFERED": "1",
         "TASK_ENABLE_CAMERA_OUTPUT": "1",
         "TASK_ENABLE_CAMERA_VIEWPORTS": os.environ.get("TASK_ENABLE_CAMERA_VIEWPORTS", "1"),
         "ROCO_PER_PART_TIMEOUT_STEPS": os.environ.get("ROCO_PER_PART_TIMEOUT_STEPS", "120000"),
-        "ALOHA_LEADER_ENDPOINT": os.environ.get("ALOHA_LEADER_ENDPOINT", "127.0.0.1:19850"),
+        "ALOHA_LEADER_ENDPOINT": os.environ.get(
+            "ALOHA_LEADER_ENDPOINT", f"{LEADER_HOST}:{LEADER_PORT}"
+        ),
         "ALOHA_TELEOP_CONFIG": str(ROOT / "config" / "aloha_solo_to_vega_1u.yaml"),
         "LEROBOT_SERVER_PY": str(LEROBOT_PYTHON),
         "LEROBOT_SERVER_SCRIPT": str(ROOT / "tools" / "lerobot_recorder" / "server.py"),
         "ROCO_COMMIT": _git_commit(),
-        "ROCO_EPISODE_TIME_S": os.environ.get("ROCO_EPISODE_TIME_S", "600"),
-        "ROCO_WARMUP_TIME_S": os.environ.get("ROCO_WARMUP_TIME_S", "5"),
-        "ROCO_NUM_EPISODES": os.environ.get("ROCO_NUM_EPISODES", "1"),
-    }
-    for key in (
-        "XDG_RUNTIME_DIR",
-        "DBUS_SESSION_BUS_ADDRESS",
-        "WAYLAND_DISPLAY",
-        "NVIDIA_VISIBLE_DEVICES",
-        "NVIDIA_DRIVER_CAPABILITIES",
-        "ISAACSIM_HEADLESS",
-        "ISAACSIM_ACTIVE_GPU",
-        "ISAACSIM_PHYSICS_GPU",
-    ):
-        if key in os.environ:
-            env[key] = os.environ[key]
+    })
+    env["PATH"] = str(ROOT / ".venv" / "bin") + os.pathsep + env.get("PATH", "")
     env.update(extra)
     return env
+
+
+def wait_for_listen(host: str, port: int, timeout_s: float = 5.0) -> None:
+    deadline = time.time() + timeout_s
+    last_err: Optional[Exception] = None
+    while time.time() < deadline:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(0.25)
+            sock.connect((host, port))
+            sock.close()
+            return
+        except OSError as exc:
+            last_err = exc
+            try:
+                sock.close()
+            except OSError:
+                pass
+            time.sleep(0.05)
+    raise RuntimeError(f"leader not listening on {host}:{port}: {last_err}")
 
 
 def main() -> int:
@@ -103,15 +118,31 @@ def main() -> int:
     )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--skip-preflight", action="store_true")
-    parser.add_argument("--synthetic", action="store_true",
-                        help="Print the synthetic leader command; does not start it.")
+    parser.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Start a sine-wave virtual leader in the background, then launch Isaac.",
+    )
+    parser.add_argument(
+        "--keyboard",
+        action="store_true",
+        help="Enable in-Isaac keyboard Cartesian teleop (no ALOHA leader TCP).",
+    )
     args = parser.parse_args()
+    if args.synthetic and args.keyboard:
+        print("Use only one of --synthetic or --keyboard.", file=sys.stderr)
+        return 2
 
-    if not args.skip_preflight:
-        mem = _mem_available_gb()
-        if mem < MIN_FREE_RAM_GB:
-            print(f"Need >= {MIN_FREE_RAM_GB} GB RAM free; have {mem:.1f} GB. "
-                  "Close browsers/IDEs or pass --skip-preflight.", file=sys.stderr)
+    mem = _mem_available_gb()
+    if not args.skip_preflight and mem < MIN_FREE_RAM_GB:
+        msg = (
+            f"Need >= {MIN_FREE_RAM_GB} GB RAM free; have {mem:.1f} GB. "
+            "Close browsers/IDEs or pass --skip-preflight."
+        )
+        if args.synthetic or args.keyboard:
+            print(msg + " Continuing because this is a virtual-leader run.", flush=True)
+        else:
+            print(msg, file=sys.stderr)
             return 2
     if not ISAAC_PYTHON.exists():
         print(f"Isaac venv missing: {ISAAC_PYTHON}. Run `uv sync` in {ROOT}.", file=sys.stderr)
@@ -148,13 +179,49 @@ def main() -> int:
     if args.max_sim_seconds:
         cmd += ["--max-sim-seconds", str(args.max_sim_seconds)]
 
-    print("Leader (hardware):")
-    print("  source /opt/ros/humble/setup.bash")
-    print("  source /home/khw/interbotix_ws/install/setup.bash")
-    print("  ros2 launch aloha_isaac_teleop leader_only.launch.py robot:=aloha_solo")
+    stop = threading.Event()
+    leader_proc: Optional[subprocess.Popen] = None
+    if args.keyboard:
+        extra["ALOHA_KEYBOARD_TELEOP"] = "1"
+        print(
+            "[collect] keyboard teleop runs inside Isaac (carb.input). "
+            "Focus the Isaac viewport and hold i/k/j/l/t/g after launch.",
+            flush=True,
+        )
+    elif args.synthetic:
+        leader_proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "synthetic_leader.py"),
+                "--host",
+                LEADER_HOST,
+                "--port",
+                str(LEADER_PORT),
+            ],
+            stdin=subprocess.DEVNULL,
+        )
+        print(
+            f"[collect] started synthetic leader pid={leader_proc.pid} "
+            f"on {LEADER_HOST}:{LEADER_PORT}",
+            flush=True,
+        )
+    else:
+        print("Leader (hardware) must already be running:")
+        print("  source /opt/ros/humble/setup.bash")
+        print("  source /home/khw/interbotix_ws/install/setup.bash")
+        print("  ros2 launch aloha_isaac_teleop leader_only.launch.py robot:=aloha_solo")
+
     if args.synthetic:
-        print("Synthetic leader:")
-        print(f"  {sys.executable} {ROOT / 'scripts' / 'synthetic_leader.py'}")
+        try:
+            wait_for_listen(LEADER_HOST, LEADER_PORT, timeout_s=5.0)
+            time.sleep(0.2)
+        except RuntimeError as exc:
+            print(f"[collect] {exc}", file=sys.stderr)
+            stop.set()
+            if leader_proc is not None:
+                leader_proc.terminate()
+            return 2
+
     print("Isaac command:", " ".join(cmd), flush=True)
     print(
         f"Recording: episode_time={args.episode_time_s:g}s "
@@ -162,10 +229,40 @@ def main() -> int:
         "(Right=save  Left=rerecord  Esc=stop)",
         flush=True,
     )
+    print("[collect] launching Isaac Sim...", flush=True)
 
-    proc = subprocess.run(cmd, cwd=str(ROOT / "task"), env=_isaac_env(extra))
-    print(f"harness exit={proc.returncode} results={results}")
-    return proc.returncode
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT / "task"),
+        env=_isaac_env(extra),
+    )
+
+    def _shutdown(*_args):
+        stop.set()
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGINT)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+    try:
+        code = proc.wait()
+    finally:
+        stop.set()
+        if leader_proc is not None and leader_proc.poll() is None:
+            leader_proc.terminate()
+            try:
+                leader_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                leader_proc.kill()
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            code = proc.returncode if proc.returncode is not None else 1
+    print(f"harness exit={code} results={results}")
+    return int(code or 0)
 
 
 if __name__ == "__main__":

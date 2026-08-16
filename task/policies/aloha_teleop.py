@@ -25,6 +25,8 @@ if _TASK_DIR not in sys.path:
 
 from policy_api import EnvInfo, Observation, PartTarget, Policy  # noqa: E402
 from teleop.episode import EpisodeEvent, EpisodeSession  # noqa: E402
+from teleop.keyboard_ee import KEYBOARD_HELP, KeyboardEE  # noqa: E402
+from teleop.keyboard_input import KeyboardInput  # noqa: E402
 from teleop.leader_client import LeaderClient  # noqa: E402
 from teleop.protocol import DEFAULT_HOST, DEFAULT_PORT, parse_endpoint  # noqa: E402
 from teleop.recorder_client import RecorderClient  # noqa: E402
@@ -114,11 +116,47 @@ class AlohaTeleopPolicy(Policy):
             ),
         )
         self._retarget = CartesianRetargeter(RetargetConfig.from_dict(raw.get("retarget")))
-        endpoint = os.environ.get("ALOHA_LEADER_ENDPOINT", raw.get("leader_endpoint", f"{DEFAULT_HOST}:{DEFAULT_PORT}"))
-        host, port = parse_endpoint(str(endpoint))
-        self._leader = LeaderClient(host=host, port=port)
-        self._leader.start()
-
+        self._keyboard_mode = os.environ.get("ALOHA_KEYBOARD_TELEOP", "").lower() in {
+            "1", "true", "yes", "on",
+        }
+        self._kbd_ee: Optional[KeyboardEE] = None
+        self._kbd_input: Optional[KeyboardInput] = None
+        self._leader = None
+        if self._keyboard_mode:
+            kcfg = raw.get("keyboard") or {}
+            self._kbd_ee = KeyboardEE(
+                lin_vel_mps=float(kcfg.get("lin_vel_mps", 0.12)),
+                ang_vel_rps=float(kcfg.get("ang_vel_rps", 0.8)),
+            )
+            self._kbd_input = KeyboardInput()
+            backend = self._kbd_input.start()
+            print(
+                f"[aloha_teleop] keyboard teleop backend={backend}\n{KEYBOARD_HELP}",
+                flush=True,
+            )
+            if backend == "none":
+                print(
+                    "[aloha_teleop] warning: no keyboard backend yet; "
+                    "will retry carb.input after the sim is running",
+                    flush=True,
+                )
+        else:
+            endpoint = os.environ.get(
+                "ALOHA_LEADER_ENDPOINT",
+                raw.get("leader_endpoint", f"{DEFAULT_HOST}:{DEFAULT_PORT}"),
+            )
+            host, port = parse_endpoint(str(endpoint))
+            self._leader = LeaderClient(host=host, port=port)
+            self._leader.start()
+            print(
+                f"[aloha_teleop] waiting for leader at {host}:{port}; "
+                "close the leader gripper or send cmd=start. "
+                f"episode_time={self._session.episode_time_s:g}s "
+                f"warmup={self._session.warmup_time_s:g}s "
+                f"num_episodes={self._session.num_episodes}. "
+                "Right=save  Left=rerecord  Esc=stop",
+                flush=True,
+            )
         self._paused = False
         self._estop = False
         self._abort = False
@@ -139,9 +177,14 @@ class AlohaTeleopPolicy(Policy):
         self._latencies_ms: List[float] = []
         self._part_events: List[Dict[str, Any]] = []
         self._episode_seq = 0
+        self._next_record_step: Optional[int] = None
         self._reset_requested = False
         self._closed = False
         self._logged_snap = False
+        self._last_kbd_move_log_s = 0.0
+        self._kbd_backend_retried = False
+        self._last_ik_ok = True
+        self._last_tracking_err_m = 0.0
 
         self._recorder = None
         server_py = os.environ.get("LEROBOT_SERVER_PY")
@@ -168,16 +211,21 @@ class AlohaTeleopPolicy(Policy):
             })
             if not init or not init.get("ok"):
                 raise RuntimeError(f"recorder init failed: {init}")
-
-        print(
-            f"[aloha_teleop] waiting for leader at {host}:{port}; "
-            "close the leader gripper or send cmd=start. "
-            f"episode_time={self._session.episode_time_s:g}s "
-            f"warmup={self._session.warmup_time_s:g}s "
-            f"num_episodes={self._session.num_episodes}. "
-            "Right=save  Left=rerecord  Esc=stop",
-            flush=True,
-        )
+        if not self._keyboard_mode:
+            print(
+                f"[aloha_teleop] episode_time={self._session.episode_time_s:g}s "
+                f"warmup={self._session.warmup_time_s:g}s "
+                f"num_episodes={self._session.num_episodes}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[aloha_teleop] episode_time={self._session.episode_time_s:g}s "
+                f"warmup={self._session.warmup_time_s:g}s "
+                f"num_episodes={self._session.num_episodes}. "
+                "Hold i/k/... in the Isaac window after warmup.",
+                flush=True,
+            )
 
     @property
     def in_warmup(self) -> bool:
@@ -209,6 +257,9 @@ class AlohaTeleopPolicy(Policy):
         self._right_quat = right_quat
         self._retarget.disengage()
         self._ik_fail_streak = 0
+        lo = np.asarray(self._retarget.cfg.workspace_min, dtype=np.float64)
+        hi = np.asarray(self._retarget.cfg.workspace_max, dtype=np.float64)
+        in_workspace = bool(np.all(left_pos >= lo) and np.all(left_pos <= hi))
         self._part_events.append({
             "event": "part_start",
             "name": target.name,
@@ -216,46 +267,53 @@ class AlohaTeleopPolicy(Policy):
         })
         print(
             f"[aloha_teleop] part={target.name} release={target.release_mode} "
-            f"pick={target.pick_pos} place={target.place_pos}",
+            f"pick={target.pick_pos} place={target.place_pos} "
+            f"ee_start={[round(float(v), 4) for v in left_pos]} "
+            f"workspace_ok={in_workspace}",
             flush=True,
         )
+        if not in_workspace:
+            print(
+                f"[aloha_teleop] ERROR: initial EE is outside workspace "
+                f"lo={lo.tolist()} hi={hi.tolist()}; refusing to clamp toward "
+                "an unrelated target",
+                flush=True,
+            )
 
     def act(self, obs: Observation):
         now = time.monotonic()
         if self._session.phase == "idle" and not self._session.done:
             self._handle_episode_event(self._session.start(now), now)
 
-        sample = self._leader.latest()
-        cmd = self._leader.pop_cmd() if sample is not None else "none"
+        sample = self._read_leader_sample()
+        cmd = "none" if sample is None else (sample.get("cmd") or "none")
         self._apply_cmd(cmd)
         self._handle_episode_event(self._session.step(cmd, now), now)
         self._note_snap(obs)
 
         left_pos, left_quat = _ee_pose(self.L, obs.ee_pose_L)
         right_pos, right_quat = _ee_pose(self.R, (self._right_pos, self._right_quat))
-        age = self._leader.age_s()
+        age = 0.0 if self._keyboard_mode else self._leader.age_s()
         hold = (
             self._estop
             or self._paused
             or self._abort
-            or self._session.is_warmup
             or self._session.done
         )
+        # Keyboard teleop tracks during episode warmup; TCP leaders still hold.
+        if (not self._keyboard_mode) and self._session.is_warmup:
+            hold = True
         reason = "tracking"
         if self._session.is_warmup:
             reason = "warmup"
         elif self._abort:
             reason = "abort_hold"
-        if sample is None or age > self._stale_pause_s:
+        if sample is None or ((not self._keyboard_mode) and age > self._stale_pause_s):
             hold = True
             reason = "stale_pause" if sample is not None else "no_sample"
-        elif age > self._stale_hold_s:
+        elif (not self._keyboard_mode) and age > self._stale_hold_s:
             hold = True
             reason = "stale_hold"
-        if self._ik_fail_streak >= self._max_ik_fails:
-            hold = True
-            reason = "ik_fail"
-
         if hold or sample is None:
             pos = self._last_left_pos if self._last_left_pos is not None else left_pos
             quat = self._last_left_quat if self._last_left_quat is not None else left_quat
@@ -282,16 +340,71 @@ class AlohaTeleopPolicy(Policy):
         self._last_left_quat = T.normalize_quat_wxyz(quat)
         self._last_left_grip = float(grip)
         action = self.L.forward(self._last_left_pos, self._last_left_quat, float(self._last_left_grip))
-        err = float(np.linalg.norm(self._last_left_pos - left_pos))
-        if err > 0.12:
+        ik = getattr(self.L, "ik", None)
+        ik_ok = bool(getattr(ik, "ik_ok", True))
+        self._last_ik_ok = ik_ok
+        self._last_tracking_err_m = float(
+            np.linalg.norm(self._last_left_pos - left_pos)
+        )
+        if not ik_ok:
             self._ik_fail_streak += 1
+            reason = "ik_reject"
         else:
             self._ik_fail_streak = 0
 
-        if self._session.is_recording and obs.step_idx % self._record_stride == 0:
-            self._record(obs, left_pos, left_quat, right_pos, right_quat)
+        if self._session.is_recording:
+            if self._next_record_step is None:
+                self._next_record_step = int(obs.step_idx)
+            if int(obs.step_idx) >= self._next_record_step:
+                self._record(obs, left_pos, left_quat, right_pos, right_quat)
+                self._next_record_step = int(obs.step_idx) + self._record_stride
         self._maybe_log(obs, sample, reason, age, now)
         return action
+
+    def _read_leader_sample(self) -> Optional[Dict[str, Any]]:
+        if self._keyboard_mode and self._kbd_ee is not None and self._kbd_input is not None:
+            self._maybe_upgrade_keyboard_backend()
+            held = self._kbd_input.poll_held()
+            moved = self._kbd_ee.apply_holds(held, self._dt)
+            for edge in self._kbd_input.pop_edges():
+                self._kbd_ee.apply_edge(edge)
+            sample = self._kbd_ee.take_sample()
+            if moved and (time.monotonic() - self._last_kbd_move_log_s) > 0.5:
+                self._last_kbd_move_log_s = time.monotonic()
+                print(
+                    f"[aloha_teleop] kbd move held={sorted(held)} "
+                    f"leader_pos={[round(v, 3) for v in sample['ee_pos']]} "
+                    f"grip={sample['gripper_norm']:.0f} "
+                    f"clutch={sample['clutch']} backend={self._kbd_input.backend}",
+                    flush=True,
+                )
+            return sample
+        if self._leader is None:
+            return None
+        sample = self._leader.latest()
+        if sample is None:
+            return None
+        sample = dict(sample)
+        sample["cmd"] = self._leader.pop_cmd()
+        return sample
+
+    def _maybe_upgrade_keyboard_backend(self) -> None:
+        if self._kbd_input is None:
+            return
+        if self._kbd_input.backend == "carb":
+            return
+        # Kit may not expose the app window at Policy.__init__; retry once.
+        if getattr(self, "_kbd_backend_retried", False):
+            return
+        self._kbd_backend_retried = True
+        old = self._kbd_input.backend
+        self._kbd_input.close()
+        self._kbd_input = KeyboardInput()
+        backend = self._kbd_input.start()
+        print(
+            f"[aloha_teleop] keyboard backend retry {old} -> {backend}",
+            flush=True,
+        )
 
     def is_done(self, obs: Observation) -> bool:
         if self._abort or self._session.is_warmup or self._session.done:
@@ -355,6 +468,7 @@ class AlohaTeleopPolicy(Policy):
         )
         if ev.kind == "warmup_start":
             self._episode_seq = 0
+            self._next_record_step = None
             self._abort = False
             self._part_done = False
             self._frames_sent = 0
@@ -362,6 +476,7 @@ class AlohaTeleopPolicy(Policy):
             return
         if ev.kind == "record_start":
             self._episode_seq = 0
+            self._next_record_step = None
             if self._recorder is not None:
                 reply = self._recorder.send({
                     "cmd": "begin_episode",
@@ -440,7 +555,10 @@ class AlohaTeleopPolicy(Policy):
             "p95_latency_ms": (
                 float(np.percentile(self._latencies_ms, 95)) if self._latencies_ms else None
             ),
-            "leader_hz": self._leader.hz,
+            "leader_hz": (
+                None if self._leader is None else self._leader.hz
+            ),
+            "keyboard_mode": bool(self._keyboard_mode),
         }
 
     def _record(self, obs: Observation, left_pos, left_quat, right_pos, right_quat) -> None:
@@ -511,9 +629,14 @@ class AlohaTeleopPolicy(Policy):
             f"[aloha_teleop] t={obs.step_idx * self._dt:6.2f}s part="
             f"{getattr(self._target, 'name', None)} reason={reason} "
             f"phase={self._session.phase}{extra} "
-            f"leader_hz={self._leader.hz:5.1f} age={age:.3f}s "
+            f"ik_ok={self._last_ik_ok} "
+            f"track_err_mm={self._last_tracking_err_m * 1000.0:.1f} "
+            f"target={[round(float(v), 3) for v in self._last_left_pos]} "
+            f"leader_hz={(0.0 if self._leader is None else self._leader.hz):5.1f} "
+            f"age={age:.3f}s "
             f"p95_lat_ms={p95:.1f} frames={self._frames_sent} drops={self._drops} "
-            f"connected={self._leader.connected}",
+            f"connected="
+            f"{True if self._keyboard_mode else (False if self._leader is None else self._leader.connected)}",
             flush=True,
         )
 
@@ -538,10 +661,18 @@ class AlohaTeleopPolicy(Policy):
             except Exception:
                 pass
             self._recorder = None
-        try:
-            self._leader.close()
-        except Exception:
-            pass
+        if self._kbd_input is not None:
+            try:
+                self._kbd_input.close()
+            except Exception:
+                pass
+            self._kbd_input = None
+        if self._leader is not None:
+            try:
+                self._leader.close()
+            except Exception:
+                pass
+            self._leader = None
 
     def __del__(self):
         try:

@@ -1173,7 +1173,9 @@ def main():
                 continue
 
             if recording_mode and getattr(policy, "in_warmup", False):
-                _apply_init_joint_targets()
+                # Do not fight keyboard teleop by teleporting joints every tick.
+                if not getattr(policy, "_keyboard_mode", False):
+                    _apply_init_joint_targets()
                 obs = _build_observation()
                 _command_arms(policy.act(obs))
                 continue

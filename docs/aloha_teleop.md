@@ -136,11 +136,41 @@ parts (gears, batteries) wait for `n`.
 
 ## Synthetic leader (no hardware)
 
+`synthetic_leader.py` is a blocking TCP server. Do **not** run it in the same
+terminal before collect — that is why Isaac never launched and you had to
+Ctrl-C. Pass `--synthetic` and collect starts the sine-wave leader itself,
+waits until port 19850 is listening, then launches Isaac:
+
 ```bash
-python3 /home/khw/RoCo_TaskBoardAssembly/scripts/synthetic_leader.py
 python3 /home/khw/RoCo_TaskBoardAssembly/scripts/collect_aloha_episode.py \
   --synthetic --max-parts 1 --episode-time-s 20 --warmup-time-s 2
 ```
+
+## Keyboard Cartesian teleop (no hardware)
+
+Keyboard teleop runs **inside Isaac** (`ALOHA_KEYBOARD_TELEOP=1`) so keys work
+while the viewport has focus. Hold keys for continuous motion (~0.12 m/s).
+
+```bash
+python3 /home/khw/RoCo_TaskBoardAssembly/scripts/collect_aloha_episode.py \
+  --keyboard --max-parts 1 --episode-time-s 20 --warmup-time-s 2
+```
+
+After Isaac opens, click the viewport, wait for warmup, then hold:
+
+| Key | Action |
+| --- | --- |
+| i / k | EE forward / back |
+| j / l | EE left / right |
+| t / g | EE up / down |
+| q / a | yaw |
+| w / d | pitch |
+| z / c | roll |
+| f | gripper close |
+| v | gripper open |
+
+You should see `[aloha_teleop] kbd move held=...` in the Isaac log when keys
+register. Task/recording keys are unchanged (`n`, `x`, arrows, Esc).
 
 ## Calibration
 

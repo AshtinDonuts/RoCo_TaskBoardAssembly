@@ -23,8 +23,10 @@ retarget:
   axes_sign: [1.0, 1.0, 1.0]
   translation_gain: 1.0
   rotation_gain: 1.0
-  workspace_min: [-0.20, -0.70, 0.02]
-  workspace_max: [0.70, 0.70, 0.70]
+  # Stage/world coordinates. The task board and initial EE are near z=1 m;
+  # the old z max of 0.70 clamped the initial target and caused IK lockout.
+  workspace_min: [-0.50, -0.80, 0.50]
+  workspace_max: [0.80, 0.80, 1.50]
   max_lin_vel: 0.35
   max_ang_vel: 1.2
   max_lin_acc: 2.0
@@ -33,6 +35,10 @@ retarget:
   gripper_hysteresis: 0.03
   stale_hold_s: 0.10
   stale_pause_s: 0.50
+
+keyboard:
+  lin_vel_mps: 0.12
+  ang_vel_rps: 0.8
 
 recording:
   episode_time_s: 600
