@@ -788,9 +788,6 @@ def main():
     L_robot = my_robots["L"]
 
     dof_names = list(L_robot.dof_names)
-    R_arm_dof_indices = np.array(
-        [dof_names.index(j) for j in R_ARM_JOINT_NAMES], dtype=np.int64
-    )
     L_gripper_dof_index = dof_names.index("L_gripper_joint")
     L_arm_joint_names = [j for j in dof_names if j.startswith("L_arm_j")]
 
@@ -811,18 +808,49 @@ def main():
         L_robot.set_joint_positions(full_q)
         L_robot.set_joint_velocities(np.zeros(len(dof_names)))
 
-    def _command_arms(L_action):
-        R_action_positions = [None] * len(dof_names)
-        for j_idx, val in zip(R_arm_dof_indices, R_arm_hold_q.tolist()):
-            R_action_positions[j_idx] = float(val)
-        R_action = ArticulationAction(joint_positions=R_action_positions)
-        merged = merge_bimanual_actions(L_action, R_action, dof_names)
-        articulation_controller.apply_action(merged)
-
     _apply_init_joint_targets()
 
-    # R: latch init pose, command those joints every step.
-    R_arm_hold_q = np.asarray(L_robot.get_joint_positions())[R_arm_dof_indices].astype(np.float64)
+    # Latch init poses for inactive-arm holds. Policies may declare
+    # `active_arms` (default ("L",)) so teleop can drive R or both.
+    _q0 = np.asarray(L_robot.get_joint_positions(), dtype=np.float64)
+    L_hold = {
+        i: float(_q0[i])
+        for i, jname in enumerate(dof_names)
+        if jname in L_OWNED_JOINTS
+    }
+    R_hold = {
+        i: float(_q0[i])
+        for i, jname in enumerate(dof_names)
+        if jname in R_OWNED_JOINTS
+    }
+
+    def _command_arms(policy_action):
+        active = set(getattr(policy, "active_arms", ("L",)))
+        n = len(dof_names)
+        pol = [None] * n
+        if policy_action is not None:
+            jp = getattr(policy_action, "joint_positions", None)
+            if jp is not None:
+                pol = list(jp)
+                if len(pol) < n:
+                    pol = pol + [None] * (n - len(pol))
+        merged = [None] * n
+        for i, jname in enumerate(dof_names):
+            if jname in L_OWNED_JOINTS:
+                if "L" in active:
+                    merged[i] = pol[i]
+                else:
+                    merged[i] = L_hold.get(i)
+            elif jname in R_OWNED_JOINTS:
+                if "R" in active:
+                    merged[i] = pol[i]
+                else:
+                    merged[i] = R_hold.get(i)
+            else:
+                merged[i] = pol[i] if pol[i] is not None else None
+        articulation_controller.apply_action(
+            ArticulationAction(joint_positions=merged)
+        )
 
     # Snapshot the L arm's c-space joint vector at startup. The baseline
     # policy uses this as the return-home target between parts; other

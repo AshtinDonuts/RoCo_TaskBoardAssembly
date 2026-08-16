@@ -151,15 +151,11 @@ OWNS_TORSO_R = False
 # IK kinematic chain stays consistent with the runtime joint state.
 LIFT_INIT_M = 0.0
 
-# R-arm resting pose. True = tucked ([-90, 0, 0, 0, 0, 0, 0] deg, R_arm_j1
-# folded out of the way); False = forward USDA pose from vega_1u_gripper.usda
-# ([-15, -20, 0, 0, 0, 0, 0] deg). Keep True when L handles every pick on its
-# own — gives L more workspace clearance. Flip to False when running the L→R
-# handoff flow (R needs to be reach-ready for picks L can't make). The L
-# descriptor yamls' R_arm_j* fixed values currently assume TUCKED — flipping
-# to False without updating those will leave Lula's collision spheres for R
-# slightly off (acceptable while R isn't actively doing IK).
-R_ARM_TUCKED = True
+# Which arm holds the tucked rest pose. Teleop default drives the *right*
+# arm (control.arms=right), so R keeps the scene workspace pose and L is
+# tucked out of the way (L↔R swap vs the historical scripted-L layout).
+L_ARM_TUCKED = True
+R_ARM_TUCKED = False
 
 # Joint targets applied at sim start AND on every restart (stop+play).
 # Overrides whatever USDA-driven joint values World.reset() restores to —
@@ -168,51 +164,38 @@ R_ARM_TUCKED = True
 # stop-and-replay. Values in RADIANS for revolute joints, METERS for
 # prismatic. Joints not listed are left untouched.
 #
-# Defaults below mirror vega_1u_gripper.usda's L arm init (-15, 10, 0, 5,
-# 0, 30, -30 deg) plus Lift = LIFT_INIT_M.  Edit values here without
-# touching the USDA.
+# Workspace pose (deg): [-30, +60, +100, -100, -10, -10, -60]
+# Tucked pose (deg):    [-90, 0, 0, 0, 0, 0, 0]
+_WORKSPACE_ARM_Q = {
+    "j1": -0.52359878,   #  -30 deg
+    "j2":  1.04719755,   #  +60 deg
+    "j3":  1.74532925,   # +100 deg
+    "j4": -1.74532925,   # -100 deg
+    "j5": -0.17453293,   #  -10 deg
+    "j6": -0.17453293,   #  -10 deg
+    "j7": -1.04719755,   #  -60 deg
+}
+_TUCKED_ARM_Q = {
+    "j1": -1.57079633,   #  -90 deg
+    "j2":  0.0,
+    "j3":  0.0,
+    "j4":  0.0,
+    "j5":  0.0,
+    "j6":  0.0,
+    "j7":  0.0,
+}
+
 INIT_JOINT_TARGETS = {
     "Lift":      LIFT_INIT_M,
-    # L_arm values mirror the drive targets authored in scene_base.usd
-    # (so the post-reset PD target matches what the scene drives toward,
-    # eliminating the immediate snap-back to the scene pose that would
-    # otherwise pull the arm out of the gripper USDA's neutral pose).
-    "L_arm_j1": -0.52359878,   #  -30 deg
-    "L_arm_j2":  1.04719755,   #  +60 deg
-    "L_arm_j3":  1.74532925,   # +100 deg
-    "L_arm_j4": -1.74532925,   # -100 deg
-    "L_arm_j5": -0.17453293,   #  -10 deg
-    "L_arm_j6": -0.17453293,   #  -10 deg
-    "L_arm_j7": -1.04719755,   #  -60 deg
     "head_j1":   0.95993109,   #  +55 deg, selected head camera pitch
     "head_j2":   0.0,
     "head_j3":   0.0,
 }
 
-# R-arm values derived from R_ARM_TUCKED so flipping the flag above
-# automatically reconfigures the post-reset R pose — no edits needed here.
-if R_ARM_TUCKED:
-    # j1 = -90 deg, rest = 0  (folded out of the way).
-    INIT_JOINT_TARGETS.update({
-        "R_arm_j1": -1.57079633,
-        "R_arm_j2":  0.0,
-        "R_arm_j3":  0.0,
-        "R_arm_j4":  0.0,
-        "R_arm_j5":  0.0,
-        "R_arm_j6":  0.0,
-        "R_arm_j7":  0.0,
-    })
-else:
-    # USDA forward pose: j1=-15, j2=-20, rest=0.
-    INIT_JOINT_TARGETS.update({
-        "R_arm_j1": -0.26179939,
-        "R_arm_j2": -0.34906585,
-        "R_arm_j3":  0.0,
-        "R_arm_j4":  0.0,
-        "R_arm_j5":  0.0,
-        "R_arm_j6":  0.0,
-        "R_arm_j7":  0.0,
-    })
+_L_pose = _TUCKED_ARM_Q if L_ARM_TUCKED else _WORKSPACE_ARM_Q
+_R_pose = _TUCKED_ARM_Q if R_ARM_TUCKED else _WORKSPACE_ARM_Q
+INIT_JOINT_TARGETS.update({f"L_arm_{k}": v for k, v in _L_pose.items()})
+INIT_JOINT_TARGETS.update({f"R_arm_{k}": v for k, v in _R_pose.items()})
 
 
 # ===========================================================================

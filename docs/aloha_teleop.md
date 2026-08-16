@@ -1,10 +1,12 @@
 # ALOHA Solo to DexMate Vega 1U teleoperation
 
 This pipeline uses the physical ALOHA Solo **leader** as a Cartesian input device
-for the RoCo Industrial Task Board scene in Isaac Sim 5.1. The DexMate
-`vega_1u_gripper` left arm is driven through the challenge Lula IK. The physical
-follower is never launched. Demonstrations are written as LeRobot v3 episodes
-with the challenge 44-D state / 14-D action contract.
+for the RoCo Industrial Task Board scene in Isaac Sim 5.1. By default the DexMate
+`vega_1u_gripper` **right** arm is driven through Lula IK (`control.arms: "right"`
+in [`config/teleop_export.json`](../config/teleop_export.json)). Set
+`control.arms` to `"dual"` to drive both virtual arms from two leader TCP
+streams. The physical follower is never launched. Demonstrations are written as
+LeRobot v3 episodes with the challenge 44-D state / 14-D action contract.
 
 ## Environments
 
@@ -91,8 +93,15 @@ source /home/khw/interbotix_ws/install/setup.bash
 ros2 launch aloha_isaac_teleop leader_only.launch.py robot:=aloha_solo
 ```
 
+Default `control.arms` is `"right"`: that Solo leader maps onto DexMate **right**.
+For `"dual"`, run two leader bridges on the ports in
+`control.leader_endpoints` (left + right); Isaac connects to both.
+
 Close the leader gripper (or press `s`) after the arm reaches the start pose.
-Gravity compensation then enables backdriving.
+Backdrive then enables. Gravity compensation after that close is **off by
+default**; set `control.gravity_compensation: true` in
+[`config/teleop_export.json`](../config/teleop_export.json) (or launch with
+`gravity_compensation:=true`) to enable it.
 
 Terminal 2, Isaac + recorder:
 
@@ -139,7 +148,9 @@ parts (gears, batteries) wait for `n`.
 `synthetic_leader.py` is a blocking TCP server. Do **not** run it in the same
 terminal before collect — that is why Isaac never launched and you had to
 Ctrl-C. Pass `--synthetic` and collect starts the sine-wave leader itself,
-waits until port 19850 is listening, then launches Isaac:
+waits until port(s) are listening, then launches Isaac. With
+`control.arms: "dual"`, collect starts **two** synthetic leaders on the
+configured left/right ports:
 
 ```bash
 python3 /home/khw/RoCo_TaskBoardAssembly/scripts/collect_aloha_episode.py \
@@ -171,16 +182,25 @@ After Isaac opens, click the viewport, wait for warmup, then hold:
 
 You should see `[aloha_teleop] kbd move held=...` in the Isaac log when keys
 register. Task/recording keys are unchanged (`n`, `x`, arrows, Esc).
+Keyboard always drives the **right** arm; with `control.arms: "dual"` the left
+arm stays held (no second keyboard stream).
 
 ## Calibration
 
 After empty-space teleop, edit
 [`config/aloha_solo_to_vega_1u.yaml`](../config/aloha_solo_to_vega_1u.yaml)
 `retarget.axes_perm` and `axes_sign` so that pushing the leader forward/right/up
-moves DexMate the same way in Isaac. Keep translation/rotation gains ≤ 1 until
-the map feels natural. Workspace bounds and velocity limits are the software
-safety layer; stale packets hold the last target at 100 ms and pause tracking
-at 500 ms.
+moves DexMate the same way in Isaac. Keep rotation gains ≤ 1 until the map
+feels natural.
+
+**Distance units:** both the physical ALOHA leader EE (Interbotix FK) and the
+DexMate stage use **meters**. `retarget.translation_gain` scales leader meter
+deltas onto DexMate (`1.0` = 1:1). Default is **2.0** so a small leader hand
+motion covers more of the task-board workspace; raise/lower that gain (and
+keep `max_lin_vel` high enough that rate limiting does not cancel it) if
+DexMate still feels short or overshoots. Workspace bounds and velocity limits
+are the software safety layer; stale packets hold the last target at 100 ms and
+pause tracking at 500 ms.
 
 ## Dataset contract
 
@@ -190,10 +210,23 @@ value (`export.fps`, default **10**). With `export.playback_clock: wall` (defaul
 frames are wall-clock gated so **1 s of teleop ≈ 1 s of mp4 replay**, matching
 what the operator saw. Use `sim` only when you want physics-time gating.
 
+Arm targeting (`control` block):
+
+| `control.arms` | Leaders | DexMate |
+| --- | --- | --- |
+| `right` (default) | one TCP stream (`control.leader_endpoint`, env `ALOHA_LEADER_ENDPOINT`) | right live; left held / action home |
+| `dual` | two streams (`control.leader_endpoints.left` / `.right`; env `ALOHA_LEADER_ENDPOINT_LEFT` / `_RIGHT`) | both live |
+
+| `control.gravity_compensation` | After gripper close / `s` |
+| --- | --- |
+| `false` (default) | torque-off backdrive only |
+| `true` | enable ALOHA gravity compensation |
+
 Challenge-compatible defaults:
 
 - `observation.state` 44-D: left EE pose, right EE pose, 7+7 q, 7+7 qd, 2 gripper ratios
-- `action` 14-D: left `xyz + rotvec + gripper` + right home `xyz + rotvec + gripper`
+- `action` 14-D: left `xyz + rotvec + gripper` + right `xyz + rotvec + gripper`
+  (with `arms=right`, left action slice is reset-time home; right is live)
 - images 240×320 RGB: `observation.images.head|left_hand|right_hand`
 
 Retarget / leader / keyboard speeds stay in
@@ -208,12 +241,33 @@ task attempts. Per-part success is stored in `episodes.jsonl` and `results.json`
 for logging only. Quarantine is used only when a session saves **zero** episodes
 (interrupt before the first save).
 
-Inspect:
+Inspect (metadata / optional matplotlib EE plot):
 
 ```bash
 conda run -n lerobot python \
   /home/khw/RoCo_TaskBoardAssembly/tools/lerobot_recorder/inspect_dataset.py \
   /home/khw/RoCo_TaskBoardAssembly/runs/datasets/<repo>_<name>/<run_id>
+```
+
+Visualize (LeRobot-style Rerun default, or seekable Foxglove). Uses the conda
+`lerobot` env with `lerobot[viz]`:
+
+```bash
+# Rerun desktop viewer (grouped 44-D state / 14-D action panels + 3 cameras)
+conda run -n lerobot python \
+  /home/khw/RoCo_TaskBoardAssembly/tools/lerobot_recorder/visualize_dataset.py \
+  /home/khw/RoCo_TaskBoardAssembly/runs/datasets/local_roco_aloha_teleop/<run_id> \
+  --episode-index 0
+
+# latest run under runs/datasets/local_roco_aloha_teleop/
+conda run -n lerobot python \
+  /home/khw/RoCo_TaskBoardAssembly/tools/lerobot_recorder/visualize_dataset.py \
+  --latest --episode-index 0
+
+# Foxglove: connect the app to ws://127.0.0.1:8765
+conda run -n lerobot python \
+  /home/khw/RoCo_TaskBoardAssembly/tools/lerobot_recorder/visualize_dataset.py \
+  --latest --episode-index 0 --display-mode foxglove
 ```
 
 ## Emergency and recovery

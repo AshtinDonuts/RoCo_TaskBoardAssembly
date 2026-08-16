@@ -201,11 +201,14 @@ class Policy:
         raise NotImplementedError
 
     def act(self, obs: Observation):
-        """Return the next L-arm ArticulationAction.
+        """Return the next ArticulationAction for active arm DOFs.
 
         The action's `joint_positions` should be a list of length
         `len(env_info.dof_names)` with `None` for dofs the policy doesn't
-        command this step (R arm dofs are held by the harness regardless).
+        command this step. By default the harness holds the R arm at init;
+        if the policy sets `active_arms` to include ``"R"`` (and/or omit
+        ``"L"``), the harness applies those sides from this action and holds
+        the inactive side instead.
         Returning `None` is equivalent to "no command" — the previous
         commanded targets persist.
         """

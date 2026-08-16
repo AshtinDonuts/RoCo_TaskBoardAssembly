@@ -13,23 +13,31 @@ leader:
   gripper_joint_open: 0.8298
   gripper_joint_close: -0.0552
   gripper_close_thresh: 0.0
-  gravity_compensation: true
+  # Preferred source is control.gravity_compensation in teleop_export.json
+  # (default false). Kept here only as a fallback for leader_bridge.
+  gravity_compensation: false
 
-# Relative Cartesian map from ALOHA EE deltas onto DexMate left EE.
+# Relative Cartesian map from ALOHA EE deltas onto DexMate right EE
+# (control.arms=right in config/teleop_export.json). Dual mode uses the same
+# map independently for left and right leader streams.
+# Units: leader EE pose is meters (Interbotix FK). translation_gain scales
+# those meter deltas onto DexMate stage meters (1.0 = 1:1). Gain > 1 makes
+# DexMate travel farther than the physical leader for the same hand motion.
 # Tune axes_perm / axes_sign after the first empty-space session so that
 # pushing the leader forward/right/up moves DexMate the same way in Isaac.
 retarget:
   axes_perm: [0, 1, 2]
   axes_sign: [1.0, 1.0, 1.0]
-  translation_gain: 1.0
+  translation_gain: 2.0
   rotation_gain: 1.0
   # Stage/world coordinates. The task board and initial EE are near z=1 m;
   # the old z max of 0.70 clamped the initial target and caused IK lockout.
   workspace_min: [-0.50, -0.80, 0.50]
   workspace_max: [0.80, 0.80, 1.50]
-  max_lin_vel: 0.35
+  # Keep max_lin_vel high enough that rate limiting does not cancel gain.
+  max_lin_vel: 0.70
   max_ang_vel: 1.2
-  max_lin_acc: 2.0
+  max_lin_acc: 3.0
   gripper_open_limit: 0.6649704
   gripper_close: 0.0
   gripper_hysteresis: 0.03

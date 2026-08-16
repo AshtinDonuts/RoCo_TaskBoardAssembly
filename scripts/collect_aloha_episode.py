@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "task"))
@@ -27,12 +27,11 @@ from teleop.export_config import (  # noqa: E402
     DEFAULT_EXPORT_CONFIG,
     load_export_config,
 )
+from teleop.protocol import parse_endpoint  # noqa: E402
 
 ISAAC_PYTHON = ROOT / ".venv" / "bin" / "python"
 LEROBOT_PYTHON = Path.home() / "miniconda3" / "envs" / "lerobot" / "bin" / "python"
 MIN_FREE_RAM_GB = 12.0
-LEADER_HOST = "127.0.0.1"
-LEADER_PORT = 19850
 
 
 def _mem_available_gb() -> float:
@@ -61,9 +60,6 @@ def _isaac_env(extra: dict) -> dict:
         "TASK_ENABLE_CAMERA_OUTPUT": "1",
         "TASK_ENABLE_CAMERA_VIEWPORTS": os.environ.get("TASK_ENABLE_CAMERA_VIEWPORTS", "1"),
         "ROCO_PER_PART_TIMEOUT_STEPS": os.environ.get("ROCO_PER_PART_TIMEOUT_STEPS", "120000"),
-        "ALOHA_LEADER_ENDPOINT": os.environ.get(
-            "ALOHA_LEADER_ENDPOINT", f"{LEADER_HOST}:{LEADER_PORT}"
-        ),
         "LEROBOT_SERVER_PY": str(LEROBOT_PYTHON),
         "LEROBOT_SERVER_SCRIPT": str(ROOT / "tools" / "lerobot_recorder" / "server.py"),
         "ROCO_COMMIT": _git_commit(),
@@ -93,6 +89,35 @@ def wait_for_listen(host: str, port: int, timeout_s: float = 5.0) -> None:
     raise RuntimeError(f"leader not listening on {host}:{port}: {last_err}")
 
 
+def _start_synthetic(host: str, port: int) -> subprocess.Popen:
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "synthetic_leader.py"),
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ],
+        stdin=subprocess.DEVNULL,
+    )
+    print(
+        f"[collect] started synthetic leader pid={proc.pid} on {host}:{port}",
+        flush=True,
+    )
+    return proc
+
+
+def _terminate_leaders(procs: List[subprocess.Popen]) -> None:
+    for proc in procs:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
 def main() -> int:
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument(
@@ -112,7 +137,7 @@ def main() -> int:
         "--export-config",
         type=Path,
         default=pre_args.export_config,
-        help="Teleop/data-export JSON (fps, image size, session defaults).",
+        help="Teleop/data-export JSON (fps, image size, session defaults, control.arms).",
     )
     parser.add_argument("--repo-id", default=export_cfg.export.dataset.repo_id)
     parser.add_argument(
@@ -152,7 +177,7 @@ def main() -> int:
     parser.add_argument(
         "--synthetic",
         action="store_true",
-        help="Start a sine-wave virtual leader in the background, then launch Isaac.",
+        help="Start sine-wave virtual leader(s) in the background, then launch Isaac.",
     )
     parser.add_argument(
         "--keyboard",
@@ -188,11 +213,19 @@ def main() -> int:
         print(f"LeRobot env missing: {LEROBOT_PYTHON}.", file=sys.stderr)
         return 2
 
+    right_ep = export_cfg.leader_endpoint_for("right")
+    left_ep = export_cfg.leader_endpoint_for("left")
+    right_host, right_port = parse_endpoint(right_ep)
+    left_host, left_port = parse_endpoint(left_ep)
+
     results = args.output_root / args.run_id / "results.json"
     results.parent.mkdir(parents=True, exist_ok=True)
     extra = {
         "ALOHA_EXPORT_CONFIG": str(export_cfg.source_path),
         "ALOHA_TELEOP_CONFIG": str(export_cfg.paths.teleop_yaml),
+        "ALOHA_LEADER_ENDPOINT": right_ep,
+        "ALOHA_LEADER_ENDPOINT_RIGHT": right_ep,
+        "ALOHA_LEADER_ENDPOINT_LEFT": left_ep,
         "LEROBOT_REPO_ID": args.repo_id,
         "LEROBOT_OUTPUT_ROOT": str(args.output_root),
         "ALOHA_TELEOP_RUN_ID": args.run_id,
@@ -219,51 +252,51 @@ def main() -> int:
         cmd += ["--max-sim-seconds", str(args.max_sim_seconds)]
 
     stop = threading.Event()
-    leader_proc: Optional[subprocess.Popen] = None
+    leader_procs: List[subprocess.Popen] = []
     if args.keyboard:
         extra["ALOHA_KEYBOARD_TELEOP"] = "1"
         print(
             "[collect] keyboard teleop runs inside Isaac (carb.input). "
-            "Focus the Isaac viewport and hold i/k/j/l/t/g after launch.",
+            "Focus the Isaac viewport and hold i/k/j/l/t/g after launch. "
+            f"control.arms={export_cfg.control_arms} (kbd drives right).",
             flush=True,
         )
     elif args.synthetic:
-        leader_proc = subprocess.Popen(
-            [
-                sys.executable,
-                str(ROOT / "scripts" / "synthetic_leader.py"),
-                "--host",
-                LEADER_HOST,
-                "--port",
-                str(LEADER_PORT),
-            ],
-            stdin=subprocess.DEVNULL,
-        )
-        print(
-            f"[collect] started synthetic leader pid={leader_proc.pid} "
-            f"on {LEADER_HOST}:{LEADER_PORT}",
-            flush=True,
-        )
+        if export_cfg.control_arms == "dual":
+            leader_procs.append(_start_synthetic(left_host, left_port))
+            leader_procs.append(_start_synthetic(right_host, right_port))
+        else:
+            leader_procs.append(_start_synthetic(right_host, right_port))
     else:
         print("Leader (hardware) must already be running:")
         print("  source /opt/ros/humble/setup.bash")
         print("  source /home/khw/interbotix_ws/install/setup.bash")
-        print("  ros2 launch aloha_isaac_teleop leader_only.launch.py robot:=aloha_solo")
+        if export_cfg.control_arms == "dual":
+            print(
+                f"  # two leader bridges on {left_ep} (left) and {right_ep} (right)"
+            )
+            print("  ros2 launch aloha_isaac_teleop leader_only.launch.py robot:=aloha_solo")
+            print("  # plus a second bridge process bound to the other port")
+        else:
+            print("  ros2 launch aloha_isaac_teleop leader_only.launch.py robot:=aloha_solo")
+            print(f"  # endpoint {right_ep} → DexMate right arm")
 
     if args.synthetic:
         try:
-            wait_for_listen(LEADER_HOST, LEADER_PORT, timeout_s=5.0)
+            wait_for_listen(right_host, right_port, timeout_s=5.0)
+            if export_cfg.control_arms == "dual":
+                wait_for_listen(left_host, left_port, timeout_s=5.0)
             time.sleep(0.2)
         except RuntimeError as exc:
             print(f"[collect] {exc}", file=sys.stderr)
             stop.set()
-            if leader_proc is not None:
-                leader_proc.terminate()
+            _terminate_leaders(leader_procs)
             return 2
 
     print("Isaac command:", " ".join(cmd), flush=True)
     print(
         f"Export config: {export_cfg.source_path} "
+        f"control.arms={export_cfg.control_arms} "
         f"fps={export_cfg.fps:g} clock={export_cfg.export.playback_clock} "
         f"image={export_cfg.img_w}x{export_cfg.img_h}",
         flush=True,
@@ -293,12 +326,7 @@ def main() -> int:
         code = proc.wait()
     finally:
         stop.set()
-        if leader_proc is not None and leader_proc.poll() is None:
-            leader_proc.terminate()
-            try:
-                leader_proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                leader_proc.kill()
+        _terminate_leaders(leader_procs)
         if proc.poll() is None:
             proc.terminate()
             try:

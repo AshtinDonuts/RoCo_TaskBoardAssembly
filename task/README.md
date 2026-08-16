@@ -136,15 +136,15 @@ stream even when `enable_camera_output` is `False`.
 
 `OWNS_TORSO=True with OWNS_LIFT=False` is rejected.
 
-**R-arm rest pose** — `R_ARM_TUCKED` (True = j1 folded at −90°, False =
-USDA forward `-15, -20, 0, ...`). Also sets the **L descriptor's**
-`R_arm_j*` fixed values; flipping it without re-authoring the L yamls
-leaves Lula's R collision spheres slightly off.
+**Arm rest / workspace poses** — `L_ARM_TUCKED` / `R_ARM_TUCKED` select
+tucked (`[-90°, 0…]`) vs workspace (`[-30, +60, +100, -100, -10, -10, -60]°`)
+for each side. Teleop default (`control.arms=right`) uses **L tucked, R
+workspace** (L↔R swap vs the historical scripted-L layout). Lula
+`default_q` / opposite-arm fixed values in the descriptor yamls must match
+`INIT_JOINT_TARGETS`.
 
 **Startup pose** — `INIT_JOINT_TARGETS` is applied at sim start and on
-every Stop+Play via `set_joint_positions`. Currently mirrors
-`scene_init.usd`'s authored drive targets so PD doesn't fight the
-override.
+every Stop+Play via `set_joint_positions`.
 
 **Phase tuning** — `INIT_HEIGHT`, `TRANSIT_STEPS`, `DESCEND_PICK_STEPS`,
 `DESCEND_PLACE_STEPS`, `POS_TOL`, `ORN_TOL`, `SETTLE_*`, `MAX_PHASES`,

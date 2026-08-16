@@ -22,12 +22,68 @@ def test_load_default_export_config():
     assert cfg.export.image.cameras == ("head", "left_hand", "right_hand")
     assert cfg.export.dataset.state_dim == 44
     assert cfg.export.dataset.action_dim == 14
-    assert cfg.session.episode_time_s == 600.0
+    assert cfg.session.episode_time_s == 60.0
     assert cfg.paths.teleop_yaml.name == "aloha_solo_to_vega_1u.yaml"
+    assert cfg.control_arms == "right"
+    assert cfg.control.active_arms == ("R",)
+    assert cfg.control.gravity_compensation is False
+    assert cfg.leader_endpoint_for("right") == "127.0.0.1:19850"
     fields = cfg.recorder_init_fields()
     assert fields["fps"] == 10.0
     assert fields["image_height"] == 240
     assert fields["cameras"] == ["head", "left_hand", "right_hand"]
+    assert fields["control_arms"] == "right"
+
+
+def test_control_arms_defaults_when_omitted(tmp_path: Path):
+    raw = json.loads(DEFAULT_EXPORT_CONFIG.read_text(encoding="utf-8"))
+    raw.pop("control", None)
+    cfg = validate_export_dict(raw, source_path=tmp_path / "no_control.json")
+    assert cfg.control_arms == "right"
+    assert cfg.control.active_arms == ("R",)
+    assert cfg.control.gravity_compensation is False
+
+
+def test_gravity_compensation_opt_in(tmp_path: Path):
+    raw = json.loads(DEFAULT_EXPORT_CONFIG.read_text(encoding="utf-8"))
+    raw["control"]["gravity_compensation"] = True
+    cfg = validate_export_dict(raw, source_path=tmp_path / "gcomp.json")
+    assert cfg.control.gravity_compensation is True
+
+
+def test_reject_bad_gravity_compensation(tmp_path: Path):
+    raw = json.loads(DEFAULT_EXPORT_CONFIG.read_text(encoding="utf-8"))
+    raw["control"]["gravity_compensation"] = "sometimes"
+    with pytest.raises(ValueError, match="gravity_compensation"):
+        validate_export_dict(raw, source_path=tmp_path / "bad.json")
+
+
+def test_control_arms_dual(tmp_path: Path):
+    raw = json.loads(DEFAULT_EXPORT_CONFIG.read_text(encoding="utf-8"))
+    raw["control"]["arms"] = "dual"
+    cfg = validate_export_dict(raw, source_path=tmp_path / "dual.json")
+    assert cfg.control_arms == "dual"
+    assert cfg.control.active_arms == ("L", "R")
+    assert cfg.leader_endpoint_for("left") == "127.0.0.1:19850"
+    assert cfg.leader_endpoint_for("right") == "127.0.0.1:19851"
+
+
+def test_reject_bad_control_arms(tmp_path: Path):
+    raw = json.loads(DEFAULT_EXPORT_CONFIG.read_text(encoding="utf-8"))
+    raw["control"]["arms"] = "left"
+    with pytest.raises(ValueError, match="control.arms"):
+        validate_export_dict(raw, source_path=tmp_path / "bad.json")
+
+
+def test_reject_dual_same_endpoints(tmp_path: Path):
+    raw = json.loads(DEFAULT_EXPORT_CONFIG.read_text(encoding="utf-8"))
+    raw["control"]["arms"] = "dual"
+    raw["control"]["leader_endpoints"] = {
+        "left": "127.0.0.1:19850",
+        "right": "127.0.0.1:19850",
+    }
+    with pytest.raises(ValueError, match="must differ"):
+        validate_export_dict(raw, source_path=tmp_path / "bad.json")
 
 
 def test_reject_bad_fps(tmp_path: Path):

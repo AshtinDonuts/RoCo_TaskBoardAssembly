@@ -21,8 +21,17 @@
       "action_dim": 14
     }
   },
+  "control": {
+    "arms": "right",
+    "gravity_compensation": false,
+    "leader_endpoint": "127.0.0.1:19850",
+    "leader_endpoints": {
+      "left": "127.0.0.1:19850",
+      "right": "127.0.0.1:19851"
+    }
+  },
   "session": {
-    "episode_time_s": 600,
+    "episode_time_s": 60,
     "warmup_time_s": 5,
     "num_episodes": 1
   },

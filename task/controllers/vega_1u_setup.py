@@ -397,23 +397,14 @@ def _finalize_pick_place_setup(
             init_joint_position[dof_names.index("Lift")] = float(
                 getattr(pc, "LIFT_INIT_M", 0.0))
 
-    # R-arm rest pose — see param_config.R_ARM_TUCKED. Tucked = j1=-90, rest 0.
-    # Forward (USDA) = j1=-15, j2=-20, rest 0. Setting it here so the
-    # snapshot R_arm_hold_q in run_pick_place.main() picks the chosen rest
-    # pose and PDs R to it every step. The L descriptor yamls assume the
-    # TUCKED layout for their R_arm_j* fixed values, so flipping this to
-    # forward leaves Lula's R collision spheres slightly off — fine unless
-    # R is actively doing IK.
-    if getattr(pc, "R_ARM_TUCKED", True):
-        R_REST = {"R_arm_j1": -1.57079633, "R_arm_j2": 0.0}
-    else:
-        R_REST = {"R_arm_j1": -0.26179939, "R_arm_j2": -0.34906585}
-    for jname, val in R_REST.items():
-        if jname in dof_names:
+    # Apply INIT_JOINT_TARGETS arm poses so Lula warm-start / hold q match
+    # the post-reset posture (L tucked, R workspace when teleop drives R).
+    targets = getattr(pc, "INIT_JOINT_TARGETS", None) or {}
+    for jname, val in targets.items():
+        if jname in dof_names and (
+            jname.startswith("L_arm_") or jname.startswith("R_arm_") or jname == "Lift"
+        ):
             init_joint_position[dof_names.index(jname)] = float(val)
-    for jname in ("R_arm_j3", "R_arm_j4", "R_arm_j5", "R_arm_j6", "R_arm_j7"):
-        if jname in dof_names:
-            init_joint_position[dof_names.index(jname)] = 0.0
 
     my_L_arm.set_joint_positions(init_joint_position)
 

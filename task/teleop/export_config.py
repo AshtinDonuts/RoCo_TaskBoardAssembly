@@ -7,11 +7,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
+from .protocol import DEFAULT_HOST, DEFAULT_PORT, parse_endpoint
 from .schema import ACTION_DIM, IMAGE_KEYS, RECORD_HZ, STATE_DIM
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EXPORT_CONFIG = REPO_ROOT / "config" / "teleop_export.json"
 ALLOWED_CLOCKS = frozenset({"wall", "sim"})
+ALLOWED_CONTROL_ARMS = frozenset({"right", "dual"})
+DEFAULT_LEADER_ENDPOINT = f"{DEFAULT_HOST}:{DEFAULT_PORT}"
+DEFAULT_LEADER_ENDPOINTS = {
+    "left": f"{DEFAULT_HOST}:{DEFAULT_PORT}",
+    "right": f"{DEFAULT_HOST}:{DEFAULT_PORT + 1}",
+}
 CAMERA_TO_OBS = {
     "head": "head",
     "left_hand": "L_wrist",
@@ -67,11 +74,58 @@ class PathsExportConfig:
 
 
 @dataclass(frozen=True)
+class ControlExportConfig:
+    """Which DexMate arms the leader(s) drive.
+
+    ``right``: one leader TCP stream → DexMate right arm (left held).
+    ``dual``: two leader streams → both virtual arms.
+
+    ``gravity_compensation``: when True, the physical ALOHA leader enables
+    gravity compensation after the operator closes the gripper (or sends
+    start). Default False = torque-off backdrive only.
+    """
+
+    arms: str = "right"
+    gravity_compensation: bool = False
+    leader_endpoint: str = DEFAULT_LEADER_ENDPOINT
+    leader_endpoints: Dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_LEADER_ENDPOINTS)
+    )
+
+    @property
+    def active_arms(self) -> Tuple[str, ...]:
+        if self.arms == "dual":
+            return ("L", "R")
+        return ("R",)
+
+    def leader_endpoint_for(self, side: str) -> str:
+        """Resolve host:port for a virtual arm, honoring env overrides."""
+        key = str(side).strip().lower()
+        if key in ("r", "right"):
+            env_right = os.environ.get("ALOHA_LEADER_ENDPOINT_RIGHT")
+            if env_right:
+                return str(env_right).strip()
+            if self.arms == "right":
+                env_solo = os.environ.get("ALOHA_LEADER_ENDPOINT")
+                if env_solo:
+                    return str(env_solo).strip()
+                return self.leader_endpoint
+            return self.leader_endpoints["right"]
+        if key in ("l", "left"):
+            env_left = os.environ.get("ALOHA_LEADER_ENDPOINT_LEFT")
+            if env_left:
+                return str(env_left).strip()
+            return self.leader_endpoints["left"]
+        raise KeyError(f"unknown leader side {side!r}; expected left or right")
+
+
+@dataclass(frozen=True)
 class TeleopExportConfig:
     schema_version: int
     export: ExportSection
     session: SessionExportConfig
     paths: PathsExportConfig
+    control: ControlExportConfig
     source_path: Path
 
     @property
@@ -90,10 +144,17 @@ class TeleopExportConfig:
     def img_w(self) -> int:
         return int(self.export.image.width)
 
+    @property
+    def control_arms(self) -> str:
+        return self.control.arms
+
     def obs_camera_key(self, camera: str) -> str:
         if camera not in CAMERA_TO_OBS:
             raise KeyError(f"unknown export camera {camera!r}")
         return CAMERA_TO_OBS[camera]
+
+    def leader_endpoint_for(self, side: str) -> str:
+        return self.control.leader_endpoint_for(side)
 
     def recorder_init_fields(self) -> Dict[str, Any]:
         return {
@@ -111,6 +172,7 @@ class TeleopExportConfig:
             "pix_fmt": self.export.video.pix_fmt,
             "playback_clock": self.export.playback_clock,
             "export_config_path": str(self.source_path),
+            "control_arms": self.control.arms,
         }
 
 
@@ -165,6 +227,78 @@ def _parse_cameras(raw: Any) -> Tuple[str, ...]:
     return cameras
 
 
+def _validate_endpoint(raw: Any, name: str) -> str:
+    if raw in (None, ""):
+        raise ValueError(f"{name} must be a non-empty host:port string")
+    text = str(raw).strip()
+    try:
+        host, port = parse_endpoint(text)
+    except Exception as exc:
+        raise ValueError(f"{name} must be host:port, got {text!r}") from exc
+    if not host or port <= 0:
+        raise ValueError(f"{name} must be host:port, got {text!r}")
+    return f"{host}:{port}"
+
+
+def _parse_bool(raw: Any, name: str, *, default: bool) -> bool:
+    if raw is None:
+        return bool(default)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)) and raw in (0, 1):
+        return bool(raw)
+    if isinstance(raw, str):
+        low = raw.strip().lower()
+        if low in ("1", "true", "yes", "on"):
+            return True
+        if low in ("0", "false", "no", "off"):
+            return False
+    raise ValueError(f"{name} must be a boolean, got {raw!r}")
+
+
+def _parse_control(raw: Mapping[str, Any]) -> ControlExportConfig:
+    control_raw = _as_mapping(raw.get("control"), "control")
+    arms = str(control_raw.get("arms", "right")).strip().lower()
+    if arms not in ALLOWED_CONTROL_ARMS:
+        raise ValueError(
+            f"control.arms must be one of {sorted(ALLOWED_CONTROL_ARMS)}, got {arms!r}"
+        )
+
+    gravity_compensation = _parse_bool(
+        control_raw.get("gravity_compensation"),
+        "control.gravity_compensation",
+        default=False,
+    )
+
+    leader_endpoint = _validate_endpoint(
+        control_raw.get("leader_endpoint", DEFAULT_LEADER_ENDPOINT),
+        "control.leader_endpoint",
+    )
+
+    endpoints_raw = _as_mapping(
+        control_raw.get("leader_endpoints"), "control.leader_endpoints"
+    )
+    left_ep = _validate_endpoint(
+        endpoints_raw.get("left", DEFAULT_LEADER_ENDPOINTS["left"]),
+        "control.leader_endpoints.left",
+    )
+    right_ep = _validate_endpoint(
+        endpoints_raw.get("right", DEFAULT_LEADER_ENDPOINTS["right"]),
+        "control.leader_endpoints.right",
+    )
+    if arms == "dual" and left_ep == right_ep:
+        raise ValueError(
+            "control.leader_endpoints.left and .right must differ when "
+            "control.arms is 'dual'"
+        )
+    return ControlExportConfig(
+        arms=arms,
+        gravity_compensation=gravity_compensation,
+        leader_endpoint=leader_endpoint,
+        leader_endpoints={"left": left_ep, "right": right_ep},
+    )
+
+
 def validate_export_dict(raw: Mapping[str, Any], *, source_path: Path) -> TeleopExportConfig:
     schema_version = int(raw.get("schema_version", 1))
     if schema_version != 1:
@@ -176,6 +310,7 @@ def validate_export_dict(raw: Mapping[str, Any], *, source_path: Path) -> Teleop
     dataset_raw = _as_mapping(export_raw.get("dataset"), "export.dataset")
     session_raw = _as_mapping(raw.get("session"), "session")
     paths_raw = _as_mapping(raw.get("paths"), "paths")
+    control = _parse_control(raw)
 
     fps = float(export_raw.get("fps", RECORD_HZ))
     if not (fps > 0.0):
@@ -255,6 +390,7 @@ def validate_export_dict(raw: Mapping[str, Any], *, source_path: Path) -> Teleop
             num_episodes=num_episodes,
         ),
         paths=PathsExportConfig(output_root=output_root, teleop_yaml=teleop_yaml),
+        control=control,
         source_path=source_path.resolve(),
     )
 
