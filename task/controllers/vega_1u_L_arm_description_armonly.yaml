@@ -14,10 +14,10 @@ cspace:
     - L_arm_j6
     - L_arm_j7
 
-# Init pose: L tucked (L↔R swap for teleop-on-R).
-#   L_arm_j1..j7 = [-90, 0, 0, 0, 0, 0, 0] deg
+# Init pose from scene_base.usd authored drive targets (deg -> rad):
+#   L_arm_j1..j7 = [-30, +60, +100, -100, -10, -10, -60] deg
 default_q: [
-    -1.57079633, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    -0.52359878, 1.04719755, 1.74532925, -1.74532925, -0.17453293, -0.17453293, -1.04719755
 ]
 
 acceleration_limits: [
@@ -34,13 +34,13 @@ cspace_to_urdf_rules:
     - {name: head_j1,            rule: fixed, value: 0.0}
     - {name: head_j2,            rule: fixed, value: 0.0}
     - {name: head_j3,            rule: fixed, value: 0.0}
-    # Opposite arm at mirrored init (L↔R swap for teleop-on-R).
-    - {name: R_arm_j1,           rule: fixed, value: -0.52359878}
-    - {name: R_arm_j2,           rule: fixed, value:  1.04719755}
-    - {name: R_arm_j3,           rule: fixed, value:  1.74532925}
-    - {name: R_arm_j4,           rule: fixed, value: -1.74532925}
-    - {name: R_arm_j5,           rule: fixed, value: -0.17453293}
-    - {name: R_arm_j6,           rule: fixed, value: -0.17453293}
+    # R arm: explicit copy of L init (matches INIT_JOINT_TARGETS when R_ARM_TUCKED=False).
+    - {name: R_arm_j1,           rule: fixed, value: 0.58817597}
+    - {name: R_arm_j2,           rule: fixed, value: -1.05068823}
+    - {name: R_arm_j3,           rule: fixed, value: -1.79070784}
+    - {name: R_arm_j4,           rule: fixed, value: -1.53763509}
+    - {name: R_arm_j5,           rule: fixed, value: -2.89201061}
+    - {name: R_arm_j6,           rule: fixed, value: -0.31415927}
     - {name: R_arm_j7,           rule: fixed, value: -1.04719755}
     - {name: L_gripper_joint,    rule: fixed, value: 0.0}
     - {name: L_gripper_joint_01, rule: fixed, value: 0.0}

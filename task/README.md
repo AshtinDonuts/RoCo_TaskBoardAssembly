@@ -19,6 +19,8 @@ hands each part to the participant's `Policy`, and grades the result
 | `part_init_poses.json`    | Per-part spawn pose (`pos`, `orn`) + hand-tuned `pick_z`. Pick x/y come from `pos`. Re-running `extract_part_poses.py` preserves `pick_z`. |
 | `extract_part_poses.py`   | Scrapes per-part mesh / rigid-body world poses from the loaded scene; writes `part_init_poses.json` (merging existing `pick_z`). |
 | `find_reachable_above_boards.py`   | L-arm IK-feasibility sweep above the board AABBs. Writes reachable / unreachable PLYs for visualization. Must run with Isaac Sim's python. |
+| `calibrate_r_arm_joints.py` | Robot+floor R-arm init calibrator (omni.ui sliders). Launch via `../scripts/calibrate_r_arm.sh`. |
+| `r_arm_calib_ui.py`        | omni.ui panel + Save writers for `INIT_JOINT_TARGETS` / Lula YAMLs. |
 | `controllers/`            | EEPoseController, EEPathFollower, LulaIKController, snap helpers, pick-place task, Lula descriptor yamls for both arms (L + R). |
 | `controllers/vega_1u_L_arm_description*.yaml` | Lula descriptors for L arm — `default_q` mirrors the scene init pose (see *Gotchas* below). Three variants picked by `pc.OWNS_LIFT_L` / `OWNS_TORSO_L`. |
 | `controllers/vega_1u_R_arm_description*.yaml` | Same, R arm. Available so a policy can do bimanual IK; the default single-arm runner just holds R at `INIT_JOINT_TARGETS`. |
@@ -136,15 +138,29 @@ stream even when `enable_camera_output` is `False`.
 
 `OWNS_TORSO=True with OWNS_LIFT=False` is rejected.
 
-**Arm rest / workspace poses** — `L_ARM_TUCKED` / `R_ARM_TUCKED` select
-tucked (`[-90°, 0…]`) vs workspace (`[-30, +60, +100, -100, -10, -10, -60]°`)
-for each side. Teleop default (`control.arms=right`) uses **L tucked, R
-workspace** (L↔R swap vs the historical scripted-L layout). Lula
-`default_q` / opposite-arm fixed values in the descriptor yamls must match
-`INIT_JOINT_TARGETS`.
+**R-arm rest pose** — `R_ARM_TUCKED` (True = j1 folded at −90°, False =
+explicit `R_arm_j1..j7` in `INIT_JOINT_TARGETS`, currently a verbatim
+copy of L so each joint can be tuned later). Also sets the **L
+descriptor's** `R_arm_j*` fixed values; keep those in sync when flipping
+the flag or editing R joints.
+
+**R-arm init calibration** — interactive Kit tool with sliders for
+`R_arm_j1..j7` over a robot+floor-only scene (no table/parts):
+
+```bash
+./scripts/calibrate_r_arm.sh
+```
+
+Requires a GUI (`DISPLAY`). **Print** dumps radians/degrees to the
+console; **Save** sets `R_ARM_TUCKED = False`, writes the seven R values
+into `param_config.INIT_JOINT_TARGETS`, and syncs the matching
+`default_q` / fixed `R_arm_j*` entries in
+`controllers/vega_1u_{L,R}_arm_description*.yaml`.
 
 **Startup pose** — `INIT_JOINT_TARGETS` is applied at sim start and on
-every Stop+Play via `set_joint_positions`.
+every Stop+Play via `set_joint_positions`. Currently mirrors
+`scene_init.usd`'s authored drive targets so PD doesn't fight the
+override.
 
 **Phase tuning** — `INIT_HEIGHT`, `TRANSIT_STEPS`, `DESCEND_PICK_STEPS`,
 `DESCEND_PLACE_STEPS`, `POS_TOL`, `ORN_TOL`, `SETTLE_*`, `MAX_PHASES`,

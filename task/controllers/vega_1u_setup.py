@@ -397,13 +397,11 @@ def _finalize_pick_place_setup(
             init_joint_position[dof_names.index("Lift")] = float(
                 getattr(pc, "LIFT_INIT_M", 0.0))
 
-    # Apply INIT_JOINT_TARGETS arm poses so Lula warm-start / hold q match
-    # the post-reset posture (L tucked, R workspace when teleop drives R).
+    # R-arm rest pose comes only from param_config.INIT_JOINT_TARGETS
+    # (gated there by R_ARM_TUCKED). Do not duplicate joint numbers here.
     targets = getattr(pc, "INIT_JOINT_TARGETS", None) or {}
     for jname, val in targets.items():
-        if jname in dof_names and (
-            jname.startswith("L_arm_") or jname.startswith("R_arm_") or jname == "Lift"
-        ):
+        if jname.startswith("R_arm_") and jname in dof_names:
             init_joint_position[dof_names.index(jname)] = float(val)
 
     my_L_arm.set_joint_positions(init_joint_position)
