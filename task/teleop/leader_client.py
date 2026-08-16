@@ -4,7 +4,8 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from typing import Optional
+from collections import deque
+from typing import Deque, Optional
 
 from .protocol import (
     DEFAULT_HOST,
@@ -22,12 +23,16 @@ class LeaderClient:
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
         connect_timeout_s: float = 120.0,
+        cmd_queue_max: int = 32,
     ) -> None:
         self.host = host
         self.port = port
         self.connect_timeout_s = connect_timeout_s
         self._lock = threading.Lock()
         self._latest = None
+        # Full samples for edge cmds so resume/pause keep the leader pose
+        # that accompanied the keypress, not a later pose-only frame.
+        self._cmd_queue: Deque[dict] = deque(maxlen=max(1, int(cmd_queue_max)))
         self._last_recv_s = 0.0
         self._connected = False
         self._stop = threading.Event()
@@ -69,12 +74,30 @@ class LeaderClient:
             return None if self._latest is None else dict(self._latest)
 
     def pop_cmd(self) -> str:
+        """Drain one queued edge command string (compat). Prefer pop_cmd_event()."""
+        event = self.pop_cmd_event()
+        if event is None:
+            return "none"
+        return str(event.get("cmd", "none"))
+
+    def pop_cmd_event(self) -> Optional[dict]:
+        """Pop one queued command-event sample (cmd + leader pose at that edge)."""
         with self._lock:
-            if self._latest is None:
-                return "none"
-            cmd = self._latest.get("cmd", "none")
-            self._latest["cmd"] = "none"
-            return cmd
+            if not self._cmd_queue:
+                return None
+            return dict(self._cmd_queue.popleft())
+
+    def _ingest_sample_locked(self, sample: dict, now: float) -> None:
+        """Store latest pose sample and queue any non-none edge command event."""
+        cmd = sample.get("cmd", "none")
+        stored = dict(sample)
+        if cmd not in (None, "", "none"):
+            event = dict(sample)
+            event["cmd"] = str(cmd)
+            self._cmd_queue.append(event)
+        stored["cmd"] = "none"
+        self._latest = stored
+        self._last_recv_s = now
 
     def _loop(self) -> None:
         sock: Optional[socket.socket] = None
@@ -94,8 +117,7 @@ class LeaderClient:
                 sample = validate_leader_sample(msg)
                 now = time.time()
                 with self._lock:
-                    self._latest = sample
-                    self._last_recv_s = now
+                    self._ingest_sample_locked(sample, now)
                 self._rate_n += 1
                 elapsed = now - self._rate_t0
                 if elapsed >= 1.0:

@@ -347,8 +347,8 @@ data-flow note above.)
   in `scene_final.usd`.
 - Gripper tilts after grip? Friction/grip-force/collider — not
   generally an IK issue. Try `convexHull` only for purely convex
-  parts, raise `dynamic_friction` on `/World/PhysicsMaterial`, lower
-  `gripper_close` for a tighter squeeze.
+  parts, raise `dynamic_friction` on `/World/PhysicsMaterial`, or
+  raise/lower `GRIPPER_DRIVE_MAX_FORCE` (soft close is always 0 rad).
 - Per-part hang? `PER_PART_TIMEOUT_STEPS` (default 3000) caps the per-
   part loop. The harness logs the timeout and advances; the part is
   graded on whatever state it ended in.

@@ -31,6 +31,8 @@ leader:
 #   leader +Y (left) / +Z (up)     → image-left / image-up (includes head_j1
 #                                   pitch tilt at INIT +55 deg)
 # When axes_map is set it replaces axes_perm / axes_sign.
+# Orientation uses the same map as a space-fixed conjugation
+# (R_dex = R_map R_rel R_map^T R_dex0) so wrist tilts match the headcam view.
 retarget:
   axes_perm: [0, 1, 2]
   axes_sign: [1.0, 1.0, 1.0]
@@ -49,7 +51,13 @@ retarget:
   max_ang_vel: 1.2
   max_lin_acc: 3.0
   gripper_open_limit: 0.6649704
+  # Full close (0 rad). Soft GRIPPER_DRIVE_* maxForce in param_config
+  # makes contact yield so assets are not crushed.
   gripper_close: 0.0
+  # Leader gripper_norm at/below which DexMate is fully closed (linear
+  # remap of [close_norm, 1] → [closed, open]). Raises early close so a
+  # slightly short physical travel still seals the virtual fingers.
+  gripper_close_norm: 0.20
   gripper_hysteresis: 0.03
   stale_hold_s: 0.10
   stale_pause_s: 0.50
@@ -67,9 +75,9 @@ recording:
   num_episodes: 1
 
 operator:
-  # After leader start, clutch ON so DexMate EE tracks leader deltas.
-  # Space still toggles. Clutch OFF holds EE while gripper keeps mapping
-  # (looks like "only gripper works" if left OFF).
+  # After leader start, clutch mode is track so DexMate EE follows leader
+  # deltas. Space track↔pause / reanchor is WIP — hardware tests still fail
+  # to recapture origins on resume; do not rely on it for collection.
   clutch_default: true
   deadman_default: true
   keys:

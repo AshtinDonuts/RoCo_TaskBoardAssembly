@@ -59,7 +59,9 @@ import numpy as np
 
 import param_config as pc
 from controllers.vega_1u_setup import (
-    restore_scene_part_xforms, setup_pick_place_sim,
+    _apply_gripper_compliance,
+    restore_scene_part_xforms,
+    setup_pick_place_sim,
 )
 from controllers.part_from_usd import DynamicPart
 from isaacsim.core.api.materials.physics_material import PhysicsMaterial
@@ -807,6 +809,7 @@ def main():
                 full_q[dof_names.index(jname)] = float(val)
         L_robot.set_joint_positions(full_q)
         L_robot.set_joint_velocities(np.zeros(len(dof_names)))
+        _apply_gripper_compliance(L_robot)
 
     _apply_init_joint_targets()
 
@@ -1145,12 +1148,26 @@ def main():
 
     try:
         while simulation_app.is_running():
-            my_world.step(render=True)
+            sim_hold = recording_mode and bool(getattr(policy, "pause_sim", False))
+            if sim_hold:
+                # Resume barrier: pause_sim is sampled before policy.act(), so
+                # Space-2 / resume is processed on one final render-only tick.
+                # act() installs the no-motion hold + origin recapture there;
+                # PhysX advances only on the next loop after pause_sim clears.
+                # Keep Kit/UI alive without advancing PhysX so the operator
+                # can reposition the leader while DexMate and the dataset stay
+                # frozen. policy.act() still runs below to drain Space/u.
+                try:
+                    my_world.render()
+                except Exception:
+                    simulation_app.update()
+            else:
+                my_world.step(render=True)
 
             if run_complete and (exit_on_complete or recording_mode):
                 break
 
-            if not my_world.is_playing():
+            if not my_world.is_playing() and not sim_hold:
                 if my_world.is_stopped():
                     reset_needed = True
                 if not exit_on_complete:
@@ -1198,6 +1215,9 @@ def main():
                 if my_world.current_time_step_index == _warmup_steps - 1:
                     print(f"[setup] warmup done ({_warmup_steps} steps); "
                           f"starting task.")
+                if recording_mode:
+                    obs = _build_observation()
+                    _command_arms(policy.act(obs))
                 continue
 
             if recording_mode and getattr(policy, "in_warmup", False):
@@ -1221,7 +1241,8 @@ def main():
                     video_recorder.write(obs.rgb.get(video_recorder.camera))
                     next_record_time_s += record_period_s
 
-            total_task_steps += 1
+            if not sim_hold:
+                total_task_steps += 1
             if args.max_steps and total_task_steps >= args.max_steps:
                 run_complete = True
                 print(f"[setup] reached max-steps={args.max_steps}; "

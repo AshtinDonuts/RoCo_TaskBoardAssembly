@@ -40,6 +40,45 @@ COMMANDS = (
 # Local to the leader bridge; never sent on the wire.
 LOCAL_COMMANDS = ("clutch_toggle",)
 
+# Space toggles track ↔ pause (sim+recording). ``freeze`` is estop/deadman only.
+# Space pause/reanchor is WIP — hardware tests still fail origin recapture.
+# ``clutch`` on the wire is True only in ``track``.
+CLUTCH_MODES = ("track", "freeze", "pause")
+
+
+def cycle_clutch_mode(mode: str) -> str:
+    """track ↔ pause (WIP reanchor on resume); freeze → pause."""
+    if mode == "pause":
+        return "track"
+    return "pause"
+
+
+def clutch_mode_engaged(mode: str) -> bool:
+    return mode == "track"
+
+
+def clutch_transition_cmd(old: str, new: str) -> str:
+    """Wire command for a clutch-mode change; ``none`` if the bool is enough."""
+    if new == old:
+        return "none"
+    if new == "pause":
+        return "pause"
+    if old == "pause" and new == "track":
+        return "resume"
+    if new == "track":
+        return "recenter"
+    return "none"
+
+
+def clutch_mode_after_cmd(cmd: str, current: str) -> str:
+    if cmd == "clutch_toggle":
+        return cycle_clutch_mode(current)
+    if cmd == "pause":
+        return "pause"
+    if cmd in ("resume", "start"):
+        return "track"
+    return current
+
 CHAR_TO_CMD = {
     " ": "clutch_toggle",
     "r": "recenter",

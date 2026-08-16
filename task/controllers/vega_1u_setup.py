@@ -65,6 +65,86 @@ def create_viewport_for_camera(
     return viewport_window
 
 
+def _set_angular_drive(
+    stage,
+    joint_prim_path: str,
+    *,
+    stiffness: float,
+    damping: float,
+    max_force: float,
+):
+    """Author compliant angular joint-drive params on a USD joint prim."""
+    prim = stage.GetPrimAtPath(joint_prim_path) if stage else None
+    if not prim or not prim.IsValid():
+        print(f"[setup] WARNING: missing joint {joint_prim_path!r}; "
+              "cannot set gripper drive compliance")
+        return
+    drive = UsdPhysics.DriveAPI.Get(prim, "angular")
+    if not drive:
+        drive = UsdPhysics.DriveAPI.Apply(prim, "angular")
+    drive.CreateStiffnessAttr().Set(float(stiffness))
+    drive.CreateDampingAttr().Set(float(damping))
+    drive.CreateMaxForceAttr().Set(float(max_force))
+    print(
+        f"[setup] gripper drive {joint_prim_path}: "
+        f"stiffness={stiffness:g} damping={damping:g} maxForce={max_force:g}",
+        flush=True,
+    )
+
+
+def _apply_gripper_compliance(robot) -> None:
+    """Command full close (0 rad) with soft finger effort so grasps yield.
+
+    The URDF/USD gripper effort was effectively unbounded, so targeting 0
+    aperture crushed assets. Soft maxForce + moderate stiffness keeps the
+    commanded aperture at 0 while contact compliance holds the part.
+    """
+    stiffness = float(getattr(pc, "GRIPPER_DRIVE_STIFFNESS", 800.0))
+    damping = float(getattr(pc, "GRIPPER_DRIVE_DAMPING", 80.0))
+    max_force = float(getattr(pc, "GRIPPER_DRIVE_MAX_FORCE", 3.0))
+    joint_names = ("L_gripper_joint", "R_gripper_joint")
+
+    # Prefer live articulation gains once PhysX has the robot.
+    try:
+        dof_names = list(robot.dof_names)
+        indices = [dof_names.index(n) for n in joint_names if n in dof_names]
+        if indices:
+            if hasattr(robot, "get_max_efforts") and hasattr(robot, "set_max_efforts"):
+                efforts = np.asarray(robot.get_max_efforts(), dtype=np.float64).copy()
+                for i in indices:
+                    efforts[i] = max_force
+                robot.set_max_efforts(efforts)
+            if hasattr(robot, "get_gains") and hasattr(robot, "set_gains"):
+                kps, kds = robot.get_gains()
+                kps = np.asarray(kps, dtype=np.float64).copy()
+                kds = np.asarray(kds, dtype=np.float64).copy()
+                for i in indices:
+                    kps[i] = stiffness
+                    kds[i] = damping
+                robot.set_gains(kps, kds)
+            print(
+                f"[setup] gripper compliance via articulation: "
+                f"joints={ [dof_names[i] for i in indices] } "
+                f"stiffness={stiffness:g} damping={damping:g} "
+                f"max_force={max_force:g}",
+                flush=True,
+            )
+            return
+    except Exception as exc:
+        print(f"[setup] articulation gripper compliance failed ({exc}); "
+              "falling back to USD DriveAPI", flush=True)
+
+    stage = omni.usd.get_context().get_stage()
+    for side in ("L", "R"):
+        _set_angular_drive(
+            stage,
+            f"{ROBOT_PRIM_PATH}/{side}_ee_link/joints/{side}_gripper_joint",
+            stiffness=stiffness,
+            damping=damping,
+            max_force=max_force,
+        )
+
+
 def _set_camera_focal_length(stage, camera_prim_path: str, focal_length: float):
     prim = stage.GetPrimAtPath(camera_prim_path) if stage else None
     if not prim or not prim.IsValid():
@@ -405,6 +485,7 @@ def _finalize_pick_place_setup(
             init_joint_position[dof_names.index(jname)] = float(val)
 
     my_L_arm.set_joint_positions(init_joint_position)
+    _apply_gripper_compliance(my_L_arm)
 
     # ---- Cameras (RGB + depth).
     # Cameras are authored in the robot USD at fixed prim paths. We do
@@ -469,14 +550,38 @@ def _finalize_pick_place_setup(
             cam.add_distance_to_image_plane_to_frame()
 
     if enable_camera_viewports:
-        # 3-tile viewport layout in Kit UI, stacked along the left edge.
-        # Independent of sensor binding.
-        create_viewport_for_camera(viewport_name="Head Depth View",  camera_prim_path=HEAD_DEPTH_CAMERA_PATH,
-                                   width=240, height=200, position_x=50, position_y=50)
-        create_viewport_for_camera(viewport_name="L Wrist View",     camera_prim_path=L_WRIST_CAMERA_PATH,
-                                   width=240, height=200, position_x=50, position_y=250)
-        create_viewport_for_camera(viewport_name="R Wrist View",     camera_prim_path=R_WRIST_CAMERA_PATH,
-                                   width=240, height=200, position_x=50, position_y=450)
+        # Kit viewport windows: height is the drawable area; a title bar sits
+        # above it, so y-stride must include chrome + a gap or tiles overlap.
+        _title_bar = 40
+        _gap = 16
+        _origin_x, _origin_y = 24, 24
+        _head_w, _head_h = 640, 480
+        _wrist_w, _wrist_h = 480, 360
+        _row2_y = _origin_y + _head_h + _title_bar + _gap
+        create_viewport_for_camera(
+            viewport_name="Head Depth View",
+            camera_prim_path=HEAD_DEPTH_CAMERA_PATH,
+            width=_head_w,
+            height=_head_h,
+            position_x=_origin_x,
+            position_y=_origin_y,
+        )
+        create_viewport_for_camera(
+            viewport_name="L Wrist View",
+            camera_prim_path=L_WRIST_CAMERA_PATH,
+            width=_wrist_w,
+            height=_wrist_h,
+            position_x=_origin_x,
+            position_y=_row2_y,
+        )
+        create_viewport_for_camera(
+            viewport_name="R Wrist View",
+            camera_prim_path=R_WRIST_CAMERA_PATH,
+            width=_wrist_w,
+            height=_wrist_h,
+            position_x=_origin_x + _wrist_w + _gap,
+            position_y=_row2_y,
+        )
     # try:
     #     active_viewport = get_active_viewport_window()
     #     if active_viewport:

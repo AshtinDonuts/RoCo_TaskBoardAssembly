@@ -70,3 +70,17 @@ def test_task_success_is_not_part_of_session():
     assert ev.kind == "save"
     sess.complete_save(1, False, "save_episode")
     assert sess.saved_episodes == 1
+
+
+def test_clock_pause_freezes_episode_timer():
+    sess = EpisodeSession(episode_time_s=10.0, warmup_time_s=0.0, num_episodes=1)
+    sess.start(0.0)
+    assert sess.is_recording
+    sess.set_clock_paused(True, 2.0)
+    assert sess.tick(20.0).is_noop
+    assert sess.remaining_episode_s(20.0) == 8.0
+    sess.set_clock_paused(False, 12.0)
+    assert sess.remaining_episode_s(12.0) == 8.0
+    ev = sess.tick(20.0)
+    assert ev.kind == "save"
+    assert ev.reason == "timeout"

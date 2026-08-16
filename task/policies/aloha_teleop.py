@@ -158,7 +158,8 @@ class AlohaTeleopPolicy(Policy):
         self._retarget = self._retarget_R
         if retarget_cfg.axes_map is not None:
             print(
-                "[aloha_teleop] retarget frame=headcam_view (axes_map); "
+                "[aloha_teleop] retarget frame=headcam_view (axes_map, "
+                "space-fixed orientation); "
                 "leader +X → into image, +Y/+Z → image left/up",
                 flush=True,
             )
@@ -218,8 +219,7 @@ class AlohaTeleopPolicy(Policy):
                 f"[aloha_teleop] control_arms={self._control_arms} "
                 f"active={self.active_arms}; "
                 "close a leader gripper or send cmd=start. "
-                "Clutch must be ON (Space on leader terminal) for EE motion; "
-                "gripper still maps when clutch is OFF. "
+                "Space pause/reanchor is WIP (not reliable yet). "
                 f"episode_time={self._session.episode_time_s:g}s "
                 f"warmup={self._session.warmup_time_s:g}s "
                 f"num_episodes={self._session.num_episodes}. "
@@ -237,6 +237,11 @@ class AlohaTeleopPolicy(Policy):
         self._last_right_pos = None
         self._last_right_quat = None
         self._last_right_grip = 0.0
+        # Latched virtual poses / joints while paused for atomic reanchor.
+        self._frozen_right: Optional[Dict[str, Any]] = None
+        self._frozen_left: Optional[Dict[str, Any]] = None
+        self._resume_hold_pending = False
+        self._skip_record_once = False
         self._home_left_pos = np.zeros(3, dtype=np.float64)
         self._home_left_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self._home_left_grip = 0.0
@@ -308,7 +313,17 @@ class AlohaTeleopPolicy(Policy):
         return self._session.is_warmup
 
     def freeze_parts(self) -> bool:
-        return self._abort or self._session.is_warmup or self._session.done
+        return (
+            self._abort
+            or self._paused
+            or self._session.is_warmup
+            or self._session.done
+        )
+
+    @property
+    def pause_sim(self) -> bool:
+        """When True the harness should render without stepping physics."""
+        return bool(self._paused)
 
     def session_done(self) -> bool:
         return self._session.done
@@ -323,6 +338,11 @@ class AlohaTeleopPolicy(Policy):
         self._target = target
         self._part_done = False
         self._paused = False
+        self._session.set_clock_paused(False, time.monotonic())
+        self._resume_hold_pending = False
+        self._skip_record_once = False
+        self._frozen_right = None
+        self._frozen_left = None
         self._logged_snap = False
         left_pos, left_quat = _ee_pose(self.L, obs.ee_pose_L)
         right_pos, right_quat = _ee_pose(
@@ -380,9 +400,6 @@ class AlohaTeleopPolicy(Policy):
             None if sample_R is None else sample_R.get("cmd"),
             None if sample_L is None else sample_L.get("cmd"),
         )
-        self._apply_cmd(cmd)
-        self._handle_episode_event(self._session.step(cmd, now), now)
-        self._note_snap(obs)
 
         left_pos, left_quat = _ee_pose(self.L, obs.ee_pose_L)
         right_fallback = (
@@ -391,6 +408,19 @@ class AlohaTeleopPolicy(Policy):
             else (np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
         )
         right_pos, right_quat = _ee_pose(self.R, right_fallback)
+
+        self._apply_cmd(
+            cmd,
+            now,
+            sample_R=sample_R,
+            sample_L=sample_L,
+            left_pos=left_pos,
+            left_quat=left_quat,
+            right_pos=right_pos,
+            right_quat=right_quat,
+        )
+        self._handle_episode_event(self._session.step(cmd, now), now)
+        self._note_snap(obs)
 
         drive_L = "L" in self.active_arms and self._retarget_L is not None
         drive_R = "R" in self.active_arms
@@ -424,6 +454,16 @@ class AlohaTeleopPolicy(Policy):
         age = age_R if drive_R else age_L
         if drive_L and drive_R and reason_L != "tracking" and reason_R == "tracking":
             reason = reason_L
+
+        if self._resume_hold_pending:
+            action = self._emit_resume_hold_action()
+            self._resume_hold_pending = False
+            self._skip_record_once = True
+            self._last_ik_ok = True
+            self._last_tracking_err_m = 0.0
+            sample_for_log = sample_R if sample_R is not None else sample_L
+            self._maybe_log(obs, sample_for_log, "clutch_engage", age, now)
+            return action
 
         actions = []
         ik_ok = True
@@ -465,8 +505,14 @@ class AlohaTeleopPolicy(Policy):
         else:
             self._ik_fail_streak = 0
 
-        if self._session.is_recording and self._should_record_frame(obs, now):
+        if (
+            self._session.is_recording
+            and not self._paused
+            and not self._skip_record_once
+            and self._should_record_frame(obs, now)
+        ):
             self._record(obs, left_pos, left_quat, right_pos, right_quat)
+        self._skip_record_once = False
         sample_for_log = sample_R if sample_R is not None else sample_L
         self._maybe_log(obs, sample_for_log, reason, age, now)
         return action
@@ -535,6 +581,10 @@ class AlohaTeleopPolicy(Policy):
                     last_pos,
                     last_quat,
                 )
+            # Reanchor from the commanded / frozen virtual target, not the
+            # observed EE (which can lag IK and cause a resume jump).
+            dex_pos = last_pos if last_pos is not None else current_pos
+            dex_quat = last_quat if last_quat is not None else current_quat
             pos, quat, grip, info = retarget.step(
                 leader_pos=sample["ee_pos"],
                 leader_quat=sample["ee_quat_wxyz"],
@@ -542,8 +592,8 @@ class AlohaTeleopPolicy(Policy):
                 dt=wall_dt,
                 clutch=bool(sample["clutch"]) and not self._paused,
                 deadman=bool(sample["deadman"]) and not self._estop,
-                current_dex_pos=current_pos,
-                current_dex_quat=current_quat,
+                current_dex_pos=dex_pos,
+                current_dex_quat=dex_quat,
             )
             reason = info.get("reason", reason)
             if sample.get("timestamp_ns"):
@@ -623,16 +673,22 @@ class AlohaTeleopPolicy(Policy):
         sample_R = None
         sample_L = None
         if self._leader_R is not None:
-            raw = self._leader_R.latest()
-            if raw is not None:
-                sample_R = dict(raw)
-                sample_R["cmd"] = self._leader_R.pop_cmd()
+            sample_R = self._sample_from_leader(self._leader_R)
         if self._leader_L is not None:
-            raw = self._leader_L.latest()
-            if raw is not None:
-                sample_L = dict(raw)
-                sample_L["cmd"] = self._leader_L.pop_cmd()
+            sample_L = self._sample_from_leader(self._leader_L)
         return sample_R, sample_L
+
+    def _sample_from_leader(self, leader: LeaderClient) -> Optional[Dict[str, Any]]:
+        """Prefer a queued cmd-event sample so pause/resume keep their pose."""
+        event = leader.pop_cmd_event()
+        if event is not None:
+            return dict(event)
+        raw = leader.latest()
+        if raw is None:
+            return None
+        sample = dict(raw)
+        sample["cmd"] = "none"
+        return sample
 
     def _maybe_upgrade_keyboard_backend(self) -> None:
         if self._kbd_input is None:
@@ -671,16 +727,308 @@ class AlohaTeleopPolicy(Policy):
         if self._retarget_L is not None:
             self._retarget_L.reset()
 
-    def _apply_cmd(self, cmd: str) -> None:
+    def _controller_cspace_q(self, controller) -> Optional[np.ndarray]:
+        if controller is None:
+            return None
+        try:
+            q = controller.current_cspace_q()
+            return np.asarray(q, dtype=np.float64).reshape(-1).copy()
+        except Exception:
+            return None
+
+    def _latch_frozen_arm(
+        self,
+        *,
+        pos,
+        quat,
+        grip: float,
+        controller,
+    ) -> Dict[str, Any]:
+        return {
+            "pos": np.asarray(pos, dtype=np.float64).copy(),
+            "quat": T.normalize_quat_wxyz(quat),
+            "grip": float(grip),
+            "q": self._controller_cspace_q(controller),
+        }
+
+    def _enter_pause(
+        self,
+        now: float,
+        *,
+        left_pos,
+        left_quat,
+        right_pos,
+        right_quat,
+    ) -> None:
+        was = self._paused
+        self._paused = True
+        self._session.set_clock_paused(True, now)
+        self._disengage_retargeters()
+        self._resume_hold_pending = False
+        # Latch the actual virtual EE so resume reanchors without yanking
+        # toward a stale IK command or the physical leader's absolute pose.
+        if "R" in self.active_arms:
+            if right_pos is None:
+                right_pos = (
+                    self._last_right_pos
+                    if self._last_right_pos is not None
+                    else np.zeros(3)
+                )
+            if right_quat is None:
+                right_quat = (
+                    self._last_right_quat
+                    if self._last_right_quat is not None
+                    else np.array([1.0, 0.0, 0.0, 0.0])
+                )
+            grip = (
+                float(self._last_right_grip)
+                if self._last_right_grip is not None
+                else 0.0
+            )
+            self._frozen_right = self._latch_frozen_arm(
+                pos=right_pos,
+                quat=right_quat,
+                grip=grip,
+                controller=self.R,
+            )
+            self._last_right_pos = self._frozen_right["pos"].copy()
+            self._last_right_quat = self._frozen_right["quat"].copy()
+            self._last_right_grip = float(self._frozen_right["grip"])
+        if "L" in self.active_arms and self._retarget_L is not None:
+            if left_pos is None:
+                left_pos = (
+                    self._last_left_pos
+                    if self._last_left_pos is not None
+                    else np.zeros(3)
+                )
+            if left_quat is None:
+                left_quat = (
+                    self._last_left_quat
+                    if self._last_left_quat is not None
+                    else np.array([1.0, 0.0, 0.0, 0.0])
+                )
+            grip = (
+                float(self._last_left_grip)
+                if self._last_left_grip is not None
+                else 0.0
+            )
+            self._frozen_left = self._latch_frozen_arm(
+                pos=left_pos,
+                quat=left_quat,
+                grip=grip,
+                controller=self.L,
+            )
+            self._last_left_pos = self._frozen_left["pos"].copy()
+            self._last_left_quat = self._frozen_left["quat"].copy()
+            self._last_left_grip = float(self._frozen_left["grip"])
+        if not was:
+            self._next_record_wall = None
+            self._next_record_sim = None
+            print(
+                "[aloha_teleop] PAUSE (WIP): physics and recording frozen. "
+                "Reposition the leader, then Space or u to reanchor "
+                "(reanchor path is not reliable yet).",
+                flush=True,
+            )
+
+    def _resume_and_reanchor(
+        self,
+        now: float,
+        *,
+        sample_R: Optional[Dict[str, Any]],
+        sample_L: Optional[Dict[str, Any]],
+    ) -> None:
+        """Pair frozen virtual pose with the Space-2 leader pose; no jump."""
+        was = self._paused
+        self._disengage_retargeters()
+
+        if "R" in self.active_arms and sample_R is not None:
+            frozen = self._frozen_right
+            if frozen is None:
+                frozen = self._latch_frozen_arm(
+                    pos=self._last_right_pos
+                    if self._last_right_pos is not None
+                    else sample_R["ee_pos"],
+                    quat=self._last_right_quat
+                    if self._last_right_quat is not None
+                    else sample_R["ee_quat_wxyz"],
+                    grip=float(self._last_right_grip or 0.0),
+                    controller=self.R,
+                )
+            self._retarget_R.capture_origins(
+                sample_R["ee_pos"],
+                sample_R["ee_quat_wxyz"],
+                frozen["pos"],
+                frozen["quat"],
+            )
+            self._retarget_R.state.last_gripper = float(frozen["grip"])
+            self._last_right_pos = frozen["pos"].copy()
+            self._last_right_quat = frozen["quat"].copy()
+            self._last_right_grip = float(frozen["grip"])
+            self._frozen_right = frozen
+
+        if (
+            "L" in self.active_arms
+            and self._retarget_L is not None
+            and sample_L is not None
+        ):
+            frozen = self._frozen_left
+            if frozen is None:
+                frozen = self._latch_frozen_arm(
+                    pos=self._last_left_pos
+                    if self._last_left_pos is not None
+                    else sample_L["ee_pos"],
+                    quat=self._last_left_quat
+                    if self._last_left_quat is not None
+                    else sample_L["ee_quat_wxyz"],
+                    grip=float(self._last_left_grip or 0.0),
+                    controller=self.L,
+                )
+            self._retarget_L.capture_origins(
+                sample_L["ee_pos"],
+                sample_L["ee_quat_wxyz"],
+                frozen["pos"],
+                frozen["quat"],
+            )
+            self._retarget_L.state.last_gripper = float(frozen["grip"])
+            self._last_left_pos = frozen["pos"].copy()
+            self._last_left_quat = frozen["quat"].copy()
+            self._last_left_grip = float(frozen["grip"])
+            self._frozen_left = frozen
+
+        self._paused = False
+        self._session.set_clock_paused(False, now)
+        self._resume_hold_pending = True
+        self._skip_record_once = True
+        self._next_record_wall = None
+        self._next_record_sim = None
+        if was:
+            print(
+                "[aloha_teleop] RESUME (WIP): attempted origin recapture at the "
+                "new leader pose; verify DexMate stays put before relying on this.",
+                flush=True,
+            )
+
+    def _emit_resume_hold_action(self):
+        """Raw joint hold so the first resumed physics step cannot yank."""
+        actions = []
+        if "L" in self.active_arms and self.L is not None:
+            frozen = self._frozen_left
+            q = None if frozen is None else frozen.get("q")
+            grip = (
+                float(self._last_left_grip)
+                if self._last_left_grip is not None
+                else 0.0
+            )
+            if q is not None and hasattr(self.L, "forward_raw_q"):
+                actions.append(self.L.forward_raw_q(q, grip))
+            else:
+                actions.append(
+                    self.L.forward(
+                        self._last_left_pos,
+                        self._last_left_quat,
+                        grip,
+                    )
+                )
+        if "R" in self.active_arms and self.R is not None:
+            frozen = self._frozen_right
+            q = None if frozen is None else frozen.get("q")
+            grip = (
+                float(self._last_right_grip)
+                if self._last_right_grip is not None
+                else 0.0
+            )
+            if q is not None and hasattr(self.R, "forward_raw_q"):
+                actions.append(self.R.forward_raw_q(q, grip))
+            else:
+                actions.append(
+                    self.R.forward(
+                        self._last_right_pos,
+                        self._last_right_quat,
+                        grip,
+                    )
+                )
+        return merge_joint_position_actions(*actions, n_dof=self._n_dof)
+
+    def _set_paused(self, paused: bool, now: float) -> None:
+        """Legacy helper for start/reset/estop paths without latch poses."""
+        if paused:
+            right_pos = (
+                self._last_right_pos
+                if self._last_right_pos is not None
+                else np.zeros(3)
+            )
+            right_quat = (
+                self._last_right_quat
+                if self._last_right_quat is not None
+                else np.array([1.0, 0.0, 0.0, 0.0])
+            )
+            left_pos = (
+                self._last_left_pos
+                if self._last_left_pos is not None
+                else np.zeros(3)
+            )
+            left_quat = (
+                self._last_left_quat
+                if self._last_left_quat is not None
+                else np.array([1.0, 0.0, 0.0, 0.0])
+            )
+            self._enter_pause(
+                now,
+                left_pos=left_pos,
+                left_quat=left_quat,
+                right_pos=right_pos,
+                right_quat=right_quat,
+            )
+            return
+        self._paused = False
+        self._session.set_clock_paused(False, now)
+        self._disengage_retargeters()
+        self._resume_hold_pending = False
+        self._next_record_wall = None
+        self._next_record_sim = None
+
+    def _apply_cmd(
+        self,
+        cmd: str,
+        now: float,
+        *,
+        sample_R: Optional[Dict[str, Any]] = None,
+        sample_L: Optional[Dict[str, Any]] = None,
+        left_pos=None,
+        left_quat=None,
+        right_pos=None,
+        right_quat=None,
+    ) -> None:
         if cmd in (None, "none") or cmd in RECORDING_CMDS:
             return
         if cmd == "start":
-            self._paused = False
             self._estop = False
+            if self._paused:
+                self._resume_and_reanchor(
+                    now, sample_R=sample_R, sample_L=sample_L
+                )
+            else:
+                self._set_paused(False, now)
         elif cmd == "pause":
-            self._paused = True
+            self._enter_pause(
+                now,
+                left_pos=left_pos if left_pos is not None else self._last_left_pos,
+                left_quat=left_quat
+                if left_quat is not None
+                else self._last_left_quat,
+                right_pos=right_pos
+                if right_pos is not None
+                else self._last_right_pos,
+                right_quat=right_quat
+                if right_quat is not None
+                else self._last_right_quat,
+            )
         elif cmd == "resume":
-            self._paused = False
+            self._estop = False
+            self._resume_and_reanchor(
+                now, sample_R=sample_R, sample_L=sample_L
+            )
         elif cmd == "recenter":
             self._disengage_retargeters()
         elif cmd == "part_done":
@@ -698,12 +1046,24 @@ class AlohaTeleopPolicy(Policy):
             print("[aloha_teleop] task abort: holding robot; recording continues", flush=True)
         elif cmd == "estop":
             self._estop = True
-            self._paused = True
+            self._enter_pause(
+                now,
+                left_pos=left_pos if left_pos is not None else self._last_left_pos,
+                left_quat=left_quat
+                if left_quat is not None
+                else self._last_left_quat,
+                right_pos=right_pos
+                if right_pos is not None
+                else self._last_right_pos,
+                right_quat=right_quat
+                if right_quat is not None
+                else self._last_right_quat,
+            )
         elif cmd == "reset":
             self._reset_retargeters()
             self._part_done = False
-            self._paused = False
             self._estop = False
+            self._set_paused(False, now)
 
     def _note_snap(self, obs: Observation) -> None:
         if self._logged_snap or not getattr(obs, "snap_fired", False):
@@ -896,10 +1256,12 @@ class AlohaTeleopPolicy(Policy):
         if self._latencies_ms:
             p95 = float(np.percentile(self._latencies_ms, 95))
         extra = ""
+        if self._paused:
+            extra = " clutch=pause"
         if self._session.is_warmup:
-            extra = f" warmup_left={self._session.remaining_warmup_s(now):.1f}s"
+            extra += f" warmup_left={self._session.remaining_warmup_s(now):.1f}s"
         elif self._session.is_recording:
-            extra = f" rec_left={self._session.remaining_episode_s(now):.1f}s"
+            extra += f" rec_left={self._session.remaining_episode_s(now):.1f}s"
         target = self._last_right_pos if self._last_right_pos is not None else self._last_left_pos
         hz_r = 0.0 if self._leader_R is None else self._leader_R.hz
         hz_l = 0.0 if self._leader_L is None else self._leader_L.hz
@@ -925,9 +1287,8 @@ class AlohaTeleopPolicy(Policy):
         )
         if reason == "clutch_off":
             print(
-                "[aloha_teleop] EE held (clutch OFF). Press Space on the "
-                "leader terminal to engage; gripper-only motion is expected "
-                "while clutch is off.",
+                "[aloha_teleop] DexMate held (pause/clutch off). Reposition the "
+                "leader; Space or u reanchors without moving DexMate.",
                 flush=True,
             )
 

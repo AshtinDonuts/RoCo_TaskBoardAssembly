@@ -31,7 +31,7 @@
     }
   },
   "session": {
-    "episode_time_s": 60,
+    "episode_time_s": 600,
     "warmup_time_s": 5,
     "num_episodes": 1
   },

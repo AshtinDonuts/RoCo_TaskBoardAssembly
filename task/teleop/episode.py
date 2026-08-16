@@ -50,6 +50,7 @@ class EpisodeSession:
         self.needs_reset = False
         self._warmup_t0: Optional[float] = None
         self._record_t0: Optional[float] = None
+        self._clock_pause_t0: Optional[float] = None
 
     @property
     def done(self) -> bool:
@@ -63,20 +64,44 @@ class EpisodeSession:
     def is_recording(self) -> bool:
         return self.phase == "recording"
 
+    @property
+    def clock_paused(self) -> bool:
+        return self._clock_pause_t0 is not None
+
+    def set_clock_paused(self, paused: bool, now: float) -> None:
+        """Freeze warmup / episode timers without changing phase."""
+        if paused:
+            if self._clock_pause_t0 is None:
+                self._clock_pause_t0 = float(now)
+            return
+        if self._clock_pause_t0 is None:
+            return
+        dt = max(0.0, float(now) - self._clock_pause_t0)
+        if self._record_t0 is not None:
+            self._record_t0 += dt
+        if self._warmup_t0 is not None:
+            self._warmup_t0 += dt
+        self._clock_pause_t0 = None
+
+    def _clock_now(self, now: float) -> float:
+        if self._clock_pause_t0 is not None:
+            return self._clock_pause_t0
+        return float(now)
+
     def remaining_warmup_s(self, now: float) -> float:
         if self.phase != "warmup" or self._warmup_t0 is None:
             return self.warmup_time_s if self.phase == "idle" else 0.0
-        return max(0.0, self.warmup_time_s - (now - self._warmup_t0))
+        return max(0.0, self.warmup_time_s - (self._clock_now(now) - self._warmup_t0))
 
     def remaining_episode_s(self, now: float) -> float:
         if self.phase != "recording" or self._record_t0 is None:
             return 0.0
-        return max(0.0, self.episode_time_s - (now - self._record_t0))
+        return max(0.0, self.episode_time_s - (self._clock_now(now) - self._record_t0))
 
     def elapsed_episode_s(self, now: float) -> float:
         if self._record_t0 is None:
             return 0.0
-        return max(0.0, now - self._record_t0)
+        return max(0.0, self._clock_now(now) - self._record_t0)
 
     def start(self, now: float) -> EpisodeEvent:
         if self.done:
@@ -86,6 +111,7 @@ class EpisodeSession:
         self.needs_reset = False
         self._warmup_t0 = now
         self._record_t0 = None
+        self._clock_pause_t0 = None
         if self.warmup_time_s <= 0.0:
             return self._enter_recording(now, "warmup_skipped")
         return self._event("warmup_start", "start")
@@ -121,6 +147,8 @@ class EpisodeSession:
         return self._event("none")
 
     def tick(self, now: float) -> EpisodeEvent:
+        if self._clock_pause_t0 is not None:
+            return self._event("none")
         if self.phase == "warmup" and self._warmup_t0 is not None:
             if (now - self._warmup_t0) >= self.warmup_time_s:
                 return self._enter_recording(now, "warmup_done")
@@ -135,6 +163,7 @@ class EpisodeSession:
         self.phase = "idle"
         self._record_t0 = None
         self._warmup_t0 = None
+        self._clock_pause_t0 = None
         if end_session or self.saved_episodes >= self.num_episodes:
             self.phase = "done"
             self.needs_reset = False
@@ -149,6 +178,7 @@ class EpisodeSession:
         self.phase = "idle"
         self._record_t0 = None
         self._warmup_t0 = None
+        self._clock_pause_t0 = None
         if self.done:
             self.needs_reset = False
             return

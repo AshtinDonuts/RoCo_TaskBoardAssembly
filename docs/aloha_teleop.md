@@ -98,10 +98,29 @@ For `"dual"`, run two leader bridges on the ports in
 `control.leader_endpoints` (left + right); Isaac connects to both.
 
 Close the leader gripper (or press `s`) after the arm reaches the start pose.
-Backdrive then enables. **Clutch starts ON** after that (DexMate EE tracks
-leader deltas). Press Space to toggle; with clutch OFF only the gripper still
-maps — EE holds. Gravity compensation after that close is **off by
-default**; set `control.gravity_compensation: true` in
+Backdrive then enables. **Clutch starts in track** (DexMate EE follows leader
+deltas).
+
+### WIP: Space pause / reanchor (not ready)
+
+**Status: work in progress — do not rely on this for collection.** The intended
+mechanism is relative clutching so you can park DexMate, reposition the physical
+leader into a comfortable pose, then resume without yanking the virtual arm or
+stitching a stop into the recording. Hardware tests after the current
+implementation still failed to capture new origins on Space-2 / resume.
+
+Intended (not yet working end-to-end):
+
+1. **Space (pause)** — freeze physics, recording, and the episode timer; DexMate
+   stays put. Reposition the real arm into a comfortable mid-range pose.
+2. **Space again (track)** — atomically pair the frozen virtual EE with the new
+   leader pose. DexMate should not move until you move the leader again; only
+   subsequent physical deltas should apply.
+
+Until this is fixed, prefer continuous tracking without Space clutch
+repositioning. `p` / `u` share the same unfinished path. Gravity compensation
+after gripper close is **off by default**; set
+`control.gravity_compensation: true` in
 [`config/teleop_export.json`](../config/teleop_export.json) (or launch with
 `gravity_compensation:=true`) to enable it.
 
@@ -120,10 +139,10 @@ Task / robot keys do **not** save or discard data:
 
 | Key | Action |
 | --- | --- |
-| space | clutch toggle (captures origins on engage; **must be ON for EE motion**) |
+| space | **WIP** clutch toggle: **track** ↔ **pause** (intended: freeze sim+recording then reanchor; not reliable yet) |
 | r | recenter / recapture origins |
-| p | pause (hold last DexMate target) |
-| u | resume |
+| p | **WIP** jump to pause (same unfinished path as Space) |
+| u | **WIP** resume / reanchor (same unfinished path as Space) |
 | n | mark current gravity-settled (`open`) part done |
 | x | abort remaining parts (hold the robot; recording continues) |
 | e | emergency hold (deadman off) |
@@ -192,9 +211,11 @@ arm stays held (no second keyboard stream).
 Leader deltas are mapped through `retarget.axes_map` in
 [`config/aloha_solo_to_vega_1u.yaml`](../config/aloha_solo_to_vega_1u.yaml)
 so motion matches the **head camera view** (into-image / image-left-right /
-image-up), including the INIT `head_j1` pitch. If the robot root is rotated
-in the stage, recompute that 3×3 (or fall back to `axes_perm` / `axes_sign`).
-Keep rotation gains ≤ 1 until the map feels natural.
+image-up), including the INIT `head_j1` pitch. Orientation uses the same map
+as a **space-fixed** conjugation (tilt the leader in the image → DexMate tilts
+the same way in the image). If the robot root is rotated in the stage, recompute
+that 3×3 (or fall back to `axes_perm` / `axes_sign`). Keep rotation gains ≤ 1
+until the map feels natural.
 
 **Distance units:** both the physical ALOHA leader EE (Interbotix FK) and the
 DexMate stage use **meters**. `retarget.translation_gain` scales leader meter

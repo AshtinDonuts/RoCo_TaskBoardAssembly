@@ -6,7 +6,12 @@ from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 
-from .protocol import COMMANDS
+from .protocol import (
+    COMMANDS,
+    clutch_mode_after_cmd,
+    clutch_mode_engaged,
+    clutch_transition_cmd,
+)
 from . import transforms as T
 
 # Keys not used by clutch / recording / part-done / estop.
@@ -33,7 +38,8 @@ KEYBOARD_HELP = (
     "EEF translate (hold, headcam view): i/k into/out  j/l left/right  t/g up/down\n"
     "EEF rotate (hold):    q/a yaw  w/d pitch  z/c roll\n"
     "Gripper:              f close  v open  (binary)\n"
-    "Task: space=clutch  r=recenter  p=pause  u=resume  n=part_done  "
+    "Task: space=pause/track (WIP reanchor)  r=recenter  "
+    "p=pause  u=resume  n=part_done  "
     "x=abort  e=estop  s=start\n"
     "Record: Right=save  Left=rerecord  Esc=stop\n"
     "Focus the Isaac window for carb keyboard teleop."
@@ -78,11 +84,24 @@ class KeyboardEE:
         self.pos = np.zeros(3, dtype=np.float64)
         self.quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self.gripper = 1.0
-        self.clutch = True
+        self.clutch_mode = "track"
         self.deadman = True
         self.pending: List[str] = []
         self._lock = threading.Lock()
         self.moved = False
+
+    @property
+    def clutch(self) -> bool:
+        return clutch_mode_engaged(self.clutch_mode)
+
+    def _set_clutch_mode(self, new: str, *, emit: bool = True) -> None:
+        old = self.clutch_mode
+        self.clutch_mode = new if new in ("track", "freeze", "pause") else "track"
+        if not emit:
+            return
+        wire = clutch_transition_cmd(old, self.clutch_mode)
+        if wire != "none":
+            self.pending.append(wire)
 
     def apply(self, token: str) -> None:
         """One-shot nudge (TTY pulse / tests)."""
@@ -93,13 +112,15 @@ class KeyboardEE:
                     self.workspace_min,
                     self.workspace_max,
                 )
-                self.clutch = True
+                if self.clutch_mode != "pause":
+                    self._set_clutch_mode("track")
                 self.moved = True
                 return
             if token in _ANG:
                 delta = T.rotvec_to_quat_wxyz(self.ang_step_rad * _ANG[token])
                 self.quat = T.quat_multiply_wxyz(delta, self.quat)
-                self.clutch = True
+                if self.clutch_mode != "pause":
+                    self._set_clutch_mode("track")
                 self.moved = True
                 return
             self._apply_edge_locked(token)
@@ -129,12 +150,14 @@ class KeyboardEE:
                     self.workspace_min,
                     self.workspace_max,
                 )
-                self.clutch = True
+                if self.clutch_mode != "pause":
+                    self._set_clutch_mode("track")
             if float(np.linalg.norm(ang)) > 1e-9:
                 ang = ang / float(np.linalg.norm(ang))
                 delta = T.rotvec_to_quat_wxyz(self.ang_vel_rps * dt * ang)
                 self.quat = T.quat_multiply_wxyz(delta, self.quat)
-                self.clutch = True
+                if self.clutch_mode != "pause":
+                    self._set_clutch_mode("track")
             if moved:
                 self.moved = True
         return moved
@@ -151,16 +174,20 @@ class KeyboardEE:
             self.gripper = 1.0
             return
         if token == "clutch_toggle":
-            self.clutch = not self.clutch
-            self.pending.append("recenter" if self.clutch else "none")
+            self._set_clutch_mode(clutch_mode_after_cmd(token, self.clutch_mode))
             return
         if token == "estop":
             self.deadman = False
-            self.clutch = False
+            self._set_clutch_mode("freeze", emit=False)
             self.pending.append(token)
             return
         if token in ("start", "resume"):
             self.deadman = True
+            self._set_clutch_mode("track", emit=False)
+            self.pending.append(token)
+            return
+        if token == "pause":
+            self._set_clutch_mode("pause", emit=False)
             self.pending.append(token)
             return
         if token in COMMANDS:

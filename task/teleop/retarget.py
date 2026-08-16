@@ -25,6 +25,9 @@ class RetargetConfig:
     max_lin_acc: float = 2.0
     gripper_open_limit: float = 0.6649704
     gripper_close: float = 0.0
+    # Leader gripper_norm at/below which DexMate is fully closed. Absorbs
+    # leader calibration slack so "almost closed" maps to aperture 0.
+    gripper_close_norm: float = 0.20
     gripper_hysteresis: float = 0.03
     stale_hold_s: float = 0.10
     stale_pause_s: float = 0.50
@@ -53,6 +56,16 @@ class RetargetConfig:
         if self.axes_map is not None:
             return T.apply_axes_matrix(vec, self.axes_map)
         return T.apply_axes_map(vec, self.axes_perm, self.axes_sign)
+
+    def axes_matrix(self) -> np.ndarray:
+        """3x3 map with DexMate_vec = axes_matrix @ leader_vec."""
+        if self.axes_map is not None:
+            return np.asarray(self.axes_map, dtype=np.float64).reshape(3, 3)
+        # Build from signed permutation: out[i] = s[i] * v[p[i]]
+        m = np.zeros((3, 3), dtype=np.float64)
+        for i, (p, s) in enumerate(zip(self.axes_perm, self.axes_sign)):
+            m[i, int(p)] = float(s)
+        return m
 
 
 @dataclass
@@ -104,9 +117,18 @@ class CartesianRetargeter:
     def map_gripper(self, gripper_norm: float) -> float:
         cfg = self.cfg
         g = float(np.clip(gripper_norm, 0.0, 1.0))
-        target = cfg.gripper_close + g * (cfg.gripper_open_limit - cfg.gripper_close)
+        # Linear remap: leader [close_norm, 1] → DexMate [closed, open].
+        # Anything at/below close_norm is treated as fully closed so a
+        # slightly short physical travel still seals the virtual fingers.
+        close_at = float(np.clip(cfg.gripper_close_norm, 0.0, 0.95))
+        if g <= close_at:
+            g_eff = 0.0
+        else:
+            g_eff = (g - close_at) / (1.0 - close_at)
+        span = cfg.gripper_open_limit - cfg.gripper_close
+        target = cfg.gripper_close + g_eff * span
         prev = self.state.last_gripper
-        if abs(target - prev) < cfg.gripper_hysteresis * (cfg.gripper_open_limit - cfg.gripper_close):
+        if abs(target - prev) < cfg.gripper_hysteresis * span:
             return prev
         self.state.last_gripper = target
         return target
@@ -123,12 +145,23 @@ class CartesianRetargeter:
         current_dex_quat: Sequence[float],
     ) -> Tuple[np.ndarray, np.ndarray, float, Dict[str, Any]]:
         info: Dict[str, Any] = {"held": False, "engaged": self.state.engaged}
-        grip = self.map_gripper(gripper_norm)
         if not deadman:
             info["held"] = True
             info["reason"] = "deadman"
-            return self._hold(current_dex_pos, current_dex_quat, grip, info)
+            return self._hold(
+                current_dex_pos, current_dex_quat, self.state.last_gripper, info
+            )
 
+        if not clutch:
+            if self.state.engaged:
+                self.disengage()
+            info["held"] = True
+            info["reason"] = "clutch_off"
+            return self._hold(
+                current_dex_pos, current_dex_quat, self.state.last_gripper, info
+            )
+
+        grip = self.map_gripper(gripper_norm)
         if clutch and not self.state.engaged:
             self.capture_origins(leader_pos, leader_quat, current_dex_pos, current_dex_quat)
             info["engaged"] = True
@@ -139,13 +172,6 @@ class CartesianRetargeter:
                 grip,
                 info,
             )
-
-        if not clutch:
-            if self.state.engaged:
-                self.disengage()
-            info["held"] = True
-            info["reason"] = "clutch_off"
-            return self._hold(current_dex_pos, current_dex_quat, grip, info)
 
         pos, quat = self._relative_target(leader_pos, leader_quat)
         pos, quat = self._rate_limit(pos, quat, dt)
@@ -180,13 +206,22 @@ class CartesianRetargeter:
         dp_m = cfg.map_leader_vec(dp) * cfg.translation_gain
         pos = st.dex_origin_pos + dp_m
 
+        # Space-fixed relative orientation (headcam / world view):
+        #   R_rel = R_leader @ R_leader0^T
+        #   R_dex = (R_map @ R_rel @ R_map^T) @ R_dex0
+        # Body-fixed (q0^{-1}*q) + axes_map on the rotvec is inconsistent:
+        # axes_map is a space-frame map, so it must conjugate a space-fixed
+        # relative rotation (left-multiply onto dex_origin).
         q_rel = T.quat_multiply_wxyz(
-            T.quat_conjugate_wxyz(st.leader_origin_quat),
             T.normalize_quat_wxyz(leader_quat),
+            T.quat_conjugate_wxyz(st.leader_origin_quat),
         )
         rotvec = T.quat_wxyz_to_rotvec(q_rel) * cfg.rotation_gain
         rotvec_m = cfg.map_leader_vec(rotvec)
-        quat = T.quat_multiply_wxyz(st.dex_origin_quat, T.rotvec_to_quat_wxyz(rotvec_m))
+        quat = T.quat_multiply_wxyz(
+            T.rotvec_to_quat_wxyz(rotvec_m),
+            st.dex_origin_quat,
+        )
         return pos, quat
 
     def _rate_limit(
