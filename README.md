@@ -238,6 +238,17 @@ Relocating a camera is done by editing the prim's `xformOp:translate` /
 `xformOp:orient` in `robot/vega_1u_gripper.usda` (or `scene_init.usd`)
 — there are no Python-side overrides anymore.
 
+### Right-wrist approach laser
+
+When `enable_r_wrist_laser` is True (default), the harness draws a TCP
++Z approach cue on the R-wrist RGB stream
+(`task/controllers/r_wrist_laser.py`). Beam length prefers the wrist
+camera's center depth (true line of sight); PhysX raycasts are fallback
+only, because table/board visuals often lack colliders and otherwise
+leave the overlay stuck at `MAX` length. Details, env knobs, and the
+debug log format live in [`task/README.md`](task/README.md) (config
+primer + gotcha #9).
+
 ## 📦 Git LFS
 
 This repository contains large simulation assets. Before adding USD, USDC,

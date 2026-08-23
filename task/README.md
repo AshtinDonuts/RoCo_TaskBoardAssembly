@@ -22,6 +22,7 @@ hands each part to the participant's `Policy`, and grades the result
 | `calibrate_r_arm_joints.py` | Robot+floor R-arm init calibrator (omni.ui sliders). Launch via `../scripts/calibrate_r_arm.sh`. |
 | `r_arm_calib_ui.py`        | omni.ui panel + Save writers for `INIT_JOINT_TARGETS` / Lula YAMLs. |
 | `controllers/`            | EEPoseController, EEPathFollower, LulaIKController, snap helpers, pick-place task, Lula descriptor yamls for both arms (L + R). |
+| `controllers/r_wrist_laser.py` | Right-wrist TCP approach laser: wrist-cam center depth (LOS) preferred, PhysX raycast fallback, AimBot-style RGB overlay via `omni.ui`. |
 | `controllers/vega_1u_L_arm_description*.yaml` | Lula descriptors for L arm — `default_q` mirrors the scene init pose (see *Gotchas* below). Three variants picked by `pc.OWNS_LIFT_L` / `OWNS_TORSO_L`. |
 | `controllers/vega_1u_R_arm_description*.yaml` | Same, R arm. Available so a policy can do bimanual IK; the default single-arm runner just holds R at `INIT_JOINT_TARGETS`. |
 | `scene_final.usd`, `demo.mp4` | Reference output of a passing baseline run. |
@@ -126,6 +127,27 @@ When `enable_camera_output = True`, the harness binds the three cameras
 and surfaces frames via `Observation.rgb` / `depth` / `intrinsics` to
 the policy. `--record-video` also enables camera binding for the selected
 stream even when `enable_camera_output` is `False`.
+
+**R-wrist approach laser** — optional TCP +Z range cue overlaid on the
+R-wrist RGB preview (`controllers/r_wrist_laser.py`). Enabling it forces
+camera sensor output so depth/RGBA exist:
+
+```python
+enable_r_wrist_laser = True                 # TASK_ENABLE_R_WRIST_LASER
+R_WRIST_LASER_MAX_LENGTH = 2.0              # TASK_R_WRIST_LASER_MAX_LENGTH
+R_WRIST_LASER_LOG_PERIOD_S = 0.5            # TASK_R_WRIST_LASER_LOG_PERIOD_S
+R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET = 0.0   # TASK_R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET
+R_WRIST_LASER_DEBUG_LOG = True              # TASK_R_WRIST_LASER_DEBUG_LOG
+```
+
+Beam length prefers the median finite depth in a small patch around the
+wrist-cam image center (true line of sight). PhysX casts along tool +Z
+and the camera look axis are fallback / cross-check only — table and
+board visuals often lack colliders (see gotcha #9). Distance is cued by
+on-image `HIT`/`MAX` text, a range bar, and reticle size; the crosshair
+`(u,v)` is nearly range-invariant because the cam is nearly coaxial with
+the tool axis. Live preview uses an `omni.ui` window (`R Wrist Laser`) —
+do not use OpenCV HighGUI inside Kit.
 
 **IK descriptor mode** — three modes per arm via the (`OWNS_LIFT_*`,
 `OWNS_TORSO_*`) flag pair:
@@ -296,6 +318,33 @@ top of the standalone values. Used to re-tune `pick_pos` /
 accumulates in chained runs. Stripped from `get_part_config()`'s
 return.
 
+### 9. R-wrist laser stuck on `MAX` without depth
+
+The approach laser originally terminated only via PhysX raycasts from
+the TCP along tool +Z (robot self-hits filtered by prim prefix). On this
+scene the overlay often stayed at `MAX 2.000 m` even when the gripper
+was visibly contacting the table or a part: many table/board meshes are
+visual-only and never report an environment hit, so every cast looked
+like a full-length miss.
+
+**Fix (commit `bc0aadd`):** prefer wrist-cam center depth for line-of-
+sight termination (`src=wrist_depth` in the periodic log), and keep
+PhysX (`physx_tcp` / `physx_cam`, via `raycast_closest` walk with
+`raycast_all` fallback) as backup. `run_pick_place.py` feeds
+`R_wrist_camera` `distance_to_image_plane` into `RWristLaser.update`.
+Related HUD notes:
+
+- Coaxial wrist cam → projected stop `(u,v)` barely moves with range;
+  distance must be read from the `HIT`/`MAX` text, range bar, or
+  `dist=` log — not from crosshair motion alone.
+- `R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET` defaults to `0` (TCP). A
+  positive offset can start the PhysX query past a near contact when
+  the gripper is already touching.
+- Snapshot PhysX hit fields inside the callback; the hit object may be
+  reused across reports.
+- Never preview with `cv2.imshow` in the Isaac process — OpenCV HighGUI
+  aborts Kit. Use the `omni.ui` `"R Wrist Laser"` window.
+
 ## Quick recipes
 
 **Write a new policy:**
@@ -352,3 +401,8 @@ data-flow note above.)
 - Per-part hang? `PER_PART_TIMEOUT_STEPS` (default 3000) caps the per-
   part loop. The harness logs the timeout and advances; the part is
   graded on whatever state it ended in.
+- R-wrist laser always `MAX`? Confirm depth is live (`depth=` in the
+  `[r_wrist_laser]` log; `depth=-1` means the frame is not ready yet).
+  Prefer `src=wrist_depth` over PhysX when the table/board has no
+  collider — see gotcha #9. Quiet XYZ dumps with
+  `TASK_R_WRIST_LASER_DEBUG_LOG=0`.
