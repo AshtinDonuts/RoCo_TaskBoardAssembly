@@ -804,12 +804,17 @@ def main():
     if r_wrist_laser_enabled:
         r_wrist_laser = RWristLaser(
             max_length=float(getattr(pc, "R_WRIST_LASER_MAX_LENGTH", 2.0)),
+            raycast_origin_offset_m=float(
+                getattr(pc, "R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET", 0.0)
+            ),
             camera_prim_path=R_WRIST_CAMERA_PATH,
             show_window=not _HEADLESS,
+            debug_log=bool(getattr(pc, "R_WRIST_LASER_DEBUG_LOG", False)),
         )
         print(
             f"[setup] R-wrist laser enabled "
             f"(max_length={r_wrist_laser.max_length:g} m; "
+            f"raycast_origin_offset={r_wrist_laser.raycast_origin_offset_m:g} m; "
             f"log every {float(getattr(pc, 'R_WRIST_LASER_LOG_PERIOD_S', 0.5)):g} s)",
             flush=True,
         )
@@ -928,19 +933,33 @@ def main():
                 Rp, Rq = R_controller.end_effector.get_world_pose()
             except Exception:
                 return
-            r_wrist_laser.update(Rp, Rq)
-            r_wrist_laser.maybe_log_distance(
-                float(sim_time_s),
-                float(getattr(pc, "R_WRIST_LASER_LOG_PERIOD_S", 0.5)),
-            )
+            depth_m = None
+            try:
+                frame = R_wrist_camera.get_current_frame()
+                if frame and frame.get("distance_to_image_plane") is not None:
+                    depth_m = np.asarray(
+                        frame["distance_to_image_plane"], dtype=np.float32
+                    )
+            except Exception:
+                depth_m = None
+            r_wrist_laser.update(Rp, Rq, depth_m=depth_m)
             try:
                 rgba = R_wrist_camera.get_rgba()
             except Exception:
                 rgba = None
             if rgba is None or getattr(rgba, "size", 0) == 0:
+                r_wrist_laser.maybe_log_distance(
+                    float(sim_time_s),
+                    float(getattr(pc, "R_WRIST_LASER_LOG_PERIOD_S", 0.5)),
+                )
                 return
             rgb = np.asarray(rgba[..., :3])
             overlay = r_wrist_laser.overlay_rgb(rgb, R_wrist_camera)
+            # Log after overlay so stop_uv matches this frame (Branch A/B).
+            r_wrist_laser.maybe_log_distance(
+                float(sim_time_s),
+                float(getattr(pc, "R_WRIST_LASER_LOG_PERIOD_S", 0.5)),
+            )
             if overlay is not None:
                 last_r_wrist_overlay = overlay
                 r_wrist_laser.show_overlay(overlay, now_s=float(sim_time_s))
