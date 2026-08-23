@@ -1,31 +1,27 @@
 """Right-wrist TCP approach laser for visual guidance.
 
 Casts a ray from the right EE tool frame along gripper local +Z (approach),
-terminating at the first non-robot collider hit.
-
-Drawing strategy:
-  1. Prefer ``omni.debugdraw`` (viewport overlay; not in camera RGB).
-  2. If debugdraw is unavailable, fall back to a thin USD cylinder.
-  3. When ``record`` is True, always keep the USD cylinder visible so
-     head/wrist camera frames (datasets / --record-video) include the beam.
+terminating at the first non-robot collider hit. Distance is logged on a
+throttle; the beam is drawn only as a 2D overlay on R-wrist camera RGB
+(no world USD prim / debugdraw). Live preview uses an ``omni.ui`` window —
+OpenCV HighGUI (``cv2.imshow``) fights Kit's windowing and aborts the app.
 """
 
 from __future__ import annotations
 
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Any, Iterable, Optional, Sequence, Tuple
 
 import carb
 import numpy as np
 import omni.usd
 from omni.physx import get_physx_scene_query_interface
-from pxr import Gf, UsdGeom
+from pxr import UsdGeom
 
 from .ee_pose_controller import _approach_axis_world
 from .pick_place_task import ROBOT_PRIM_PATH
 
-_LASER_PRIM_PATH = "/World/_r_wrist_laser"
-_LASER_COLOR_ARGB = 0xFFFF2020  # bright red (AARRGGBB)
-_DEBUGDRAW_EXT = "omni.debugdraw"
+_OVERLAY_WINDOW = "R Wrist Laser"
+_UI_MIN_PERIOD_S = 0.05  # ~20 Hz preview; avoids flooding ByteImageProvider
 
 
 def _as_float3(v: Sequence[float]) -> carb.Float3:
@@ -42,27 +38,6 @@ def _quat_wxyz_to_rot_matrix(quat_wxyz: Sequence[float]) -> np.ndarray:
         ],
         dtype=np.float64,
     )
-
-
-def _rotation_aligning_z_to(direction: np.ndarray) -> Gf.Quatd:
-    """Unit quaternion (Gf) rotating local +Z onto ``direction``."""
-    d = np.asarray(direction, dtype=np.float64).reshape(3)
-    n = float(np.linalg.norm(d))
-    if n < 1e-12:
-        return Gf.Quatd(1.0, Gf.Vec3d(0.0, 0.0, 0.0))
-    d = d / n
-    z = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-    dot = float(np.clip(np.dot(z, d), -1.0, 1.0))
-    if dot > 1.0 - 1e-8:
-        return Gf.Quatd(1.0, Gf.Vec3d(0.0, 0.0, 0.0))
-    if dot < -1.0 + 1e-8:
-        return Gf.Quatd(0.0, Gf.Vec3d(1.0, 0.0, 0.0))
-    axis = np.cross(z, d)
-    axis /= max(float(np.linalg.norm(axis)), 1e-12)
-    angle = float(np.arccos(dot))
-    half = 0.5 * angle
-    s = float(np.sin(half))
-    return Gf.Quatd(float(np.cos(half)), Gf.Vec3d(*(axis * s)))
 
 
 def _path_excluded(path: str, prefixes: Iterable[str]) -> bool:
@@ -130,148 +105,148 @@ def raycast_beam_end(
     return end, float(max_length), False
 
 
-def _try_get_debug_draw():
-    """Enable omni.debugdraw if needed and return its interface, or None."""
-    try:
-        import omni.kit.app
-
-        app = omni.kit.app.get_app()
-        if app is not None:
-            ext_mgr = app.get_extension_manager()
-            if ext_mgr is not None and not ext_mgr.is_extension_enabled(_DEBUGDRAW_EXT):
-                ext_mgr.set_extension_enabled_immediate(_DEBUGDRAW_EXT, True)
-    except Exception:
-        pass
-    try:
-        from omni.debugdraw import get_debug_draw_interface
-
-        iface = get_debug_draw_interface()
-        if iface is None:
-            return None
-        return iface
-    except Exception:
+def _camera_world_Rt(
+    camera_prim_path: str,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Return (R_world_from_cam 3x3, t_world 3,) for the camera prim."""
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
         return None
+    prim = stage.GetPrimAtPath(camera_prim_path)
+    if not prim or not prim.IsValid():
+        return None
+    mat = UsdGeom.XformCache().GetLocalToWorldTransform(prim)
+    t = mat.ExtractTranslation()
+    rot = mat.ExtractRotationQuat()
+    imag = rot.GetImaginary()
+    quat_wxyz = np.array(
+        [rot.GetReal(), imag[0], imag[1], imag[2]], dtype=np.float64
+    )
+    R = _quat_wxyz_to_rot_matrix(quat_wxyz)
+    t_w = np.array([t[0], t[1], t[2]], dtype=np.float64)
+    return R, t_w
+
+
+def _world_to_camera(
+    point_w: np.ndarray, R_wc: np.ndarray, t_w: np.ndarray
+) -> np.ndarray:
+    """Transform world point into USD camera frame (looks down local -Z)."""
+    return R_wc.T @ (np.asarray(point_w, dtype=np.float64).reshape(3) - t_w)
+
+
+def _project_point(
+    point_w: np.ndarray,
+    R_wc: np.ndarray,
+    t_w: np.ndarray,
+    K: np.ndarray,
+) -> Optional[Tuple[float, float, float]]:
+    """Return (u, v, depth_along_view) or None if behind the camera.
+
+    USD / Isaac cameras look along local -Z; depth = -Z_cam (>0 in front).
+    """
+    p_cam = _world_to_camera(point_w, R_wc, t_w)
+    depth = float(-p_cam[2])
+    if depth <= 1e-6:
+        return None
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    u = fx * (float(p_cam[0]) / depth) + cx
+    v = fy * (float(p_cam[1]) / depth) + cy
+    return u, v, depth
+
+
+def _clip_segment_to_image(
+    p0: Tuple[float, float],
+    p1: Tuple[float, float],
+    width: int,
+    height: int,
+) -> Optional[Tuple[Tuple[int, int], Tuple[int, int]]]:
+    """Cohen–Sutherland clip; returns integer pixel endpoints or None."""
+    x_min, y_min, x_max, y_max = 0.0, 0.0, float(width - 1), float(height - 1)
+
+    def _code(x: float, y: float) -> int:
+        c = 0
+        if x < x_min:
+            c |= 1
+        elif x > x_max:
+            c |= 2
+        if y < y_min:
+            c |= 4
+        elif y > y_max:
+            c |= 8
+        return c
+
+    x0, y0 = float(p0[0]), float(p0[1])
+    x1, y1 = float(p1[0]), float(p1[1])
+    c0, c1 = _code(x0, y0), _code(x1, y1)
+    for _ in range(8):
+        if not (c0 | c1):
+            return (int(round(x0)), int(round(y0))), (int(round(x1)), int(round(y1)))
+        if c0 & c1:
+            return None
+        c_out = c0 or c1
+        if c_out & 8:
+            x = x0 + (x1 - x0) * (y_max - y0) / (y1 - y0 + 1e-12)
+            y = y_max
+        elif c_out & 4:
+            x = x0 + (x1 - x0) * (y_min - y0) / (y1 - y0 + 1e-12)
+            y = y_min
+        elif c_out & 2:
+            y = y0 + (y1 - y0) * (x_max - x0) / (x1 - x0 + 1e-12)
+            x = x_max
+        else:
+            y = y0 + (y1 - y0) * (x_min - x0) / (x1 - x0 + 1e-12)
+            x = x_min
+        if c_out == c0:
+            x0, y0 = x, y
+            c0 = _code(x0, y0)
+        else:
+            x1, y1 = x, y
+            c1 = _code(x1, y1)
+    return None
 
 
 class RWristLaser:
-    """Per-frame right-wrist approach laser."""
+    """Per-frame right-wrist approach laser (raycast + RGB overlay)."""
 
     def __init__(
         self,
         *,
         max_length: float = 2.0,
-        radius: float = 0.0015,
         origin_offset_m: float = 0.02,
         tip_offset_ee: Optional[Sequence[float]] = None,
-        record: bool = False,
-        color_argb: int = _LASER_COLOR_ARGB,
-        line_width: float = 2.0,
+        camera_prim_path: Optional[str] = None,
         exclude_prefixes: Optional[Sequence[str]] = None,
+        line_thickness: int = 2,
+        show_window: bool = True,
     ):
         self.max_length = float(max_length)
-        self.radius = float(radius)
         self.origin_offset_m = float(origin_offset_m)
         self.tip_offset_ee = (
             np.asarray(tip_offset_ee, dtype=np.float64).reshape(3)
             if tip_offset_ee is not None
             else None
         )
-        self.record = bool(record)
-        self.color_argb = int(color_argb)
-        self.line_width = float(line_width)
+        self.camera_prim_path = camera_prim_path
         self.exclude_prefixes = list(
-            exclude_prefixes
-            if exclude_prefixes is not None
-            else (ROBOT_PRIM_PATH, _LASER_PRIM_PATH)
+            exclude_prefixes if exclude_prefixes is not None else (ROBOT_PRIM_PATH,)
         )
-        self._dd = None
-        self._dd_checked = False
-        self._use_usd_guidance = False
-        self._cyl = None
-        self._xform_ops = None
+        self.line_thickness = int(line_thickness)
+        self.show_window = bool(show_window)
+
         self.last_origin: Optional[np.ndarray] = None
         self.last_end: Optional[np.ndarray] = None
         self.last_hit: bool = False
         self.last_length: float = 0.0
-
-    def set_record(self, record: bool) -> None:
-        self.record = bool(record)
-        if not self.record and not self._use_usd_guidance:
-            self._set_usd_visible(False)
-
-    def _ensure_debug_draw(self) -> None:
-        if self._dd_checked:
-            return
-        self._dd_checked = True
-        self._dd = _try_get_debug_draw()
-        if self._dd is None:
-            # Viewport guidance without the Kit extension: keep a USD beam.
-            self._use_usd_guidance = True
-            print(
-                "[r_wrist_laser] omni.debugdraw unavailable; "
-                "using USD cylinder for viewport guidance "
-                "(will appear in camera RGB whenever visible).",
-                flush=True,
-            )
-
-    def _ensure_usd(self) -> None:
-        if self._cyl is not None:
-            return
-        stage = omni.usd.get_context().get_stage()
-        if stage is None:
-            return
-        if stage.GetPrimAtPath(_LASER_PRIM_PATH).IsValid():
-            stage.RemovePrim(_LASER_PRIM_PATH)
-        cyl = UsdGeom.Cylinder.Define(stage, _LASER_PRIM_PATH)
-        cyl.CreateAxisAttr(UsdGeom.Tokens.z)
-        cyl.CreateRadiusAttr(self.radius)
-        cyl.CreateHeightAttr(self.max_length)
-        cyl.CreateDisplayColorAttr([Gf.Vec3f(1.0, 0.12, 0.12)])
-        cyl.CreateDisplayOpacityAttr([0.95])
-        prim = cyl.GetPrim()
-        imageable = UsdGeom.Imageable(prim)
-        imageable.CreateVisibilityAttr().Set("inherited")
-        xform = UsdGeom.Xformable(prim)
-        xform.ClearXformOpOrder()
-        t_op = xform.AddTranslateOp()
-        o_op = xform.AddOrientOp(UsdGeom.XformOp.PrecisionDouble)
-        self._cyl = cyl
-        self._xform_ops = (t_op, o_op)
-        self._set_usd_visible(False)
-
-    def _set_usd_visible(self, visible: bool) -> None:
-        stage = omni.usd.get_context().get_stage()
-        if stage is None:
-            return
-        prim = stage.GetPrimAtPath(_LASER_PRIM_PATH)
-        if not prim or not prim.IsValid():
-            return
-        imageable = UsdGeom.Imageable(prim)
-        if visible:
-            imageable.MakeVisible()
-        else:
-            imageable.MakeInvisible()
-
-    def _update_usd_beam(self, origin: np.ndarray, end: np.ndarray) -> None:
-        self._ensure_usd()
-        if self._cyl is None or self._xform_ops is None:
-            return
-        delta = end - origin
-        length = float(np.linalg.norm(delta))
-        if length < 1e-4:
-            self._set_usd_visible(False)
-            return
-        direction = delta / length
-        mid = origin + 0.5 * delta
-        t_op, o_op = self._xform_ops
-        self._cyl.GetHeightAttr().Set(length)
-        self._cyl.GetRadiusAttr().Set(self.radius)
-        t_op.Set(Gf.Vec3d(float(mid[0]), float(mid[1]), float(mid[2])))
-        o_op.Set(_rotation_aligning_z_to(direction))
-        self._set_usd_visible(True)
+        self._last_log_s: float = -1e9
+        self._last_ui_s: float = -1e9
+        self._window_created = False
+        self._ui_window: Any = None
+        self._ui_provider: Any = None
+        self._ui_failed = False
 
     def update(self, ee_pos, ee_quat_wxyz) -> None:
-        """Raycast and draw. Call once per rendered sim frame."""
+        """Raycast along gripper +Z. Call once per rendered sim frame."""
         pos = np.asarray(ee_pos, dtype=np.float64).reshape(3)
         quat = np.asarray(ee_quat_wxyz, dtype=np.float64).reshape(-1)
         direction = _approach_axis_world(quat)
@@ -296,21 +271,145 @@ class RWristLaser:
         self.last_hit = bool(hit)
         self.last_length = float(length)
 
-        self._ensure_debug_draw()
-        if self._dd is not None:
-            w = self.line_width
-            self._dd.draw_line(
-                _as_float3(origin),
-                self.color_argb,
-                w,
-                _as_float3(end),
-                self.color_argb,
-                w,
-            )
+    def maybe_log_distance(self, now_s: float, period_s: float = 0.5) -> None:
+        if now_s - self._last_log_s < float(period_s):
+            return
+        self._last_log_s = float(now_s)
+        tag = "hit" if self.last_hit else "max"
+        print(
+            f"[r_wrist_laser] dist={self.last_length:.3f} m ({tag})",
+            flush=True,
+        )
 
-        # USD beam: required when recording into cameras, or as guidance
-        # fallback when debugdraw is missing.
-        if self.record or self._use_usd_guidance:
-            self._update_usd_beam(origin, end)
-        else:
-            self._set_usd_visible(False)
+    def overlay_rgb(self, rgb, camera) -> Optional[np.ndarray]:
+        """Draw the last beam onto a copy of ``rgb`` (HxWx3). Returns RGB uint8."""
+        if (
+            rgb is None
+            or self.last_origin is None
+            or self.last_end is None
+            or camera is None
+        ):
+            return None
+
+        arr = np.asarray(rgb)
+        if arr.ndim != 3 or arr.shape[-1] < 3:
+            return None
+        if arr.dtype != np.uint8:
+            arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+            if arr.size and float(np.nanmax(arr)) <= 1.0:
+                arr = arr * 255.0
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        out = np.ascontiguousarray(arr[..., :3].copy())
+        h, w = out.shape[:2]
+
+        try:
+            K = camera.get_intrinsics_matrix()
+        except Exception:
+            K = None
+        if K is None:
+            return out
+        K = np.asarray(K, dtype=np.float64)
+
+        cam_path = self.camera_prim_path or getattr(camera, "prim_path", None)
+        if not cam_path:
+            return out
+        Rt = _camera_world_Rt(str(cam_path))
+        if Rt is None:
+            return out
+        R_wc, t_w = Rt
+
+        # Subsample the beam so a long ray still projects if endpoints clip.
+        n_pts = 16
+        pts_uv = []
+        for i in range(n_pts + 1):
+            alpha = i / float(n_pts)
+            pw = self.last_origin * (1.0 - alpha) + self.last_end * alpha
+            proj = _project_point(pw, R_wc, t_w, K)
+            if proj is not None:
+                pts_uv.append((proj[0], proj[1]))
+
+        try:
+            import cv2
+        except ImportError:
+            return out
+
+        if len(pts_uv) >= 2:
+            for a, b in zip(pts_uv[:-1], pts_uv[1:]):
+                clipped = _clip_segment_to_image(a, b, w, h)
+                if clipped is None:
+                    continue
+                # Draw in RGB; Kit ByteImageProvider / video writers expect RGB.
+                cv2.line(out, clipped[0], clipped[1], (255, 32, 32), self.line_thickness)
+            end_uv = pts_uv[-1]
+            if 0 <= end_uv[0] < w and 0 <= end_uv[1] < h:
+                cv2.circle(
+                    out,
+                    (int(round(end_uv[0])), int(round(end_uv[1]))),
+                    max(3, self.line_thickness + 1),
+                    (255, 255, 0),
+                    -1,
+                )
+        return out
+
+    def show_overlay(self, overlay_rgb: Optional[np.ndarray], now_s: Optional[float] = None) -> None:
+        """Show overlaid RGB in a Kit ``omni.ui`` window (never OpenCV HighGUI)."""
+        if not self.show_window or overlay_rgb is None or self._ui_failed:
+            return
+        t = float(now_s) if now_s is not None else self._last_log_s
+        if t - self._last_ui_s < _UI_MIN_PERIOD_S and self._window_created:
+            return
+        self._last_ui_s = t
+
+        arr = np.asarray(overlay_rgb)
+        if arr.ndim != 3 or arr.shape[-1] < 3:
+            return
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        rgb = np.ascontiguousarray(arr[..., :3], dtype=np.uint8)
+        rgba = np.dstack(
+            [rgb, np.full((h, w), 255, dtype=np.uint8)]
+        )
+        # ByteImageProvider wants a flat sequence of RGBA bytes.
+        pixels = rgba.reshape(-1).tolist()
+
+        try:
+            import omni.ui as ui
+        except Exception as exc:
+            self._ui_failed = True
+            print(f"[r_wrist_laser] omni.ui unavailable; preview disabled: {exc}", flush=True)
+            return
+
+        try:
+            if self._ui_provider is None or self._ui_window is None:
+                self._ui_provider = ui.ByteImageProvider()
+                self._ui_window = ui.Window(
+                    _OVERLAY_WINDOW,
+                    width=max(320, w),
+                    height=max(240, h),
+                    visible=True,
+                )
+                with self._ui_window.frame:
+                    ui.ImageWithProvider(
+                        self._ui_provider,
+                        fill_policy=ui.IwpFillPolicy.IWP_STRETCH,
+                    )
+                self._window_created = True
+                print(
+                    f"[r_wrist_laser] Kit preview window '{_OVERLAY_WINDOW}' "
+                    f"({w}x{h})",
+                    flush=True,
+                )
+            self._ui_provider.set_bytes_data(pixels, [w, h])
+        except Exception as exc:
+            self._ui_failed = True
+            print(f"[r_wrist_laser] preview failed; disabling: {exc}", flush=True)
+            self.close()
+
+    def close(self) -> None:
+        if self._ui_window is not None:
+            try:
+                self._ui_window.visible = False
+                self._ui_window = None
+            except Exception:
+                pass
+        self._ui_provider = None
+        self._window_created = False

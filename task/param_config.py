@@ -125,6 +125,12 @@ enable_camera_viewports = _env_bool("TASK_ENABLE_CAMERA_VIEWPORTS", True)   # sh
 enable_camera_output    = _env_bool("TASK_ENABLE_CAMERA_OUTPUT", False)   # bind sensors so RGB/depth are readable from Python
 HEAD_DEPTH_CAMERA_FOCAL_LENGTH = float(os.getenv("TASK_HEAD_DEPTH_FOCAL_LENGTH", "10"))
 
+# Right-wrist TCP approach laser: PhysX raycast + 2D overlay on R_wrist RGB.
+# When enabled, forces camera sensor output so R_wrist RGBA/intrinsics exist.
+enable_r_wrist_laser = _env_bool("TASK_ENABLE_R_WRIST_LASER", True)
+R_WRIST_LASER_MAX_LENGTH = float(os.getenv("TASK_R_WRIST_LASER_MAX_LENGTH", "2.0"))
+R_WRIST_LASER_LOG_PERIOD_S = float(os.getenv("TASK_R_WRIST_LASER_LOG_PERIOD_S", "0.5"))
+
 # Soft parallel-gripper drives. Commanded close aperture is 0 rad (full
 # close); these caps make the finger PD yield on contact so parts are not
 # crushed. Units: stiffness/damping are drive gains; max_force is Nm.

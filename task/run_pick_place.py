@@ -64,6 +64,7 @@ from controllers.vega_1u_setup import (
     setup_pick_place_sim,
 )
 from controllers.pick_place_task import ROBOT_PRIM_PATH
+from controllers.r_wrist_laser import RWristLaser
 from controllers.part_from_usd import DynamicPart
 from isaacsim.core.api.materials.physics_material import PhysicsMaterial
 from isaacsim.core.utils.prims import is_prim_path_valid
@@ -759,7 +760,12 @@ def main():
     )
     record_period_s = 1.0 / float(max(1, args.record_video_fps))
     next_record_time_s = 0.0
-    camera_output_enabled = bool(pc.enable_camera_output or video_recorder.enabled)
+    r_wrist_laser_enabled = bool(getattr(pc, "enable_r_wrist_laser", False))
+    camera_output_enabled = bool(
+        pc.enable_camera_output
+        or video_recorder.enabled
+        or r_wrist_laser_enabled
+    )
     exit_on_complete = bool(_HEADLESS or video_recorder.enabled)
     run_complete = False
     finalized = False
@@ -791,6 +797,22 @@ def main():
     L_controller = my_controller["L"]
     R_controller = my_controller["R"]
     L_robot = my_robots["L"]
+
+    R_WRIST_CAMERA_PATH = f"{ROBOT_PRIM_PATH}/R_ee_link/gripper_link/R_wristcam"
+    r_wrist_laser = None
+    last_r_wrist_overlay = None
+    if r_wrist_laser_enabled:
+        r_wrist_laser = RWristLaser(
+            max_length=float(getattr(pc, "R_WRIST_LASER_MAX_LENGTH", 2.0)),
+            camera_prim_path=R_WRIST_CAMERA_PATH,
+            show_window=not _HEADLESS,
+        )
+        print(
+            f"[setup] R-wrist laser enabled "
+            f"(max_length={r_wrist_laser.max_length:g} m; "
+            f"log every {float(getattr(pc, 'R_WRIST_LASER_LOG_PERIOD_S', 0.5)):g} s)",
+            flush=True,
+        )
 
     dof_names = list(L_robot.dof_names)
     L_gripper_dof_index = dof_names.index("L_gripper_joint")
@@ -895,6 +917,36 @@ def main():
         articulation_controller.apply_action(
             ArticulationAction(joint_positions=merged)
         )
+
+    def _update_r_wrist_laser(sim_time_s: float) -> None:
+        """Raycast + R-wrist RGB overlay + throttled distance print."""
+        nonlocal last_r_wrist_overlay
+        if r_wrist_laser is None or R_wrist_camera is None:
+            return
+        try:
+            try:
+                Rp, Rq = R_controller.end_effector.get_world_pose()
+            except Exception:
+                return
+            r_wrist_laser.update(Rp, Rq)
+            r_wrist_laser.maybe_log_distance(
+                float(sim_time_s),
+                float(getattr(pc, "R_WRIST_LASER_LOG_PERIOD_S", 0.5)),
+            )
+            try:
+                rgba = R_wrist_camera.get_rgba()
+            except Exception:
+                rgba = None
+            if rgba is None or getattr(rgba, "size", 0) == 0:
+                return
+            rgb = np.asarray(rgba[..., :3])
+            overlay = r_wrist_laser.overlay_rgb(rgb, R_wrist_camera)
+            if overlay is not None:
+                last_r_wrist_overlay = overlay
+                r_wrist_laser.show_overlay(overlay, now_s=float(sim_time_s))
+        except Exception as exc:
+            # Never let overlay/UI faults tear down Kit mid-episode.
+            print(f"[r_wrist_laser] update failed: {exc}", flush=True)
 
     # Snapshot the L arm's c-space joint vector at startup. The baseline
     # policy uses this as the return-home target between parts; other
@@ -1210,6 +1262,13 @@ def main():
             else:
                 my_world.step(render=True)
 
+            if r_wrist_laser is not None and (
+                my_world.is_playing() or sim_hold
+            ):
+                _update_r_wrist_laser(
+                    my_world.current_time_step_index * env_info.physics_dt
+                )
+
             if run_complete and (exit_on_complete or recording_mode):
                 break
 
@@ -1297,7 +1356,13 @@ def main():
             sim_time_s = my_world.current_time_step_index * env_info.physics_dt
             if video_recorder.enabled:
                 if sim_time_s + 1e-9 >= next_record_time_s:
-                    video_recorder.write(obs.rgb.get(video_recorder.camera))
+                    frame = obs.rgb.get(video_recorder.camera)
+                    if (
+                        video_recorder.camera == "R_wrist"
+                        and last_r_wrist_overlay is not None
+                    ):
+                        frame = last_r_wrist_overlay
+                    video_recorder.write(frame)
                     next_record_time_s += record_period_s
 
             if not sim_hold:
@@ -1361,6 +1426,11 @@ def main():
             except Exception as exc:
                 print(f"[setup] policy.finalize failed: {exc}", flush=True)
         video_recorder.close()
+        if r_wrist_laser is not None:
+            try:
+                r_wrist_laser.close()
+            except Exception:
+                pass
         simulation_app.close()
 
 
