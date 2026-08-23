@@ -1,0 +1,17 @@
+---
+description: Never auto-start the ALOHA hardware leader; operator must close gripper or press s
+alwaysApply: true
+---
+
+# Hardware teleop start (do not bypass)
+
+After `ros2 launch aloha_isaac_teleop leader_only.launch.py robot:=aloha_solo`, the leader bridge waits for the **operator** to close the leader gripper or press `s`.
+
+**Never** auto-send start during debugging or collection:
+
+- Do not `ros2 topic pub ... /aloha_isaac_teleop/command ... "{data: 's'}"` (or `start`)
+- Do not call ROS / TCP APIs that inject `cmd=start` for hardware
+- Do not add scripts/hooks that skip the gripper-close gate
+- Do not treat “port not listening yet” as a reason to publish start
+
+Synthetic (`--synthetic`) and keyboard (`--keyboard`) modes may start without a physical gripper. Hardware mode must wait for the human.

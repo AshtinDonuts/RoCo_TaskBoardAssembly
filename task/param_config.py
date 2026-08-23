@@ -213,13 +213,13 @@ else:
     # Explicit copy of L_arm_j1..j7 (same numbers, separate keys so each
     # R joint can be adjusted independently later).
     INIT_JOINT_TARGETS.update({
-        "R_arm_j1": 0.58817597,   #  +33.70 deg
-        "R_arm_j2": -1.05068823,   #  -60.20 deg
-        "R_arm_j3": -1.79070784,   #  -102.60 deg
-        "R_arm_j4": -1.53763509,   #  -88.10 deg
-        "R_arm_j5": -2.89201061,   #  -165.70 deg
-        "R_arm_j6": -0.31415927,   #  -18 deg
-        "R_arm_j7": -1.04719755,   #  -60 deg
+        "R_arm_j1": 0.56374136,   #  +32.30 deg
+        "R_arm_j2": -1.09257613,   #  -62.60 deg
+        "R_arm_j3": -1.74009329,   #  -99.70 deg
+        "R_arm_j4": -1.59348563,   #  -91.30 deg
+        "R_arm_j5": 2.76460158,   #  +158.40 deg
+        "R_arm_j6": -1.39600000,   #  -79.98 deg
+        "R_arm_j7": -1.11699990,   #  -64.00 deg
     })
 
 

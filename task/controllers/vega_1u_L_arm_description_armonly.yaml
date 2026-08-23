@@ -35,13 +35,13 @@ cspace_to_urdf_rules:
     - {name: head_j2,            rule: fixed, value: 0.0}
     - {name: head_j3,            rule: fixed, value: 0.0}
     # R arm: explicit copy of L init (matches INIT_JOINT_TARGETS when R_ARM_TUCKED=False).
-    - {name: R_arm_j1,           rule: fixed, value: 0.58817597}
-    - {name: R_arm_j2,           rule: fixed, value: -1.05068823}
-    - {name: R_arm_j3,           rule: fixed, value: -1.79070784}
-    - {name: R_arm_j4,           rule: fixed, value: -1.53763509}
-    - {name: R_arm_j5,           rule: fixed, value: -2.89201061}
-    - {name: R_arm_j6,           rule: fixed, value: -0.31415927}
-    - {name: R_arm_j7,           rule: fixed, value: -1.04719755}
+    - {name: R_arm_j1,           rule: fixed, value: 0.56374136}
+    - {name: R_arm_j2,           rule: fixed, value: -1.09257613}
+    - {name: R_arm_j3,           rule: fixed, value: -1.74009329}
+    - {name: R_arm_j4,           rule: fixed, value: -1.59348563}
+    - {name: R_arm_j5,           rule: fixed, value: 2.76460158}
+    - {name: R_arm_j6,           rule: fixed, value: -1.39600000}
+    - {name: R_arm_j7,           rule: fixed, value: -1.11699990}
     - {name: L_gripper_joint,    rule: fixed, value: 0.0}
     - {name: L_gripper_joint_01, rule: fixed, value: 0.0}
     - {name: R_gripper_joint,    rule: fixed, value: 0.0}

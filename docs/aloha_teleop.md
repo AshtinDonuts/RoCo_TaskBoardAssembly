@@ -97,9 +97,14 @@ Default `control.arms` is `"right"`: that Solo leader maps onto DexMate **right*
 For `"dual"`, run two leader bridges on the ports in
 `control.leader_endpoints` (left + right); Isaac connects to both.
 
-Close the leader gripper (or press `s`) after the arm reaches the start pose.
-Backdrive then enables. **Clutch starts in track** (DexMate EE follows leader
-deltas).
+The opening ceremony (drive to start pose) is **off by default**. Close the
+leader gripper (or press `s`) to start; the arm stays where it is. Backdrive
+then enables. **Clutch starts in track** (DexMate EE follows leader deltas).
+To restore the start-pose motion:
+
+```bash
+ros2 launch aloha_isaac_teleop leader_only.launch.py robot:=aloha_solo opening_ceremony:=true
+```
 
 ### WIP: Space pause / reanchor (not ready)
 

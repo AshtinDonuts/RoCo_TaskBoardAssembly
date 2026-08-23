@@ -684,7 +684,7 @@ def Xform "vega_1u" (
             float drive:angular:physics:damping = 1000
             float drive:angular:physics:maxForce = inf
             float drive:angular:physics:stiffness = 100000
-            float drive:angular:physics:targetPosition = -15
+            float drive:angular:physics:targetPosition = 32.30
             string isaac:nameOverride (
                 displayName = "Name Override"
                 doc = "Name override for prim lookup in base name search"
@@ -731,7 +731,7 @@ def Xform "vega_1u" (
             float drive:angular:physics:damping = 1000
             float drive:angular:physics:maxForce = inf
             float drive:angular:physics:stiffness = 100000
-            float drive:angular:physics:targetPosition = -20
+            float drive:angular:physics:targetPosition = -62.60
             string isaac:nameOverride (
                 displayName = "Name Override"
                 doc = "Name override for prim lookup in base name search"
@@ -777,7 +777,7 @@ def Xform "vega_1u" (
             float drive:angular:physics:damping = 1000
             float drive:angular:physics:maxForce = inf
             float drive:angular:physics:stiffness = 100000
-            float drive:angular:physics:targetPosition = 0
+            float drive:angular:physics:targetPosition = -99.70
             string isaac:nameOverride (
                 displayName = "Name Override"
                 doc = "Name override for prim lookup in base name search"
@@ -824,7 +824,7 @@ def Xform "vega_1u" (
             float drive:angular:physics:damping = 1000
             float drive:angular:physics:maxForce = inf
             float drive:angular:physics:stiffness = 100000
-            float drive:angular:physics:targetPosition = 0
+            float drive:angular:physics:targetPosition = -91.30
             string isaac:nameOverride (
                 displayName = "Name Override"
                 doc = "Name override for prim lookup in base name search"
@@ -856,7 +856,7 @@ def Xform "vega_1u" (
             float drive:angular:physics:damping = 1000
             float drive:angular:physics:maxForce = inf
             float drive:angular:physics:stiffness = 100000
-            float drive:angular:physics:targetPosition = 0
+            float drive:angular:physics:targetPosition = 158.40
             string isaac:nameOverride (
                 displayName = "Name Override"
                 doc = "Name override for prim lookup in base name search"
@@ -888,7 +888,7 @@ def Xform "vega_1u" (
             float drive:angular:physics:damping = 1000
             float drive:angular:physics:maxForce = inf
             float drive:angular:physics:stiffness = 100000
-            float drive:angular:physics:targetPosition = 0
+            float drive:angular:physics:targetPosition = -79.98
             string isaac:nameOverride (
                 displayName = "Name Override"
                 doc = "Name override for prim lookup in base name search"
@@ -920,7 +920,7 @@ def Xform "vega_1u" (
             float drive:angular:physics:damping = 1000
             float drive:angular:physics:maxForce = inf
             float drive:angular:physics:stiffness = 100000
-            float drive:angular:physics:targetPosition = 0
+            float drive:angular:physics:targetPosition = -64.00
             string isaac:nameOverride (
                 displayName = "Name Override"
                 doc = "Name override for prim lookup in base name search"

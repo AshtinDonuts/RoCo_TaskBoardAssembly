@@ -63,6 +63,7 @@ from controllers.vega_1u_setup import (
     restore_scene_part_xforms,
     setup_pick_place_sim,
 )
+from controllers.pick_place_task import ROBOT_PRIM_PATH
 from controllers.part_from_usd import DynamicPart
 from isaacsim.core.api.materials.physics_material import PhysicsMaterial
 from isaacsim.core.utils.prims import is_prim_path_valid
@@ -97,11 +98,13 @@ _DEFAULT_COLLISION_APPROXIMATION = "convexDecomposition"
 # ~100 steps ≈ 0.5 s at 200 Hz physics. Re-armed on the next wp_idx change.
 STUCK_LOG_STEPS = 100
 
-# URDF<->USD frame offset on the EE link. Mirror of _STAGE_OFFSET_INV in
-# controllers/lula_ik_controller.py — used here to convert Lula's FK output
-# (URDF frame) into the stage-frame orientation we can compare directly
-# against wp.orn. R_offset = (0, 0, 0, -1) (180° about Z). Without this
-# composition the stuck-diagnostic comparison shows a fake ~180° error.
+# URDF<->USD frame offset on the LEFT EE link. Mirror of
+# _STAGE_OFFSET_INV_L in controllers/lula_ik_controller.py — used here to
+# convert Lula's FK output (URDF frame) into the stage-frame orientation
+# we can compare directly against wp.orn. L R_offset = (0, 0, 0, -1)
+# (180° about Z). R uses identity in LulaIKController; this diagnostic
+# constant is L-only. Without this composition the stuck-diagnostic
+# comparison shows a fake ~180° error on L.
 _R_OFFSET_FK_TO_STAGE = np.array([0.0, 0.0, 0.0, -1.0], dtype=np.float64)
 
 
@@ -810,6 +813,32 @@ def main():
         L_robot.set_joint_positions(full_q)
         L_robot.set_joint_velocities(np.zeros(len(dof_names)))
         _apply_gripper_compliance(L_robot)
+        _sync_init_drive_targets(targets)
+
+    def _sync_init_drive_targets(targets):
+        """Author drive:angular/linear targetPosition from INIT_JOINT_TARGETS.
+
+        Scene USDA often keeps stale PD drive targets (e.g. R_arm_j1=-15°).
+        Without this, the first my_world.step() integrates toward those drives
+        before teleop/IK commands land, flipping the wrist out of the
+        calibrated init pose.
+        """
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return
+        robot_joints = f"{ROBOT_PRIM_PATH}/joints"
+        for jname, val in targets.items():
+            prim = stage.GetPrimAtPath(f"{robot_joints}/{jname}")
+            if not prim or not prim.IsValid():
+                continue
+            # Revolute drives are authored in degrees; prismatic (Lift) in meters.
+            is_prismatic = jname == "Lift"
+            attr_angular = prim.GetAttribute("drive:angular:physics:targetPosition")
+            attr_linear = prim.GetAttribute("drive:linear:physics:targetPosition")
+            if is_prismatic and attr_linear and attr_linear.IsValid():
+                attr_linear.Set(float(val))
+            elif attr_angular and attr_angular.IsValid():
+                attr_angular.Set(float(np.degrees(float(val))))
 
     _apply_init_joint_targets()
 
@@ -826,6 +855,18 @@ def main():
         for i, jname in enumerate(dof_names)
         if jname in R_OWNED_JOINTS
     }
+
+    def _command_hold_init():
+        """Hold both arms at latched INIT joint targets (no IK)."""
+        merged = [None] * len(dof_names)
+        for i, jname in enumerate(dof_names):
+            if jname in L_OWNED_JOINTS:
+                merged[i] = L_hold.get(i)
+            elif jname in R_OWNED_JOINTS:
+                merged[i] = R_hold.get(i)
+        articulation_controller.apply_action(
+            ArticulationAction(joint_positions=merged)
+        )
 
     def _command_arms(policy_action):
         active = set(getattr(policy, "active_arms", ("L",)))
@@ -1146,6 +1187,11 @@ def main():
         except Exception:
             pass
 
+    # Prime PD targets + hold INIT joints BEFORE the first physics step so
+    # PhysX does not integrate toward stale USDA drive targets (wrist flip).
+    _apply_init_joint_targets()
+    _command_hold_init()
+
     try:
         while simulation_app.is_running():
             sim_hold = recording_mode and bool(getattr(policy, "pause_sim", False))
@@ -1185,6 +1231,7 @@ def main():
                 my_world.reset()
                 reset_needed = False
                 _apply_init_joint_targets()
+                _command_hold_init()
                 L_controller.reset()
                 R_controller.reset()
                 _restart_iteration()
@@ -1196,6 +1243,7 @@ def main():
 
             if my_world.current_time_step_index == 0:
                 _apply_init_joint_targets()
+                _command_hold_init()
                 L_controller.reset()
                 R_controller.reset()
                 _restart_iteration()
@@ -1212,12 +1260,16 @@ def main():
             if (_warmup_steps > 0
                     and my_world.current_time_step_index < _warmup_steps):
                 _apply_init_joint_targets()
+                _command_hold_init()
                 if my_world.current_time_step_index == _warmup_steps - 1:
                     print(f"[setup] warmup done ({_warmup_steps} steps); "
                           f"starting task.")
                 if recording_mode:
+                    # Drain leader cmds / advance episode session, but do NOT
+                    # apply IK actions yet — holding Cartesian EE via Lula
+                    # during warmup re-solves an alternate wrist branch.
                     obs = _build_observation()
-                    _command_arms(policy.act(obs))
+                    policy.act(obs)
                 continue
 
             if recording_mode and getattr(policy, "in_warmup", False):
@@ -1225,7 +1277,14 @@ def main():
                 if not getattr(policy, "_keyboard_mode", False):
                     _apply_init_joint_targets()
                 obs = _build_observation()
-                _command_arms(policy.act(obs))
+                action = policy.act(obs)
+                if getattr(policy, "_keyboard_mode", False):
+                    # Keyboard users expect live Cartesian control in warmup.
+                    _command_arms(action)
+                else:
+                    # Hardware/synthetic: hold calibrated joints; drain cmds only.
+                    # Applying Lula IK here re-solves an alternate wrist branch.
+                    _command_hold_init()
                 continue
 
             if current_part is None:
