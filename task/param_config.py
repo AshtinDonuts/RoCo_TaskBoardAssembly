@@ -121,14 +121,17 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
-# Kit UI viewport tiles (independent of Camera sensor binding).
-# Canonical names — use these in TASK_CAMERA_VIEWPORTS / --camera-viewports:
-#   head     → "Head Depth View" (headcam)
-#   l_wrist  → "L Wrist View"    (L_wristcam)
-#   r_wrist  → "R Wrist View"    (R_wristcam)
+# Kit UI viewport tiles (independent of Camera sensor binding) plus special
+# overlay windows. Use these in TASK_CAMERA_VIEWPORTS / --camera-viewports:
+#   head           → "Head Depth View" (headcam)
+#   l_wrist        → "L Wrist View"    (L_wristcam)
+#   r_wrist        → "R Wrist View"    (R_wristcam)
+#   r_wrist_laser  → "R Wrist Laser"   (omni.ui overlay; not a Kit camera tile)
 # Aliases: headcam/head_depth; l/left/l_wristcam; r/right/r_wristcam;
-#          all/*; none/off/0 (empty).
-CAMERA_VIEWPORT_CHOICES = ("head", "l_wrist", "r_wrist")
+#          laser/r_laser/right_laser; all/*; none/off/0 (empty).
+KIT_CAMERA_VIEWPORTS = ("head", "l_wrist", "r_wrist")
+SPECIAL_VIEWPORTS = ("r_wrist_laser",)
+CAMERA_VIEWPORT_CHOICES = KIT_CAMERA_VIEWPORTS + SPECIAL_VIEWPORTS
 _CAMERA_VIEWPORT_ALIASES = {
     "head": "head",
     "headcam": "head",
@@ -141,11 +144,17 @@ _CAMERA_VIEWPORT_ALIASES = {
     "r_wristcam": "r_wrist",
     "r": "r_wrist",
     "right": "r_wrist",
+    "r_wrist_laser": "r_wrist_laser",
+    "laser": "r_wrist_laser",
+    "r_laser": "r_wrist_laser",
+    "rwrist_laser": "r_wrist_laser",
+    "right_laser": "r_wrist_laser",
+    "right_wrist_laser": "r_wrist_laser",
 }
 
 
 def parse_camera_viewports(raw, *, enabled: bool = True) -> tuple:
-    """Parse a camera-viewport selection into canonical names.
+    """Parse a viewport selection into canonical names.
 
     ``raw`` may be None (default = all when enabled), a comma/space-separated
     string, or an iterable of names. Returns a stable tuple ordered like
@@ -183,7 +192,7 @@ def parse_camera_viewports(raw, *, enabled: bool = True) -> tuple:
             selected.append(key)
     if unknown:
         raise ValueError(
-            "Unknown camera viewport(s): "
+            "Unknown viewport(s): "
             + ", ".join(repr(u) for u in unknown)
             + f". Choices: {', '.join(CAMERA_VIEWPORT_CHOICES)} "
             f"(or all/none)."
@@ -191,14 +200,26 @@ def parse_camera_viewports(raw, *, enabled: bool = True) -> tuple:
     return tuple(name for name in CAMERA_VIEWPORT_CHOICES if name in seen)
 
 
+def kit_camera_viewports(selected) -> tuple:
+    """Filter a viewport selection down to Kit camera tiles only."""
+    allowed = set(KIT_CAMERA_VIEWPORTS)
+    return tuple(name for name in selected if name in allowed)
+
+
+def wants_r_wrist_laser_viewport(selected) -> bool:
+    """True when the R-wrist laser overlay window should be shown."""
+    return "r_wrist_laser" in (selected or ())
+
+
 # Master switch still honored: TASK_ENABLE_CAMERA_VIEWPORTS=0 → no tiles.
-# Subset via TASK_CAMERA_VIEWPORTS=head,r_wrist (default: all three).
+# Subset via TASK_CAMERA_VIEWPORTS=head,r_wrist,r_wrist_laser (default: all).
 _viewports_enabled = _env_bool("TASK_ENABLE_CAMERA_VIEWPORTS", True)
 camera_viewports = parse_camera_viewports(
     os.getenv("TASK_CAMERA_VIEWPORTS"),
     enabled=_viewports_enabled,
 )
-enable_camera_viewports = bool(camera_viewports)  # backward-compatible bool
+# True when any Kit camera tile is selected (special overlays excluded).
+enable_camera_viewports = bool(kit_camera_viewports(camera_viewports))
 enable_camera_output    = _env_bool("TASK_ENABLE_CAMERA_OUTPUT", False)   # bind sensors so RGB/depth are readable from Python
 HEAD_DEPTH_CAMERA_FOCAL_LENGTH = float(os.getenv("TASK_HEAD_DEPTH_FOCAL_LENGTH", "10"))
 

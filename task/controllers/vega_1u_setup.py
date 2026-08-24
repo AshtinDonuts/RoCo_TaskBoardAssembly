@@ -69,25 +69,36 @@ def _resolve_camera_viewports(
     enable_camera_viewports: bool = True,
     camera_viewports=None,
 ) -> tuple:
-    """Normalize the Kit viewport tile selection.
+    """Normalize the Kit / special viewport selection.
 
     Prefer an explicit ``camera_viewports`` sequence/string; otherwise open
-    all three tiles when ``enable_camera_viewports`` is True.
+    every choice (cameras + specials) when ``enable_camera_viewports`` is True.
     """
     if camera_viewports is not None:
         return pc.parse_camera_viewports(camera_viewports, enabled=True)
     if enable_camera_viewports:
-        return getattr(pc, "CAMERA_VIEWPORT_CHOICES", ("head", "l_wrist", "r_wrist"))
+        return getattr(
+            pc,
+            "CAMERA_VIEWPORT_CHOICES",
+            ("head", "l_wrist", "r_wrist", "r_wrist_laser"),
+        )
     return ()
 
 
 def _open_selected_camera_viewports(selected, camera_paths: dict) -> None:
-    """Create Kit viewport tiles for the selected camera names.
+    """Create Kit viewport tiles for selected camera names (not specials).
 
     Layout: head on the top row (if selected); wrist cams on the next row
-    left→right in choice order.
+    left→right in choice order. Special entries like ``r_wrist_laser`` are
+    ignored here — those windows are owned by their feature modules.
     """
-    if not selected:
+    kit_selected = pc.kit_camera_viewports(selected)
+    specials = tuple(v for v in selected if v not in kit_selected)
+    if not kit_selected:
+        msg = "[setup] camera viewports: none"
+        if specials:
+            msg += f" (specials: {', '.join(specials)})"
+        print(msg, flush=True)
         return
     # Kit viewport windows: height is the drawable area; a title bar sits
     # above it, so y-stride must include chrome + a gap or tiles overlap.
@@ -100,7 +111,7 @@ def _open_selected_camera_viewports(selected, camera_paths: dict) -> None:
         "r_wrist": ("R Wrist View", camera_paths["r_wrist"], 480, 360),
     }
     y = origin_y
-    if "head" in selected:
+    if "head" in kit_selected:
         name, path, w, h = specs["head"]
         create_viewport_for_camera(
             viewport_name=name,
@@ -112,7 +123,7 @@ def _open_selected_camera_viewports(selected, camera_paths: dict) -> None:
         )
         y = y + h + title_bar + gap
     wrist_x = origin_x
-    for key in selected:
+    for key in kit_selected:
         if key == "head":
             continue
         name, path, w, h = specs[key]
@@ -126,7 +137,7 @@ def _open_selected_camera_viewports(selected, camera_paths: dict) -> None:
         )
         wrist_x += w + gap
     print(
-        f"[setup] camera viewports: {', '.join(selected) if selected else 'none'}",
+        f"[setup] viewports: {', '.join(selected)}",
         flush=True,
     )
 
@@ -580,7 +591,7 @@ def _finalize_pick_place_setup(
     L_wrist_camera = None
     R_wrist_camera = None
 
-    if enable_camera_output or selected_viewports:
+    if enable_camera_output or pc.kit_camera_viewports(selected_viewports):
         # Verify the USD-authored camera prims actually exist. If a path
         # is missing, Camera(prim_path=...) would silently create a new
         # world-static Xform there, breaking the assumption that the cam

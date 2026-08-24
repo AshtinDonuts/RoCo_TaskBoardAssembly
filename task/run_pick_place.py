@@ -701,9 +701,9 @@ def _parse_args():
         "--camera-viewports",
         default=None,
         help=(
-            "Comma-separated Kit camera viewport tiles to open. "
-            "Choices: head, l_wrist, r_wrist "
-            "(aliases: headcam, l/left, r/right; or all / none). "
+            "Comma-separated viewport windows to open. "
+            "Choices: head, l_wrist, r_wrist, r_wrist_laser "
+            "(aliases: headcam, l/left, r/right, laser; or all / none). "
             "Overrides TASK_CAMERA_VIEWPORTS / param_config.camera_viewports. "
             f"Current default: {','.join(pc.camera_viewports) or 'none'}."
         ),
@@ -819,7 +819,7 @@ def main():
         R_target_position=_DUMMY_TARGET,
         joint_opened_position=np.array([pc.PART_DEFAULTS["gripper_open"]]),
         joint_closed_position=np.array([pc.PART_DEFAULTS["gripper_close"]]),
-        enable_camera_viewports=bool(args.camera_viewports),
+        enable_camera_viewports=bool(pc.kit_camera_viewports(args.camera_viewports)),
         camera_viewports=args.camera_viewports,
         enable_camera_output=camera_output_enabled,
     )
@@ -836,6 +836,10 @@ def main():
     last_r_wrist_overlay = None
     if r_wrist_laser_enabled:
         _tip = getattr(pc, "R_WRIST_LASER_TIP_OFFSET_EE", (0.0, 0.0, 0.0))
+        show_laser_window = (
+            not _HEADLESS
+            and pc.wants_r_wrist_laser_viewport(args.camera_viewports)
+        )
         r_wrist_laser = RWristLaser(
             max_length=float(getattr(pc, "R_WRIST_LASER_MAX_LENGTH", 2.0)),
             raycast_origin_offset_m=float(
@@ -843,7 +847,7 @@ def main():
             ),
             tip_offset_ee=_tip if any(abs(float(v)) > 1e-9 for v in _tip) else None,
             camera_prim_path=R_WRIST_CAMERA_PATH,
-            show_window=not _HEADLESS,
+            show_window=show_laser_window,
             debug_log=bool(getattr(pc, "R_WRIST_LASER_DEBUG_LOG", False)),
             show_aim_debug=bool(getattr(pc, "R_WRIST_LASER_AIM_DEBUG", False)),
         )
@@ -852,6 +856,7 @@ def main():
             f"(max_length={r_wrist_laser.max_length:g} m; "
             f"raycast_origin_offset={r_wrist_laser.raycast_origin_offset_m:g} m; "
             f"tip_offset_ee={_tip}; "
+            f"preview_window={'on' if show_laser_window else 'off'}; "
             f"log every {float(getattr(pc, 'R_WRIST_LASER_LOG_PERIOD_S', 0.5)):g} s)",
             flush=True,
         )

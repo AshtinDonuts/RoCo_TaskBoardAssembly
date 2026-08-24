@@ -180,9 +180,9 @@ def main() -> int:
         "--camera-viewports",
         default=None,
         help=(
-            "Kit camera viewport tiles to open (comma-separated). "
-            "Choices: head, l_wrist, r_wrist (or all / none). "
-            "Passed through to run_pick_place.py."
+            "Viewport windows to open (comma-separated). "
+            "Choices: head, l_wrist, r_wrist, r_wrist_laser "
+            "(or all / none). Passed through to run_pick_place.py."
         ),
     )
     parser.add_argument("--skip-preflight", action="store_true")
