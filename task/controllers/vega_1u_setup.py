@@ -65,6 +65,72 @@ def create_viewport_for_camera(
     return viewport_window
 
 
+def _resolve_camera_viewports(
+    enable_camera_viewports: bool = True,
+    camera_viewports=None,
+) -> tuple:
+    """Normalize the Kit viewport tile selection.
+
+    Prefer an explicit ``camera_viewports`` sequence/string; otherwise open
+    all three tiles when ``enable_camera_viewports`` is True.
+    """
+    if camera_viewports is not None:
+        return pc.parse_camera_viewports(camera_viewports, enabled=True)
+    if enable_camera_viewports:
+        return getattr(pc, "CAMERA_VIEWPORT_CHOICES", ("head", "l_wrist", "r_wrist"))
+    return ()
+
+
+def _open_selected_camera_viewports(selected, camera_paths: dict) -> None:
+    """Create Kit viewport tiles for the selected camera names.
+
+    Layout: head on the top row (if selected); wrist cams on the next row
+    left→right in choice order.
+    """
+    if not selected:
+        return
+    # Kit viewport windows: height is the drawable area; a title bar sits
+    # above it, so y-stride must include chrome + a gap or tiles overlap.
+    title_bar = 40
+    gap = 16
+    origin_x, origin_y = 24, 24
+    specs = {
+        "head": ("Head Depth View", camera_paths["head"], 640, 480),
+        "l_wrist": ("L Wrist View", camera_paths["l_wrist"], 480, 360),
+        "r_wrist": ("R Wrist View", camera_paths["r_wrist"], 480, 360),
+    }
+    y = origin_y
+    if "head" in selected:
+        name, path, w, h = specs["head"]
+        create_viewport_for_camera(
+            viewport_name=name,
+            camera_prim_path=path,
+            width=w,
+            height=h,
+            position_x=origin_x,
+            position_y=y,
+        )
+        y = y + h + title_bar + gap
+    wrist_x = origin_x
+    for key in selected:
+        if key == "head":
+            continue
+        name, path, w, h = specs[key]
+        create_viewport_for_camera(
+            viewport_name=name,
+            camera_prim_path=path,
+            width=w,
+            height=h,
+            position_x=wrist_x,
+            position_y=y,
+        )
+        wrist_x += w + gap
+    print(
+        f"[setup] camera viewports: {', '.join(selected) if selected else 'none'}",
+        flush=True,
+    )
+
+
 def _set_angular_drive(
     stage,
     joint_prim_path: str,
@@ -412,6 +478,7 @@ def _finalize_pick_place_setup(
     total_t: Optional[float] = None,
     flag_robot_state_update: bool = False,
     enable_camera_viewports: bool = True,
+    camera_viewports=None,
     enable_camera_output: bool = True,
     base_translation_offset=None,
 ):
@@ -419,7 +486,15 @@ def _finalize_pick_place_setup(
 
     Assumes a task named `task_name` has been added to `my_world`. Returns the
     same 9-tuple shape used throughout the codebase.
+
+    ``camera_viewports`` selects Kit tiles among ``head``, ``l_wrist``,
+    ``r_wrist``. When None, falls back to all three if
+    ``enable_camera_viewports`` else none.
     """
+    selected_viewports = _resolve_camera_viewports(
+        enable_camera_viewports=enable_camera_viewports,
+        camera_viewports=camera_viewports,
+    )
     # ---- World reset: registers articulations & rigid bodies.
     my_world.reset()
 
@@ -495,12 +570,17 @@ def _finalize_pick_place_setup(
     HEAD_DEPTH_CAMERA_PATH = f"{ROBOT_PRIM_PATH}/zed_depth_frame/headcam"
     L_WRIST_CAMERA_PATH    = f"{ROBOT_PRIM_PATH}/L_ee_link/gripper_link/L_wristcam"
     R_WRIST_CAMERA_PATH    = f"{ROBOT_PRIM_PATH}/R_ee_link/gripper_link/R_wristcam"
+    camera_paths = {
+        "head": HEAD_DEPTH_CAMERA_PATH,
+        "l_wrist": L_WRIST_CAMERA_PATH,
+        "r_wrist": R_WRIST_CAMERA_PATH,
+    }
 
     head_depth_camera = None
     L_wrist_camera = None
     R_wrist_camera = None
 
-    if enable_camera_output or enable_camera_viewports:
+    if enable_camera_output or selected_viewports:
         # Verify the USD-authored camera prims actually exist. If a path
         # is missing, Camera(prim_path=...) would silently create a new
         # world-static Xform there, breaking the assumption that the cam
@@ -549,39 +629,7 @@ def _finalize_pick_place_setup(
             cam.initialize()
             cam.add_distance_to_image_plane_to_frame()
 
-    if enable_camera_viewports:
-        # Kit viewport windows: height is the drawable area; a title bar sits
-        # above it, so y-stride must include chrome + a gap or tiles overlap.
-        _title_bar = 40
-        _gap = 16
-        _origin_x, _origin_y = 24, 24
-        _head_w, _head_h = 640, 480
-        _wrist_w, _wrist_h = 480, 360
-        _row2_y = _origin_y + _head_h + _title_bar + _gap
-        create_viewport_for_camera(
-            viewport_name="Head Depth View",
-            camera_prim_path=HEAD_DEPTH_CAMERA_PATH,
-            width=_head_w,
-            height=_head_h,
-            position_x=_origin_x,
-            position_y=_origin_y,
-        )
-        create_viewport_for_camera(
-            viewport_name="L Wrist View",
-            camera_prim_path=L_WRIST_CAMERA_PATH,
-            width=_wrist_w,
-            height=_wrist_h,
-            position_x=_origin_x,
-            position_y=_row2_y,
-        )
-        create_viewport_for_camera(
-            viewport_name="R Wrist View",
-            camera_prim_path=R_WRIST_CAMERA_PATH,
-            width=_wrist_w,
-            height=_wrist_h,
-            position_x=_origin_x + _wrist_w + _gap,
-            position_y=_row2_y,
-        )
+    _open_selected_camera_viewports(selected_viewports, camera_paths)
     # try:
     #     active_viewport = get_active_viewport_window()
     #     if active_viewport:
@@ -633,6 +681,7 @@ def setup_pick_place_sim(
     total_t: Optional[float] = None,
     flag_robot_state_update: bool = False,
     enable_camera_viewports: bool = True,
+    camera_viewports=None,
     enable_camera_output: bool = True,
     base_translation_offset=None,
 ):
@@ -671,6 +720,7 @@ def setup_pick_place_sim(
         total_t=total_t,
         flag_robot_state_update=flag_robot_state_update,
         enable_camera_viewports=enable_camera_viewports,
+        camera_viewports=camera_viewports,
         enable_camera_output=enable_camera_output,
         base_translation_offset=base_translation_offset,
     )

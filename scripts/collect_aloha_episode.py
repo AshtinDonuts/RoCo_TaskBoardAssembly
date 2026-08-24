@@ -64,6 +64,9 @@ def _isaac_env(extra: dict) -> dict:
         "LEROBOT_SERVER_SCRIPT": str(ROOT / "tools" / "lerobot_recorder" / "server.py"),
         "ROCO_COMMIT": _git_commit(),
     })
+    # Only forward when set so an empty default does not clear all tiles.
+    if "TASK_CAMERA_VIEWPORTS" in os.environ:
+        env["TASK_CAMERA_VIEWPORTS"] = os.environ["TASK_CAMERA_VIEWPORTS"]
     env["PATH"] = str(ROOT / ".venv" / "bin") + os.pathsep + env.get("PATH", "")
     env.update(extra)
     return env
@@ -173,6 +176,15 @@ def main() -> int:
         help="Episodes to save in this session.",
     )
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--camera-viewports",
+        default=None,
+        help=(
+            "Kit camera viewport tiles to open (comma-separated). "
+            "Choices: head, l_wrist, r_wrist (or all / none). "
+            "Passed through to run_pick_place.py."
+        ),
+    )
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument(
         "--synthetic",
@@ -250,6 +262,8 @@ def main() -> int:
         cmd += ["--max-parts", str(args.max_parts)]
     if args.max_sim_seconds:
         cmd += ["--max-sim-seconds", str(args.max_sim_seconds)]
+    if args.camera_viewports:
+        cmd += ["--camera-viewports", args.camera_viewports]
 
     stop = threading.Event()
     leader_procs: List[subprocess.Popen] = []

@@ -371,7 +371,10 @@ def main():
     )
 
     camera_output_enabled = True
-    enable_camera_viewports = bool(rp.pc.enable_camera_viewports and not rp._HEADLESS)
+    camera_viewports = (
+        () if rp._HEADLESS else tuple(getattr(rp.pc, "camera_viewports", ()))
+    )
+    enable_camera_viewports = bool(camera_viewports)
     render_each_step = True
 
     dummy_target = np.zeros(3, dtype=np.float64)
@@ -393,6 +396,7 @@ def main():
         joint_opened_position=np.array([rp.pc.PART_DEFAULTS["gripper_open"]]),
         joint_closed_position=np.array([rp.pc.PART_DEFAULTS["gripper_close"]]),
         enable_camera_viewports=enable_camera_viewports,
+        camera_viewports=camera_viewports,
         enable_camera_output=camera_output_enabled,
     )
     rp.import_missing_parts()

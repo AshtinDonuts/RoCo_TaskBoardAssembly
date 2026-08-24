@@ -698,6 +698,17 @@ def _parse_args():
         help="Write an MP4 rollout video from one of the task cameras.",
     )
     parser.add_argument(
+        "--camera-viewports",
+        default=None,
+        help=(
+            "Comma-separated Kit camera viewport tiles to open. "
+            "Choices: head, l_wrist, r_wrist "
+            "(aliases: headcam, l/left, r/right; or all / none). "
+            "Overrides TASK_CAMERA_VIEWPORTS / param_config.camera_viewports. "
+            f"Current default: {','.join(pc.camera_viewports) or 'none'}."
+        ),
+    )
+    parser.add_argument(
         "--record-video-camera",
         default="head",
         choices=("head", "L_wrist", "R_wrist"),
@@ -737,6 +748,14 @@ def _parse_args():
         value = getattr(args, attr, None)
         if value is not None and value <= 0:
             setattr(args, attr, None)
+
+    if args.camera_viewports is not None:
+        try:
+            args.camera_viewports = pc.parse_camera_viewports(args.camera_viewports)
+        except ValueError as exc:
+            parser.error(str(exc))
+    else:
+        args.camera_viewports = tuple(pc.camera_viewports)
     for attr in ("results_json", "record_video"):
         value = getattr(args, attr, None)
         if value and not os.path.isabs(value):
@@ -800,7 +819,8 @@ def main():
         R_target_position=_DUMMY_TARGET,
         joint_opened_position=np.array([pc.PART_DEFAULTS["gripper_open"]]),
         joint_closed_position=np.array([pc.PART_DEFAULTS["gripper_close"]]),
-        enable_camera_viewports=pc.enable_camera_viewports,
+        enable_camera_viewports=bool(args.camera_viewports),
+        camera_viewports=args.camera_viewports,
         enable_camera_output=camera_output_enabled,
     )
 

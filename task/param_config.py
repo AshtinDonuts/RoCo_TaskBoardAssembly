@@ -121,7 +121,84 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
-enable_camera_viewports = _env_bool("TASK_ENABLE_CAMERA_VIEWPORTS", True)   # show the 3-tile viewport layout in Kit UI
+# Kit UI viewport tiles (independent of Camera sensor binding).
+# Canonical names — use these in TASK_CAMERA_VIEWPORTS / --camera-viewports:
+#   head     → "Head Depth View" (headcam)
+#   l_wrist  → "L Wrist View"    (L_wristcam)
+#   r_wrist  → "R Wrist View"    (R_wristcam)
+# Aliases: headcam/head_depth; l/left/l_wristcam; r/right/r_wristcam;
+#          all/*; none/off/0 (empty).
+CAMERA_VIEWPORT_CHOICES = ("head", "l_wrist", "r_wrist")
+_CAMERA_VIEWPORT_ALIASES = {
+    "head": "head",
+    "headcam": "head",
+    "head_depth": "head",
+    "l_wrist": "l_wrist",
+    "l_wristcam": "l_wrist",
+    "l": "l_wrist",
+    "left": "l_wrist",
+    "r_wrist": "r_wrist",
+    "r_wristcam": "r_wrist",
+    "r": "r_wrist",
+    "right": "r_wrist",
+}
+
+
+def parse_camera_viewports(raw, *, enabled: bool = True) -> tuple:
+    """Parse a camera-viewport selection into canonical names.
+
+    ``raw`` may be None (default = all when enabled), a comma/space-separated
+    string, or an iterable of names. Returns a stable tuple ordered like
+    ``CAMERA_VIEWPORT_CHOICES``. Raises ValueError on unknown names.
+    """
+    if not enabled:
+        return ()
+    if raw is None:
+        return CAMERA_VIEWPORT_CHOICES
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text or text.lower() in {"none", "off", "0", "false", "no"}:
+            return ()
+        if text.lower() in {"all", "*"}:
+            return CAMERA_VIEWPORT_CHOICES
+        tokens = [t for t in text.replace(";", ",").replace(" ", ",").split(",") if t]
+    else:
+        tokens = [str(t).strip() for t in raw if str(t).strip()]
+        if not tokens:
+            return ()
+        if len(tokens) == 1 and tokens[0].lower() in {"all", "*"}:
+            return CAMERA_VIEWPORT_CHOICES
+        if len(tokens) == 1 and tokens[0].lower() in {"none", "off", "0"}:
+            return ()
+    selected = []
+    seen = set()
+    unknown = []
+    for tok in tokens:
+        key = _CAMERA_VIEWPORT_ALIASES.get(tok.lower())
+        if key is None:
+            unknown.append(tok)
+            continue
+        if key not in seen:
+            seen.add(key)
+            selected.append(key)
+    if unknown:
+        raise ValueError(
+            "Unknown camera viewport(s): "
+            + ", ".join(repr(u) for u in unknown)
+            + f". Choices: {', '.join(CAMERA_VIEWPORT_CHOICES)} "
+            f"(or all/none)."
+        )
+    return tuple(name for name in CAMERA_VIEWPORT_CHOICES if name in seen)
+
+
+# Master switch still honored: TASK_ENABLE_CAMERA_VIEWPORTS=0 → no tiles.
+# Subset via TASK_CAMERA_VIEWPORTS=head,r_wrist (default: all three).
+_viewports_enabled = _env_bool("TASK_ENABLE_CAMERA_VIEWPORTS", True)
+camera_viewports = parse_camera_viewports(
+    os.getenv("TASK_CAMERA_VIEWPORTS"),
+    enabled=_viewports_enabled,
+)
+enable_camera_viewports = bool(camera_viewports)  # backward-compatible bool
 enable_camera_output    = _env_bool("TASK_ENABLE_CAMERA_OUTPUT", False)   # bind sensors so RGB/depth are readable from Python
 HEAD_DEPTH_CAMERA_FOCAL_LENGTH = float(os.getenv("TASK_HEAD_DEPTH_FOCAL_LENGTH", "10"))
 
