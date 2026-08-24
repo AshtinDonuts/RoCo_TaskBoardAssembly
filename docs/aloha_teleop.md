@@ -200,9 +200,9 @@ After Isaac opens, click the viewport, wait for warmup, then hold:
 | i / k | EE into / out of headcam view |
 | j / l | EE left / right in headcam view |
 | t / g | EE up / down |
-| q / a | yaw |
-| w / d | pitch |
-| z / c | roll |
+| q / a | yaw (no-op when `retarget.fix_orientation`) |
+| w / d | pitch (no-op when `retarget.fix_orientation`) |
+| z / c | roll (no-op when `retarget.fix_orientation`) |
 | f | gripper close |
 | v | gripper open |
 
@@ -222,6 +222,13 @@ the same way in the image). If the robot root is rotated in the stage, recompute
 that 3×3 (or fall back to `axes_perm` / `axes_sign`). Keep rotation gains ≤ 1
 until the map feels natural.
 
+**Fixed right EE orientation:** with `retarget.fix_orientation: true` (default
+in the Solo→Vega config), the right arm holds the quaternion captured at clutch
+engage / reanchor. Leader wrist tilts and keyboard rotate keys are ignored for
+that target; Lula IK still receives the fixed quat so joints compensate while
+translation tracks. Dual-mode left arm always keeps relative orientation
+mapping.
+
 **Distance units:** both the physical ALOHA leader EE (Interbotix FK) and the
 DexMate stage use **meters**. `retarget.translation_gain` scales leader meter
 deltas onto DexMate (`1.0` = 1:1). Default is **2.0** so a small leader hand
@@ -230,6 +237,15 @@ keep `max_lin_vel` high enough that rate limiting does not cancel it) if
 DexMate still feels short or overshoots. Workspace bounds and velocity limits
 are the software safety layer; stale packets hold the last target at 100 ms and
 pause tracking at 500 ms.
+
+**Proximity fine control** (R-wrist laser `last_length`):
+
+| Mode | YAML key | Effect |
+| --- | --- | --- |
+| Rate limit (default **off**) | `retarget.proximity_rate_limit` | Scales `max_lin_vel` / `max_ang_vel` / `max_lin_acc`. Absolute map unchanged → EEF **catches up**. |
+| Delta gain (default **on** in this YAML) | `retarget.proximity_delta_gain` | Scales **per-frame** leader deltas into the DexMate target (translation + rotation). **No catch-up**, no snap when scale changes. Path-dependent; clutch/`r` resets. |
+
+Both use a linear band: scale `1` at/above `depth_outer_m`, `scale_min` at/below `depth_inner_m`. Status logs include `prox_delta=` / `prox_rate=`. Old key `proximity_slowdown` is still accepted as an alias for `proximity_rate_limit`.
 
 ## Dataset contract
 

@@ -67,6 +67,11 @@ class EnvInfo:
     """Optional R-arm controller. Learned policies that reproduce dataset
     state vectors can use this to recover the right end-effector pose."""
 
+    r_wrist_laser: Optional[Any] = None
+    """Optional right-wrist approach laser (`RWristLaser`). Teleop uses
+    ``last_length`` for proximity rate-limit slowdown near contact.
+    Participant policies may ignore this."""
+
 
 @dataclass
 class PartTarget:

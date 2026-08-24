@@ -125,14 +125,12 @@ enable_camera_viewports = _env_bool("TASK_ENABLE_CAMERA_VIEWPORTS", True)   # sh
 enable_camera_output    = _env_bool("TASK_ENABLE_CAMERA_OUTPUT", False)   # bind sensors so RGB/depth are readable from Python
 HEAD_DEPTH_CAMERA_FOCAL_LENGTH = float(os.getenv("TASK_HEAD_DEPTH_FOCAL_LENGTH", "10"))
 
-# Right-wrist TCP approach laser: PhysX raycast + 2D overlay on R_wrist RGB.
-# When enabled, forces camera sensor output so R_wrist RGBA/intrinsics exist.
-# Default raycast origin = TCP (offset 0): a positive offset can start the
-# query past a near contact when the gripper is already touching. Robot
-# self-hits are filtered by prim prefix. Coaxial HUD aims at the projected
-# tool-forward stop (crosshair (u,v) is nearly range-invariant). Distance is
-# cued by on-image text, range bar, and reticle size. Set
-# TASK_R_WRIST_LASER_DEBUG_LOG=0 to quiet emit/end xyz dumps.
+# Right-wrist TCP approach laser: tool +Z from EE (jaw midline), with depth
+# marched along that ray in the wrist image. Camera-boresight aim is not used
+# (it placed the crosshair under the visual TCP). Optional tip offset shifts
+# emit in EE frame if the Lula/USD EE frame is not on the grasp midline.
+# TASK_R_WRIST_LASER_TIP_OFFSET_EE=x,y,z (meters). Debug marker for cam
+# principal point: TASK_R_WRIST_LASER_AIM_DEBUG=1.
 enable_r_wrist_laser = _env_bool("TASK_ENABLE_R_WRIST_LASER", True)
 R_WRIST_LASER_MAX_LENGTH = float(os.getenv("TASK_R_WRIST_LASER_MAX_LENGTH", "2.0"))
 R_WRIST_LASER_LOG_PERIOD_S = float(os.getenv("TASK_R_WRIST_LASER_LOG_PERIOD_S", "0.5"))
@@ -140,6 +138,15 @@ R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET = float(
     os.getenv("TASK_R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET", "0.0")
 )
 R_WRIST_LASER_DEBUG_LOG = _env_bool("TASK_R_WRIST_LASER_DEBUG_LOG", True)
+R_WRIST_LASER_AIM_DEBUG = _env_bool("TASK_R_WRIST_LASER_AIM_DEBUG", True)
+_raw_tip = os.getenv("TASK_R_WRIST_LASER_TIP_OFFSET_EE", "0,0,0")
+try:
+    _tip_parts = [float(x.strip()) for x in _raw_tip.replace(";", ",").split(",")]
+    R_WRIST_LASER_TIP_OFFSET_EE = (
+        tuple(_tip_parts) if len(_tip_parts) == 3 else (0.0, 0.0, 0.0)
+    )
+except ValueError:
+    R_WRIST_LASER_TIP_OFFSET_EE = (0.0, 0.0, 0.0)
 
 # Soft parallel-gripper drives. Commanded close aperture is 0 rad (full
 # close); these caps make the finger PD yield on contact so parts are not

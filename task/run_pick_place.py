@@ -28,9 +28,9 @@ def _env_flag(name, default=False):
     return raw.lower() in {"1", "true", "yes", "on"}
 
 
-def _env_int(name):
+def _env_int(name, default=None):
     raw = os.getenv(name)
-    return None if raw in (None, "") else int(raw)
+    return default if raw in (None, "") else int(raw)
 
 
 def _env_float(name):
@@ -39,9 +39,22 @@ def _env_float(name):
 
 
 _HEADLESS = _env_flag("ISAACSIM_HEADLESS")
+# Lighter than SimulationApp.DEFAULT_LAUNCHER_CONFIG (DLSS AA=3, 64 spp,
+# denoiser on, 1440x900 window). Enough for teleop / camera feeds on 16 GB.
 _SIM_CONFIG = {
     "headless": _HEADLESS,
     "multi_gpu": _env_flag("ISAACSIM_MULTI_GPU", default=False),
+    "renderer": os.getenv("ISAACSIM_RENDERER", "RaytracedLighting"),
+    "anti_aliasing": _env_int("ISAACSIM_ANTI_ALIASING", 0),  # 0=off (was 3=DLSS)
+    "samples_per_pixel_per_frame": _env_int("ISAACSIM_SAMPLES_PER_PIXEL", 1),
+    "denoiser": _env_flag("ISAACSIM_DENOISER", default=False),
+    "max_bounces": _env_int("ISAACSIM_MAX_BOUNCES", 2),
+    "max_specular_transmission_bounces": 2,
+    "max_volume_bounces": 2,
+    "width": _env_int("ISAACSIM_WIDTH", 960),
+    "height": _env_int("ISAACSIM_HEIGHT", 540),
+    "window_width": _env_int("ISAACSIM_WINDOW_WIDTH", 1280),
+    "window_height": _env_int("ISAACSIM_WINDOW_HEIGHT", 720),
 }
 _ACTIVE_GPU = _env_int("ISAACSIM_ACTIVE_GPU")
 _PHYSICS_GPU = _env_int("ISAACSIM_PHYSICS_GPU")
@@ -802,19 +815,23 @@ def main():
     r_wrist_laser = None
     last_r_wrist_overlay = None
     if r_wrist_laser_enabled:
+        _tip = getattr(pc, "R_WRIST_LASER_TIP_OFFSET_EE", (0.0, 0.0, 0.0))
         r_wrist_laser = RWristLaser(
             max_length=float(getattr(pc, "R_WRIST_LASER_MAX_LENGTH", 2.0)),
             raycast_origin_offset_m=float(
                 getattr(pc, "R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET", 0.0)
             ),
+            tip_offset_ee=_tip if any(abs(float(v)) > 1e-9 for v in _tip) else None,
             camera_prim_path=R_WRIST_CAMERA_PATH,
             show_window=not _HEADLESS,
             debug_log=bool(getattr(pc, "R_WRIST_LASER_DEBUG_LOG", False)),
+            show_aim_debug=bool(getattr(pc, "R_WRIST_LASER_AIM_DEBUG", False)),
         )
         print(
             f"[setup] R-wrist laser enabled "
             f"(max_length={r_wrist_laser.max_length:g} m; "
             f"raycast_origin_offset={r_wrist_laser.raycast_origin_offset_m:g} m; "
+            f"tip_offset_ee={_tip}; "
             f"log every {float(getattr(pc, 'R_WRIST_LASER_LOG_PERIOD_S', 0.5)):g} s)",
             flush=True,
         )
@@ -942,7 +959,9 @@ def main():
                     )
             except Exception:
                 depth_m = None
-            r_wrist_laser.update(Rp, Rq, depth_m=depth_m)
+            r_wrist_laser.update(
+                Rp, Rq, depth_m=depth_m, camera=R_wrist_camera
+            )
             try:
                 rgba = R_wrist_camera.get_rgba()
             except Exception:
@@ -954,7 +973,9 @@ def main():
                 )
                 return
             rgb = np.asarray(rgba[..., :3])
-            overlay = r_wrist_laser.overlay_rgb(rgb, R_wrist_camera)
+            overlay = r_wrist_laser.overlay_rgb(
+                rgb, R_wrist_camera, depth_m=depth_m
+            )
             # Log after overlay so stop_uv matches this frame (Branch A/B).
             r_wrist_laser.maybe_log_distance(
                 float(sim_time_s),
@@ -987,6 +1008,7 @@ def main():
         enable_camera_output=camera_output_enabled,
         L_controller=L_controller,
         R_controller=R_controller,
+        r_wrist_laser=r_wrist_laser,
     )
 
     policy_class = _load_policy_class(args.policy)

@@ -151,11 +151,37 @@ class AlohaTeleopPolicy(Policy):
         self._retarget_R = CartesianRetargeter(retarget_cfg)
         self._retarget_L: Optional[CartesianRetargeter] = None
         if self._control_arms == "dual" and not self._keyboard_mode:
+            # Orientation lock is right-arm only even when YAML enables it.
+            left_raw = dict(raw.get("retarget") or {})
+            left_raw["fix_orientation"] = False
             self._retarget_L = CartesianRetargeter(
-                RetargetConfig.from_dict(raw.get("retarget"))
+                RetargetConfig.from_dict(left_raw)
             )
         # Primary retarget used by recenter / reset operator cmds.
         self._retarget = self._retarget_R
+        self._prox_rate = retarget_cfg.proximity_rate_limit
+        self._prox_delta = retarget_cfg.proximity_delta_gain
+        self._last_prox_rate_scale = 1.0
+        self._last_prox_delta_scale = 1.0
+        self._r_wrist_laser = getattr(env_info, "r_wrist_laser", None)
+        if self._prox_rate.enabled:
+            print(
+                "[aloha_teleop] proximity_rate_limit: "
+                f"outer={self._prox_rate.depth_outer_m:g} m → scale=1; "
+                f"inner={self._prox_rate.depth_inner_m:g} m → "
+                f"scale={self._prox_rate.scale_min:g} "
+                "(R-wrist laser → max_lin/ang_vel; catch-up)",
+                flush=True,
+            )
+        if self._prox_delta.enabled:
+            print(
+                "[aloha_teleop] proximity_delta_gain: "
+                f"outer={self._prox_delta.depth_outer_m:g} m → scale=1; "
+                f"inner={self._prox_delta.depth_inner_m:g} m → "
+                f"scale={self._prox_delta.scale_min:g} "
+                "(R-wrist laser → per-frame retarget deltas; no catch-up)",
+                flush=True,
+            )
         if retarget_cfg.axes_map is not None:
             print(
                 "[aloha_teleop] retarget frame=headcam_view (axes_map, "
@@ -585,6 +611,7 @@ class AlohaTeleopPolicy(Policy):
             # observed EE (which can lag IK and cause a resume jump).
             dex_pos = last_pos if last_pos is not None else current_pos
             dex_quat = last_quat if last_quat is not None else current_quat
+            prox_depth = self._laser_range_m() if is_right else None
             pos, quat, grip, info = retarget.step(
                 leader_pos=sample["ee_pos"],
                 leader_quat=sample["ee_quat_wxyz"],
@@ -594,7 +621,15 @@ class AlohaTeleopPolicy(Policy):
                 deadman=bool(sample["deadman"]) and not self._estop,
                 current_dex_pos=dex_pos,
                 current_dex_quat=dex_quat,
+                proximity_depth_m=prox_depth,
             )
+            if is_right:
+                self._last_prox_rate_scale = float(
+                    info.get("rate_limit_scale", 1.0)
+                )
+                self._last_prox_delta_scale = float(
+                    info.get("delta_gain_scale", 1.0)
+                )
             reason = info.get("reason", reason)
             if sample.get("timestamp_ns"):
                 latency_ms = max(
@@ -616,6 +651,15 @@ class AlohaTeleopPolicy(Policy):
             self._last_left_quat = quat
             self._last_left_grip = grip
         return reason, age
+
+    def _laser_range_m(self) -> Optional[float]:
+        """R-wrist laser ``last_length``, or None if not ready (fail-open)."""
+        laser = self._r_wrist_laser
+        if laser is None:
+            return None
+        if not str(getattr(laser, "last_cast_source", "") or ""):
+            return None
+        return float(laser.last_length)
 
     def _advance_record_deadline(self, deadline: float, now: float) -> float:
         next_t = deadline + self._record_period_s
@@ -1277,6 +1321,8 @@ class AlohaTeleopPolicy(Policy):
             f"clutch={clutch} "
             f"ik_ok={self._last_ik_ok} "
             f"track_err_mm={self._last_tracking_err_m * 1000.0:.1f} "
+            f"prox_delta={self._last_prox_delta_scale:.2f} "
+            f"prox_rate={self._last_prox_rate_scale:.2f} "
             f"target={[round(float(v), 3) for v in target]} "
             f"leader_hz={hz_r:5.1f}"
             + (f"/{hz_l:5.1f}" if self._leader_L is not None else "")

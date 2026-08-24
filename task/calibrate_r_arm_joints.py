@@ -27,7 +27,23 @@ if _HEADLESS or not os.environ.get("DISPLAY"):
     )
     sys.exit(1)
 
-simulation_app = SimulationApp({"headless": False, "multi_gpu": False})
+simulation_app = SimulationApp(
+    {
+        "headless": False,
+        "multi_gpu": False,
+        "renderer": "RaytracedLighting",
+        "anti_aliasing": 0,
+        "samples_per_pixel_per_frame": 1,
+        "denoiser": False,
+        "max_bounces": 2,
+        "max_specular_transmission_bounces": 2,
+        "max_volume_bounces": 2,
+        "width": 960,
+        "height": 540,
+        "window_width": 1280,
+        "window_height": 720,
+    }
+)
 
 import numpy as np
 

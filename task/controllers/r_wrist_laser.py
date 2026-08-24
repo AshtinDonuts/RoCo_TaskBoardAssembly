@@ -1,11 +1,10 @@
 """Right-wrist TCP approach laser for visual guidance.
 
-Terminates the beam at the first surface along the wrist-cam line of sight
-(center depth) when available, with PhysX raycasts (tool +Z and camera look)
-as fallback. Table/board visuals often lack PhysX colliders, which previously
-left the overlay stuck on MAX length. Overlay follows AimBot: tool-forward
-shooting line + stop reticle; distance is also shown via HUD text / range bar.
-Live preview uses an ``omni.ui`` window — OpenCV HighGUI fights Kit.
+Aims along gripper local +Z from the EE tool center (jaw midline), not along
+the wrist-cam optical axis. Range prefers depth marched along that tool ray
+in the wrist image, with PhysX along tool +Z as fallback. Overlay projects
+TCP→stop into the wrist RGB (AimBot-style reticle). Live preview uses an
+``omni.ui`` window — OpenCV HighGUI fights Kit.
 """
 
 from __future__ import annotations
@@ -405,6 +404,81 @@ def _clip_segment_to_image(
     return None
 
 
+def _sample_depth_m(depth: np.ndarray, u: float, v: float) -> float:
+    """Bilinear-ish depth sample; returns +inf if invalid."""
+    arr = np.asarray(depth, dtype=np.float64)
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    if arr.ndim != 2 or arr.size == 0:
+        return float("inf")
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    x = int(round(float(u)))
+    y = int(round(float(v)))
+    if x < 0 or y < 0 or x >= w or y >= h:
+        return float("inf")
+    z = float(arr[y, x])
+    if not np.isfinite(z) or z <= 1e-4:
+        return float("inf")
+    return z
+
+
+def _find_depth_cutoff_uv(
+    p0: Tuple[float, float],
+    p1: Tuple[float, float],
+    depth: np.ndarray,
+    hit_z: float,
+    *,
+    n: int = 96,
+    match_tol_m: float = 0.05,
+) -> Tuple[float, float]:
+    """Walk p0→p1; stop where scene depth first meets the laser hit.
+
+    Prefer a pixel whose depth matches ``hit_z`` (the collision surface), so
+    closer clutter (e.g. gripper in the lower frame) does not truncate the
+    beam early. Fallback: first pixel with depth <= hit_z.
+    """
+    hit_z = float(hit_z)
+    if hit_z <= 1e-4 or not np.isfinite(hit_z):
+        return float(p1[0]), float(p1[1])
+    match_uv = None
+    close_uv = None
+    for i in range(int(n) + 1):
+        t = i / float(n)
+        u = float(p0[0]) * (1.0 - t) + float(p1[0]) * t
+        v = float(p0[1]) * (1.0 - t) + float(p1[1]) * t
+        z = _sample_depth_m(depth, u, v)
+        if not np.isfinite(z):
+            continue
+        if match_uv is None and abs(z - hit_z) <= float(match_tol_m):
+            match_uv = (u, v)
+            break
+        if close_uv is None and z <= hit_z + 0.02:
+            close_uv = (u, v)
+    if match_uv is not None:
+        return match_uv
+    if close_uv is not None:
+        return close_uv
+    return float(p1[0]), float(p1[1])
+
+
+def _draw_polyline_uv(
+    img: np.ndarray,
+    pts: Sequence[Tuple[float, float]],
+    color: Tuple[int, int, int],
+    thickness: int,
+) -> None:
+    try:
+        import cv2
+    except ImportError:
+        return
+    h, w = img.shape[:2]
+    for a, b in zip(pts[:-1], pts[1:]):
+        clipped = _clip_segment_to_image((a[0], a[1]), (b[0], b[1]), w, h)
+        if clipped is None:
+            continue
+        cv2.line(img, clipped[0], clipped[1], color, thickness)
+
+
 def _draw_crosshair(
     img: np.ndarray,
     center: Tuple[int, int],
@@ -465,6 +539,57 @@ def _depth_center_meters(
     return float(np.median(finite))
 
 
+def _depth_along_tool_ray(
+    emit: np.ndarray,
+    direction: np.ndarray,
+    max_length: float,
+    depth: np.ndarray,
+    R_wc: np.ndarray,
+    t_w: np.ndarray,
+    K: np.ndarray,
+    *,
+    n: int = 80,
+    match_tol_m: float = 0.03,
+    min_t_m: float = 0.02,
+) -> Optional[Tuple[float, np.ndarray, float]]:
+    """March along tool +Z; return (along_m, end_world, z_cam) at first hit.
+
+    Projects ``emit + t * direction`` into the wrist image and compares that
+    sample's camera-frame depth to the scene depth at the same pixel. The
+    first ``t`` where scene depth is at/closer than the tool-ray point is the
+    collision along tool-forward (not along the camera boresight).
+    """
+    emit = np.asarray(emit, dtype=np.float64).reshape(3)
+    direction = np.asarray(direction, dtype=np.float64).reshape(3)
+    K = np.asarray(K, dtype=np.float64)
+    t0 = max(float(min_t_m), 1e-3)
+    t1 = max(float(max_length), t0)
+    for i in range(1, int(n) + 1):
+        t = t0 + (t1 - t0) * (i / float(n))
+        pw = emit + direction * t
+        p_cv = _world_to_cv_camera(pw, R_wc, t_w)
+        proj = _project_cv(p_cv, K)
+        if proj is None:
+            continue
+        u, v, z_cam = proj
+        z_scene = _sample_depth_m(depth, u, v)
+        if not np.isfinite(z_scene):
+            continue
+        if float(z_scene) <= float(z_cam) + float(match_tol_m):
+            return float(t), pw, float(z_cam)
+    return None
+
+
+def _parse_vec3_env(raw: str) -> Optional[np.ndarray]:
+    parts = [p.strip() for p in str(raw).replace(";", ",").split(",") if p.strip()]
+    if len(parts) != 3:
+        return None
+    try:
+        return np.array([float(parts[0]), float(parts[1]), float(parts[2])], dtype=np.float64)
+    except ValueError:
+        return None
+
+
 class RWristLaser:
     """Per-frame right-wrist approach laser (raycast + RGB overlay)."""
 
@@ -473,23 +598,19 @@ class RWristLaser:
         *,
         max_length: float = 2.0,
         origin_offset_m: float = 0.0,
-        # 0 by default: a positive offset can start the query past a near
-        # contact (gripper already touching table/object) and miss the hit.
         raycast_origin_offset_m: float = 0.0,
         tip_offset_ee: Optional[Sequence[float]] = None,
         camera_prim_path: Optional[str] = None,
         exclude_prefixes: Optional[Sequence[str]] = None,
         both_sides: bool = True,
         prefer_depth: bool = True,
+        show_aim_debug: bool = False,
         line_thickness: int = 2,
         show_window: bool = True,
         debug_log: bool = False,
     ):
         self.max_length = float(max_length)
-        # Visual emission at TCP by default (AimBot shooting-line start).
         self.origin_offset_m = float(origin_offset_m)
-        # PhysX cast may start slightly ahead of the emit point; keep 0 unless
-        # self-hits are noisy (robot hits are already filtered by prefix).
         self.raycast_origin_offset_m = float(raycast_origin_offset_m)
         self.tip_offset_ee = (
             np.asarray(tip_offset_ee, dtype=np.float64).reshape(3)
@@ -502,11 +623,12 @@ class RWristLaser:
         )
         self.both_sides = bool(both_sides)
         self.prefer_depth = bool(prefer_depth)
+        self.show_aim_debug = bool(show_aim_debug)
         self.line_thickness = int(line_thickness)
         self.show_window = bool(show_window)
         self.debug_log = bool(debug_log)
 
-        self.last_origin: Optional[np.ndarray] = None  # visual / emit origin
+        self.last_origin: Optional[np.ndarray] = None  # TCP emit (tool midline)
         self.last_ray_origin: Optional[np.ndarray] = None
         self.last_end: Optional[np.ndarray] = None
         self.last_hit: bool = False
@@ -556,12 +678,14 @@ class RWristLaser:
         ee_pos,
         ee_quat_wxyz,
         depth_m: Optional[np.ndarray] = None,
+        camera=None,
     ) -> None:
-        """Update beam end from depth (LOS) and/or PhysX.
+        """Update beam end along tool +Z from the TCP (jaw midline).
 
-        Prefer wrist-cam center depth when available — table/board meshes often
-        lack PhysX collision, which made the overlay stuck on MAX 2.0 m.
-        PhysX along tool +Z (and camera look) remains as fallback / cross-check.
+        Aim direction is always gripper local +Z from the EE pose. Range uses
+        depth marched along that tool ray (projected into the wrist image),
+        then PhysX along tool +Z. Camera-boresight depth is only a last-resort
+        length estimate; the stop point stays on the tool ray.
         """
         pos = np.asarray(ee_pos, dtype=np.float64).reshape(3)
         quat = np.asarray(ee_quat_wxyz, dtype=np.float64).reshape(-1)
@@ -579,39 +703,52 @@ class RWristLaser:
         ray_origin = emit + direction * self.raycast_origin_offset_m
         remaining = max(0.0, self.max_length - self.raycast_origin_offset_m)
 
-        # --- Depth along wrist-cam optical axis (true line of sight) ---
         self.last_depth_m = -1.0
-        depth_hit: Optional[BeamCastResult] = None
-        depth_length = float(self.max_length)
+        tool_depth_hit: Optional[BeamCastResult] = None
         Rt = None
+        K = None
         if self.camera_prim_path:
             Rt = _camera_world_Rt(str(self.camera_prim_path))
-        if depth_m is not None and Rt is not None:
-            z = _depth_center_meters(depth_m)
-            if z is not None and 1e-4 < z <= self.max_length + 0.5:
-                self.last_depth_m = float(z)
-                R_wc, t_cam = Rt
-                look = _camera_look_world(R_wc)
-                end = t_cam + look * float(z)
-                # Report length along tool approach from TCP (AimBot muzzle).
-                along = float(np.dot(end - emit, direction))
-                if along < 0.0:
-                    along = float(np.linalg.norm(end - emit))
-                along = float(min(max(along, 0.0), self.max_length))
-                depth_length = along
-                depth_hit = BeamCastResult(
-                    end=emit + direction * along,
-                    length=along,
+        if camera is not None:
+            try:
+                K = camera.get_intrinsics_matrix()
+            except Exception:
+                K = None
+            if K is not None:
+                K = np.asarray(K, dtype=np.float64)
+
+        # --- Depth marched along tool +Z (primary when prefer_depth) ---
+        if (
+            self.prefer_depth
+            and depth_m is not None
+            and Rt is not None
+            and K is not None
+        ):
+            marched = _depth_along_tool_ray(
+                emit,
+                direction,
+                self.max_length,
+                depth_m,
+                Rt[0],
+                Rt[1],
+                K,
+            )
+            if marched is not None:
+                along, end_w, z_cam = marched
+                self.last_depth_m = float(z_cam)
+                tool_depth_hit = BeamCastResult(
+                    end=np.asarray(end_w, dtype=np.float64).reshape(3),
+                    length=float(along),
                     hit=True,
-                    collision_path="wrist_depth",
+                    collision_path="tool_depth",
                     rigid_body_path="",
-                    source="wrist_depth",
-                    hit_summaries=(f"{z:.4f}:depth_center",),
+                    source="tool_depth",
+                    hit_summaries=(f"{along:.4f}:tool_ray",),
                     total_hits=1,
-                    nearest_any_distance=float(z),
+                    nearest_any_distance=float(along),
                 )
 
-        # --- PhysX: tool approach from TCP ---
+        # --- PhysX along tool +Z ---
         physx_tcp = raycast_beam_end(
             ray_origin,
             direction,
@@ -633,48 +770,42 @@ class RWristLaser:
                 hit_summaries=physx_tcp.hit_summaries,
             )
 
-        # --- PhysX: camera look (matches overlay LOS better) ---
-        physx_cam: Optional[BeamCastResult] = None
-        if Rt is not None:
-            R_wc, t_cam = Rt
-            look = _camera_look_world(R_wc)
-            cam_cast = raycast_beam_end(
-                t_cam,
-                look,
-                self.max_length,
-                self.exclude_prefixes,
-                both_sides=self.both_sides,
-            )
-            if cam_cast.hit:
-                along = float(np.dot(cam_cast.end - emit, direction))
-                if along < 0.0:
-                    along = float(cam_cast.length)
-                along = float(min(max(along, 0.0), self.max_length))
-                physx_cam = BeamCastResult(
+        # --- Last resort: cam-center depth → length only, end on tool ray ---
+        cam_depth_hit: Optional[BeamCastResult] = None
+        if tool_depth_hit is None and depth_m is not None and Rt is not None:
+            z = _depth_center_meters(depth_m)
+            if z is not None and 1e-4 < z <= self.max_length + 0.5:
+                self.last_depth_m = float(z)
+                # Approximate standoff: cam is usually ahead of TCP on approach.
+                R_wc, t_cam = Rt
+                cam_ahead = float(np.dot(t_cam - emit, direction))
+                along = float(min(max(z + max(cam_ahead, 0.0), 0.0), self.max_length))
+                cam_depth_hit = BeamCastResult(
                     end=emit + direction * along,
                     length=along,
                     hit=True,
-                    collision_path=cam_cast.collision_path,
-                    rigid_body_path=cam_cast.rigid_body_path,
-                    skipped_robot_hits=cam_cast.skipped_robot_hits,
-                    total_hits=cam_cast.total_hits,
-                    nearest_any_distance=cam_cast.nearest_any_distance,
-                    source="physx_cam",
-                    hit_summaries=cam_cast.hit_summaries,
+                    collision_path="wrist_depth_fallback",
+                    rigid_body_path="",
+                    source="wrist_depth_fallback",
+                    hit_summaries=(f"{z:.4f}:depth_center_fb",),
+                    total_hits=1,
+                    nearest_any_distance=float(z),
                 )
 
-        # Choose result: prefer depth (LOS) when enabled, else nearest PhysX hit.
         candidates: list = []
-        if depth_hit is not None and self.prefer_depth:
-            candidates.append(depth_hit)
-        for c in (physx_tcp, physx_cam):
-            if c is not None and c.hit:
-                candidates.append(c)
-        if not candidates and depth_hit is not None:
-            candidates.append(depth_hit)
+        if tool_depth_hit is not None:
+            candidates.append(tool_depth_hit)
+        if physx_tcp.hit:
+            candidates.append(physx_tcp)
+        if not candidates and cam_depth_hit is not None:
+            candidates.append(cam_depth_hit)
 
         if candidates:
-            best = min(candidates, key=lambda r: float(r.length))
+            # Prefer tool_depth over physx when both exist and prefer_depth.
+            if self.prefer_depth and tool_depth_hit is not None:
+                best = tool_depth_hit
+            else:
+                best = min(candidates, key=lambda r: float(r.length))
             self._apply_result(
                 emit=emit,
                 direction=direction,
@@ -682,20 +813,17 @@ class RWristLaser:
                 result=best,
                 length=float(best.length),
             )
-            # Keep PhysX diagnostics even when depth wins.
-            if physx_tcp.total_hits and not self.last_hit_summaries:
-                self.last_hit_summaries = physx_tcp.hit_summaries
             if physx_tcp.total_hits:
                 self.last_total_hits = max(
                     self.last_total_hits, int(physx_tcp.total_hits)
                 )
                 self.last_skipped_robot_hits = int(physx_tcp.skipped_robot_hits)
-                self.last_nearest_any_distance = float(
-                    physx_tcp.nearest_any_distance
-                )
+                if self.last_nearest_any_distance < 0.0:
+                    self.last_nearest_any_distance = float(
+                        physx_tcp.nearest_any_distance
+                    )
             return
 
-        # Miss: full beam.
         miss = BeamCastResult(
             end=emit + direction * self.max_length,
             length=float(self.max_length),
@@ -753,13 +881,18 @@ class RWristLaser:
             )
         print(msg, flush=True)
 
-    def overlay_rgb(self, rgb, camera) -> Optional[np.ndarray]:
-        """Draw AimBot-style beam: TCP→stop shooting line + stop reticle.
+    def overlay_rgb(
+        self,
+        rgb,
+        camera,
+        depth_m: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
+        """Draw tool-forward beam: TCP emit → tool-ray stop + reticle.
 
-        The R wrist cam sits ~10 cm along approach ahead of the TCP, so the
-        true emission point is often behind the camera; we clip the 3D
-        segment to the near plane so the visible beam still starts where the
-        ray enters the image (muzzle), then runs to the stop / hit.
+        Aim is the gripper +Z ray from the TCP (jaw midline), projected into
+        the wrist image — not the camera principal point. The wrist cam may
+        sit offset from the TCP; a bottom→image-center HUD is intentionally
+        not used (that pinned the crosshair under the visual tool center).
         """
         if (
             rgb is None
@@ -801,6 +934,7 @@ class RWristLaser:
         except ImportError:
             return out
 
+        # Tool-ray segment in camera frame (TCP → stop on approach axis).
         origin_cv = _world_to_cv_camera(self.last_origin, R_wc, t_w)
         end_cv = _world_to_cv_camera(self.last_end, R_wc, t_w)
         clipped = _clip_segment_to_near(origin_cv, end_cv, z_near=1e-3)
@@ -808,58 +942,67 @@ class RWristLaser:
             return out
         start_cv, stop_cv = clipped
 
-        # Dense sample along the visible (near-clipped) beam so a long ray
-        # still draws when endpoints leave the image.
-        n_pts = 32
+        depth_arr = None
+        if depth_m is not None:
+            depth_arr = np.asarray(depth_m, dtype=np.float64)
+            if depth_arr.ndim == 3:
+                depth_arr = depth_arr[..., 0]
+
+        n_pts = 48
         pts_uv: list = []
         for i in range(n_pts + 1):
             alpha = i / float(n_pts)
             p_cv = start_cv * (1.0 - alpha) + stop_cv * alpha
             proj = _project_cv(p_cv, K)
-            if proj is not None:
-                pts_uv.append((proj[0], proj[1], proj[2]))
+            if proj is None:
+                continue
+            u, v, z_laser = proj
+            if depth_arr is not None:
+                z_scene = _sample_depth_m(depth_arr, u, v)
+                if np.isfinite(z_scene) and z_scene < float(z_laser) - 0.01:
+                    break
+            pts_uv.append((u, v, z_laser))
 
-        line_rgb = (0, 220, 0)  # AimBot-ish green shooting line (RGB)
-        emit_rgb = (255, 48, 48)  # red muzzle / TCP marker
+        line_rgb = (0, 220, 0)
+        emit_rgb = (255, 48, 48)
         hit_rgb = (255, 255, 0) if self.last_hit else (80, 180, 255)
+        dbg_cam_rgb = (80, 80, 255)
 
         stop_proj = _project_cv(stop_cv, K)
         emit_proj = _project_cv(origin_cv, K)
         if emit_proj is None:
             emit_proj = _project_cv(start_cv, K)
 
-        span = 0.0
-        if len(pts_uv) >= 2:
-            for a, b in zip(pts_uv[:-1], pts_uv[1:]):
-                clipped_uv = _clip_segment_to_image(
-                    (a[0], a[1]), (b[0], b[1]), w, h
-                )
-                if clipped_uv is None:
-                    continue
-                cv2.line(
-                    out,
-                    clipped_uv[0],
-                    clipped_uv[1],
-                    line_rgb,
-                    max(2, self.line_thickness),
-                )
-            span = float(
-                np.hypot(
-                    pts_uv[0][0] - pts_uv[-1][0],
-                    pts_uv[0][1] - pts_uv[-1][1],
-                )
+        # Reticle always on the projected tool-ray stop (jaw-midline aim).
+        aim_uv: Optional[Tuple[float, float]] = None
+        if stop_proj is not None:
+            aim_uv = (float(stop_proj[0]), float(stop_proj[1]))
+            self.last_stop_uv = (
+                float(stop_proj[0]),
+                float(stop_proj[1]),
+                float(stop_proj[2]),
             )
+        else:
+            self.last_stop_uv = None
+        if pts_uv:
+            # If occlusion trimmed samples, use last kept point on tool ray.
+            aim_uv = (float(pts_uv[-1][0]), float(pts_uv[-1][1]))
 
-        # Wrist cam is coaxial with approach, so the projected 3D beam often
-        # collapses to ~1 px. Draw an AimBot-style HUD shooting line from the
-        # bottom of the frame (gripper side) to the *true* projected stop —
-        # that point lies on the tool approach axis in the image. Do NOT lerp
-        # the aim by dist/max (that pulls the beam off "forward out of TCP").
-        # Distance is cued by reticle size + hit color instead.
-        if span < 6.0 and stop_proj is not None:
-            muzzle = (int(w * 0.5), int(h * 0.98))
-            stop_px = (int(round(stop_proj[0])), int(round(stop_proj[1])))
-            clipped_uv = _clip_segment_to_image(muzzle, stop_px, w, h)
+        if len(pts_uv) >= 2:
+            _draw_polyline_uv(
+                out,
+                [(p[0], p[1]) for p in pts_uv],
+                line_rgb,
+                max(2, self.line_thickness),
+            )
+        elif emit_proj is not None and aim_uv is not None:
+            # Near-coaxial: still connect projected muzzle → tool aim.
+            clipped_uv = _clip_segment_to_image(
+                (emit_proj[0], emit_proj[1]),
+                (aim_uv[0], aim_uv[1]),
+                w,
+                h,
+            )
             if clipped_uv is not None:
                 cv2.line(
                     out,
@@ -868,13 +1011,8 @@ class RWristLaser:
                     line_rgb,
                     max(2, self.line_thickness),
                 )
-                emit_proj = (
-                    float(clipped_uv[0][0]),
-                    float(clipped_uv[0][1]),
-                    0.0,
-                )
 
-        # Emission / muzzle marker.
+        # TCP / muzzle marker on the tool ray.
         if emit_proj is not None:
             eu, ev = int(round(emit_proj[0])), int(round(emit_proj[1]))
             if 0 <= eu < w and 0 <= ev < h:
@@ -886,16 +1024,8 @@ class RWristLaser:
                     -1,
                 )
 
-        # Stop point + AimBot wrist reticle at the tool-forward aim point.
-        # Coaxial optics keep (u,v) nearly fixed with range — distance is
-        # shown via reticle size, HUD text, and the range bar (not by moving aim).
-        if stop_proj is not None:
-            su, sv = int(round(stop_proj[0])), int(round(stop_proj[1]))
-            self.last_stop_uv = (
-                float(stop_proj[0]),
-                float(stop_proj[1]),
-                float(stop_proj[2]),
-            )
+        if aim_uv is not None:
+            su, sv = int(round(aim_uv[0])), int(round(aim_uv[1]))
             if 0 <= su < w and 0 <= sv < h:
                 z_cue = float(self.last_length) if self.last_length > 1e-6 else 1.0
                 arm = int(
@@ -920,10 +1050,19 @@ class RWristLaser:
                     hit_rgb,
                     -1,
                 )
-        else:
-            self.last_stop_uv = None
 
-        # Phase-3 distance cues (tool-forward aim unchanged).
+        # Optional: show camera principal point so cam vs tool offset is visible.
+        if self.show_aim_debug:
+            cx, cy = float(K[0, 2]), float(K[1, 2])
+            cv2.drawMarker(
+                out,
+                (int(round(cx)), int(round(cy))),
+                dbg_cam_rgb,
+                markerType=cv2.MARKER_TILTED_CROSS,
+                markerSize=18,
+                thickness=2,
+            )
+
         tag = "HIT" if self.last_hit else "MAX"
         label = f"{tag} {self.last_length:.3f} m"
         cv2.putText(
@@ -936,7 +1075,6 @@ class RWristLaser:
             2,
             cv2.LINE_AA,
         )
-        # Range bar: filled fraction = dist/max (short fill = close).
         bar_x0, bar_y0 = 12, h - 22
         bar_w, bar_h = max(40, w - 24), 10
         frac = float(

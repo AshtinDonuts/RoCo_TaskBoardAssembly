@@ -383,3 +383,286 @@ def test_reanchor_after_clutch_off_keeps_dex_and_tracks_new_origin():
     assert info["reason"] == "tracking"
     np.testing.assert_allclose(pos, held + np.array([0.05, 0.0, 0.0]), atol=1e-6)
 
+
+def test_proximity_band_scale_curve():
+    from teleop.retarget import ProximityScaleConfig, proximity_band_scale
+
+    cfg = ProximityScaleConfig(
+        enabled=True, depth_outer_m=0.40, depth_inner_m=0.20, scale_min=0.20
+    )
+    assert proximity_band_scale(None, cfg) == 1.0
+    assert proximity_band_scale(-1.0, cfg) == 1.0
+    assert proximity_band_scale(0.50, cfg) == 1.0
+    assert proximity_band_scale(0.40, cfg) == 1.0
+    assert proximity_band_scale(0.20, cfg) == 0.20
+    assert proximity_band_scale(0.10, cfg) == 0.20
+    mid = proximity_band_scale(0.30, cfg)
+    np.testing.assert_allclose(mid, 0.60, atol=1e-9)
+    assert proximity_band_scale(0.30, ProximityScaleConfig(enabled=False)) == 1.0
+
+
+def test_motion_scale_throttles_lin_and_ang_rate_limits():
+    """Explicit motion_scale multiplies vel caps; absolute map unchanged."""
+    from teleop import transforms as T
+
+    cfg = RetargetConfig(
+        translation_gain=1.0,
+        rotation_gain=1.0,
+        max_lin_vel=1.0,
+        max_ang_vel=1.0,
+        max_lin_acc=0.0,
+        workspace_min=(-1.5, -1.5, -1.5),
+        workspace_max=(1.5, 1.5, 1.5),
+    )
+    origin = np.array([0.0, 0.0, 0.0])
+    q0 = _identity_quat()
+    leader_pos = np.array([1.0, 0.0, 0.0])
+    leader_quat = T.rotvec_to_quat_wxyz([0.0, 0.0, 1.5])
+
+    r_full = CartesianRetargeter(cfg)
+    r_full.capture_origins([0, 0, 0], q0, origin, q0)
+    pos_full, quat_full, _, info_full = r_full.step(
+        leader_pos=leader_pos,
+        leader_quat=leader_quat,
+        gripper_norm=0.0,
+        dt=0.05,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=origin,
+        current_dex_quat=q0,
+        motion_scale=1.0,
+    )
+
+    r_slow = CartesianRetargeter(cfg)
+    r_slow.capture_origins([0, 0, 0], q0, origin, q0)
+    pos_slow, quat_slow, _, info_slow = r_slow.step(
+        leader_pos=leader_pos,
+        leader_quat=leader_quat,
+        gripper_norm=0.0,
+        dt=0.05,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=origin,
+        current_dex_quat=q0,
+        motion_scale=0.20,
+    )
+
+    assert info_full["rate_limit_scale"] == 1.0
+    assert info_slow["rate_limit_scale"] == 0.20
+    step_full = float(np.linalg.norm(pos_full - origin))
+    step_slow = float(np.linalg.norm(pos_slow - origin))
+    assert step_full > 1e-6
+    np.testing.assert_allclose(step_slow / step_full, 0.20, atol=1e-6)
+
+    ang_full = float(np.linalg.norm(T.quat_wxyz_to_rotvec(
+        T.quat_multiply_wxyz(T.quat_conjugate_wxyz(q0), quat_full)
+    )))
+    ang_slow = float(np.linalg.norm(T.quat_wxyz_to_rotvec(
+        T.quat_multiply_wxyz(T.quat_conjugate_wxyz(q0), quat_slow)
+    )))
+    assert ang_full > 1e-6
+    np.testing.assert_allclose(ang_slow / ang_full, 0.20, atol=1e-6)
+
+
+def test_retarget_config_parses_proximity_keys():
+    from teleop.retarget import ProximityScaleConfig
+
+    cfg = RetargetConfig.from_dict(
+        {
+            "translation_gain": 2.0,
+            "proximity_slowdown": {  # legacy alias → rate_limit
+                "enabled": True,
+                "depth_outer_m": 0.4,
+                "depth_inner_m": 0.2,
+                "scale_min": 0.2,
+            },
+            "proximity_delta_gain": {
+                "enabled": True,
+                "depth_outer_m": 0.4,
+                "depth_inner_m": 0.25,
+                "scale_min": 0.05,
+            },
+        }
+    )
+    assert cfg.translation_gain == 2.0
+    assert cfg.proximity_rate_limit.enabled is True
+    assert cfg.proximity_rate_limit.scale_min == 0.2
+    assert cfg.proximity_delta_gain.enabled is True
+    assert cfg.proximity_delta_gain.scale_min == 0.05
+    assert isinstance(cfg.proximity_rate_limit, ProximityScaleConfig)
+
+
+def test_delta_gain_scales_incremental_target_no_catchup():
+    """Near-band delta gain shrinks motion; holding leader does not catch up."""
+    from teleop.retarget import ProximityScaleConfig
+
+    cfg = RetargetConfig(
+        translation_gain=1.0,
+        max_lin_vel=10.0,
+        max_ang_vel=10.0,
+        max_lin_acc=0.0,
+        workspace_min=(-2, -2, -2),
+        workspace_max=(2, 2, 2),
+        proximity_delta_gain=ProximityScaleConfig(
+            enabled=True,
+            depth_outer_m=0.40,
+            depth_inner_m=0.20,
+            scale_min=0.20,
+        ),
+        proximity_rate_limit=ProximityScaleConfig(enabled=False),
+    )
+    q0 = _identity_quat()
+    origin = np.zeros(3)
+    r = CartesianRetargeter(cfg)
+    r.capture_origins([0, 0, 0], q0, origin, q0)
+
+    # One 5 cm leader step at full scale (depth far).
+    pos_far, _, _, info_far = r.step(
+        leader_pos=[0.05, 0, 0],
+        leader_quat=q0,
+        gripper_norm=0.0,
+        dt=0.02,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=origin,
+        current_dex_quat=q0,
+        proximity_depth_m=0.50,
+    )
+    assert info_far["delta_gain_scale"] == 1.0
+    np.testing.assert_allclose(pos_far, [0.05, 0, 0], atol=1e-6)
+
+    # Another 5 cm at near-band scale_min=0.2 → only +1 cm DexMate.
+    pos_near, _, _, info_near = r.step(
+        leader_pos=[0.10, 0, 0],
+        leader_quat=q0,
+        gripper_norm=0.0,
+        dt=0.02,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=pos_far,
+        current_dex_quat=q0,
+        proximity_depth_m=0.20,
+    )
+    assert info_near["delta_gain_scale"] == 0.20
+    np.testing.assert_allclose(pos_near, [0.06, 0, 0], atol=1e-6)
+
+    # Hold leader still — must not catch up toward a 0.10 absolute map.
+    pos_hold, _, _, _ = r.step(
+        leader_pos=[0.10, 0, 0],
+        leader_quat=q0,
+        gripper_norm=0.0,
+        dt=0.02,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=pos_near,
+        current_dex_quat=q0,
+        proximity_depth_m=0.20,
+    )
+    np.testing.assert_allclose(pos_hold, pos_near, atol=1e-9)
+
+
+def test_delta_gain_scale_drop_does_not_snap():
+    """Changing proximity mid-hold must not yank the clutched pose."""
+    from teleop.retarget import ProximityScaleConfig
+
+    cfg = RetargetConfig(
+        translation_gain=2.0,
+        max_lin_vel=10.0,
+        max_ang_vel=10.0,
+        max_lin_acc=0.0,
+        workspace_min=(-2, -2, -2),
+        workspace_max=(2, 2, 2),
+        proximity_delta_gain=ProximityScaleConfig(
+            enabled=True, depth_outer_m=0.4, depth_inner_m=0.2, scale_min=0.05
+        ),
+    )
+    q0 = _identity_quat()
+    origin = np.array([0.3, 0.0, 1.0])
+    r = CartesianRetargeter(cfg)
+    r.capture_origins([0, 0, 0], q0, origin, q0)
+    pos, _, _, _ = r.step(
+        leader_pos=[0.05, 0, 0],
+        leader_quat=q0,
+        gripper_norm=0.0,
+        dt=0.02,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=origin,
+        current_dex_quat=q0,
+        proximity_depth_m=0.50,
+    )
+    # Depth collapses while leader holds — pose stays put.
+    pos2, _, _, info = r.step(
+        leader_pos=[0.05, 0, 0],
+        leader_quat=q0,
+        gripper_norm=0.0,
+        dt=0.02,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=pos,
+        current_dex_quat=q0,
+        proximity_depth_m=0.20,
+    )
+    assert info["delta_gain_scale"] == 0.05
+    np.testing.assert_allclose(pos2, pos, atol=1e-9)
+
+
+def test_fix_orientation_holds_dex_origin_quat():
+    """Leader wrist tilts must not change the commanded DexMate quat."""
+    from teleop import transforms as T
+
+    dex_quat = T.normalize_quat_wxyz(
+        T.rotvec_to_quat_wxyz(np.array([0.0, 0.3, 0.0]))
+    )
+    r = CartesianRetargeter(
+        RetargetConfig(
+            fix_orientation=True,
+            translation_gain=2.0,
+            max_lin_vel=10.0,
+            max_ang_vel=10.0,
+            max_lin_acc=0.0,
+        )
+    )
+    origin = np.array([0.3, 0.0, 0.2])
+    r.capture_origins([0, 0, 0], _identity_quat(), origin, dex_quat)
+
+    tilted = T.normalize_quat_wxyz(
+        T.rotvec_to_quat_wxyz(np.array([0.4, -0.2, 0.5]))
+    )
+    pos, quat, _, info = r.step(
+        leader_pos=[0.05, 0.0, 0.0],
+        leader_quat=tilted,
+        gripper_norm=0.5,
+        dt=0.05,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=origin,
+        current_dex_quat=dex_quat,
+    )
+    assert info["reason"] == "tracking"
+    np.testing.assert_allclose(pos, origin + np.array([0.10, 0.0, 0.0]), atol=1e-6)
+    np.testing.assert_allclose(quat, dex_quat, atol=1e-9)
+
+    # Still fixed after another large tilt + translation.
+    tilted2 = T.normalize_quat_wxyz(
+        T.rotvec_to_quat_wxyz(np.array([-0.8, 0.1, 0.2]))
+    )
+    pos2, quat2, _, _ = r.step(
+        leader_pos=[0.08, 0.02, 0.0],
+        leader_quat=tilted2,
+        gripper_norm=0.5,
+        dt=0.05,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=pos,
+        current_dex_quat=quat,
+    )
+    np.testing.assert_allclose(pos2, origin + np.array([0.16, 0.04, 0.0]), atol=1e-6)
+    np.testing.assert_allclose(quat2, dex_quat, atol=1e-9)
+
+
+def test_retarget_config_parses_fix_orientation():
+    cfg = RetargetConfig.from_dict({"fix_orientation": True, "rotation_gain": 0.5})
+    assert cfg.fix_orientation is True
+    assert cfg.rotation_gain == 0.5
+
