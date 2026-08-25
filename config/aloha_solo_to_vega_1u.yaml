@@ -52,6 +52,10 @@ retarget:
   # desired lock is a hardcoded world quat rather than engage-time pose.
   # Disable (full 6DoF wrist again): set null / false, or comment the key out.
   fixed_orientation_wxyz: [0.0, 1.0, 0.0, 0.0]
+  # Claw-machine free tilts (rad) around fixed_orientation_wxyz. Lula tries
+  # preferred then in-cone samples so XYZ is not blocked when exact top-down
+  # is IK-infeasible. 0 / null = hard lock. ~0.40 rad ≈ 23 deg.
+  orientation_cone_rad: 0.40
   # Stage/world coordinates. The task board and initial EE are near z=1 m;
   # the old z max of 0.70 clamped the initial target and caused IK lockout.
   workspace_min: [-0.50, -0.80, 0.50]

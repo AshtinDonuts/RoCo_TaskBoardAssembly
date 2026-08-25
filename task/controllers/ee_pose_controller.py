@@ -228,8 +228,13 @@ class EEPoseController(BaseController):
         target_position: np.ndarray,
         target_orientation: np.ndarray = None,
         gripper_cmd=None,
+        orientation_cone_rad: float = None,
     ) -> ArticulationAction:
-        ik_action = self._ik.forward(target_position, target_orientation)
+        ik_action = self._ik.forward(
+            target_position,
+            target_orientation,
+            orientation_cone_rad=orientation_cone_rad,
+        )
         if gripper_cmd is None:
             return ik_action
 

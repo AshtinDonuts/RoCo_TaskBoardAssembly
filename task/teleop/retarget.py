@@ -86,6 +86,11 @@ class RetargetConfig:
     # Takes precedence over fix_orientation for the commanded orientation;
     # _rate_limit slews toward it at max_ang_vel (no hard snap).
     fixed_orientation_wxyz: Optional[Tuple[float, float, float, float]] = None
+    # Claw-machine soft cone (rad) around fixed_orientation_wxyz / preferred
+    # quat. When > 0, Lula tries preferred then in-cone tilts so XYZ motion
+    # is not blocked when exact top-down is IK-infeasible. 0 / None = hard
+    # orientation lock (legacy reject-all behavior).
+    orientation_cone_rad: Optional[float] = None
     workspace_min: Tuple[float, float, float] = (-1.5, -1.5, 0.02)
     workspace_max: Tuple[float, float, float] = (1.5, 1.5, 1.5)
     max_lin_vel: float = 0.35
@@ -144,6 +149,12 @@ class RetargetConfig:
                         f"(got len={len(q)})"
                     )
                 kwargs["fixed_orientation_wxyz"] = q
+        if "orientation_cone_rad" in kwargs:
+            raw_c = kwargs["orientation_cone_rad"]
+            if raw_c is None or raw_c is False:
+                kwargs["orientation_cone_rad"] = None
+            else:
+                kwargs["orientation_cone_rad"] = float(raw_c)
         for key in ("proximity_rate_limit", "proximity_delta_gain"):
             if key in kwargs:
                 kwargs[key] = ProximityScaleConfig.from_dict(

@@ -213,31 +213,19 @@ arm stays held (no second keyboard stream).
 
 ## Calibration
 
-**Fixed right EE orientation:** Solo→Vega defaults to a **constant world
-top-down** quat via `retarget.fixed_orientation_wxyz: [0, 1, 0, 0]` (same
-wxyz as scripted left `PART_DEFAULTS["ee_orientation"]`). Teleop then tracks
-**XYZ + gripper only**; leader wrist tilts and keyboard rotate keys are
-ignored. Lula IK still receives the locked quat so joints compensate while
-translating. If the arm starts off top-down, retarget **slews** toward the
-lock at `max_ang_vel` (no hard snap). Dual-mode left clears
-`fixed_orientation_wxyz` so the left arm keeps full relative orientation.
-To turn the lock **off** (full 6DoF wrist again), set
-`fixed_orientation_wxyz: null` (or `false`) in the YAML, or remove the key.
+**Fixed right EE orientation:** Solo→Vega defaults to a **claw-machine**
+mode: preferred world top-down via `retarget.fixed_orientation_wxyz: [0, 1, 0, 0]`
+(same wxyz as scripted left `PART_DEFAULTS["ee_orientation"]`) plus
+`retarget.orientation_cone_rad: 0.40` (~23°). Teleop tracks **XYZ + gripper**;
+leader/keyboard wrist tilts are ignored. Lula tries the preferred quat first,
+then in-cone free tilts, so translation is **not** blocked when exact
+top-down is IK-infeasible. Dual-mode left clears both keys.
 
-**Why fixed orientation feels workspace-restricted:** retarget still commands
-the same XYZ span (`python3 -m teleop.diag_fix_orientation_sweep`). The
-shrink is Lula IK: many board EE poses have no solution at a frozen top-down
-quat, so teleop holds the last good joints (`ik_ok=False`). Compare modes with:
+- Harden to legacy hard lock: `orientation_cone_rad: 0` (or omit / null).
+- Full 6DoF wrist: `fixed_orientation_wxyz: null` (cone unused).
 
-```bash
-OMNI_KIT_ACCEPT_EULA=YES ISAACSIM_HEADLESS=1 \
-  .venv/bin/python task/find_reachable_r_arm_orn_compare.py \
-  --target-is-ee-pos --also-free --xy-res 12 --z-steps 5
-```
-
-On a representative board grid, fixed top-down / home-engage ≈ 65% reachable
-EE poses; allowing wrist tilts ≈ 90%+; `orn=None` ≈ 98%.
-
+If the arm starts off top-down, retarget still **slews** toward the preferred
+quat at `max_ang_vel`.
 Alternatively, `retarget.fix_orientation: true` (default **false** in the
 Solo→Vega YAML) holds the quaternion captured at clutch engage / reanchor
 instead of a hardcoded world quat. Prefer `fixed_orientation_wxyz` when the

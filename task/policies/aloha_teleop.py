@@ -155,19 +155,33 @@ class AlohaTeleopPolicy(Policy):
             left_raw = dict(raw.get("retarget") or {})
             left_raw["fix_orientation"] = False
             left_raw["fixed_orientation_wxyz"] = None
+            left_raw["orientation_cone_rad"] = None
             self._retarget_L = CartesianRetargeter(
                 RetargetConfig.from_dict(left_raw)
             )
         # Primary retarget used by recenter / reset operator cmds.
         self._retarget = self._retarget_R
         locked_q = retarget_cfg.fixed_orientation_wxyz
+        cone = retarget_cfg.orientation_cone_rad
+        self._orientation_cone_rad_R = (
+            float(cone) if cone is not None and float(cone) > 0.0 else None
+        )
         if locked_q is not None:
-            print(
-                "[aloha_teleop] right EE fixed_orientation_wxyz="
-                f"{list(locked_q)} (world top-down; "
-                "track XYZ + gripper only)",
-                flush=True,
-            )
+            if self._orientation_cone_rad_R is not None:
+                print(
+                    "[aloha_teleop] right EE claw-machine: "
+                    f"preferred_wxyz={list(locked_q)} "
+                    f"orientation_cone_rad={self._orientation_cone_rad_R:g} "
+                    "(XYZ+gripper; IK free-tilts in cone)",
+                    flush=True,
+                )
+            else:
+                print(
+                    "[aloha_teleop] right EE fixed_orientation_wxyz="
+                    f"{list(locked_q)} (world top-down hard lock; "
+                    "track XYZ + gripper only)",
+                    flush=True,
+                )
         self._prox_rate = retarget_cfg.proximity_rate_limit
         self._prox_delta = retarget_cfg.proximity_delta_gain
         self._last_prox_rate_scale = 1.0
@@ -523,6 +537,7 @@ class AlohaTeleopPolicy(Policy):
                     self._last_right_pos,
                     self._last_right_quat,
                     float(self._last_right_grip),
+                    orientation_cone_rad=self._orientation_cone_rad_R,
                 )
             )
             ik_R = getattr(self.R, "ik", None)
@@ -999,6 +1014,7 @@ class AlohaTeleopPolicy(Policy):
                         self._last_right_pos,
                         self._last_right_quat,
                         grip,
+                        orientation_cone_rad=self._orientation_cone_rad_R,
                     )
                 )
         return merge_joint_position_actions(*actions, n_dof=self._n_dof)

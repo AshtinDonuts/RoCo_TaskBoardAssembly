@@ -430,14 +430,14 @@ PART_CONFIG = {
     # key when you start testing that part. gripper_close stays 0;
     # soft GRIPPER_DRIVE_* gains provide grasp compliance.
     "rod_16mm": {
-        "place_pos":      np.array([ 0.16205,  0.16982, 1.057]),
+        "place_pos":      np.array([ 0.02976,  0.16982, 1.057]),
         "ee_offset":      np.array([0.0, 0.016, 0.21]),
         "release_mode":   "snap",
         "snap": {
             "movable_path":     "/World/parts/rod_16mm",
             "debug":            False,  # log snap gate pos/rot err each ~30 ticks
             "parent_body_path": "/World/task_board/task_board_color/root_001/_188_028",
-            "target_pos":       (0.16205, 0.16982, 1.057),    # = place_pos (mesh-frame)
+            "target_pos":       (0.02976, 0.16982, 1.057),    # = place_pos (mesh-frame)
             "target_rot":       (0.7071, 0.7071, 0.0, 0.0),  # wxyz, from extract 'final' orn
             "pos_tol_axes":     (0.0055, 0.0055, 0.005),        # WORLD frame
             "rot_tol_deg":      -1,                        # skip rot gate (axis-symmetric)
@@ -446,7 +446,7 @@ PART_CONFIG = {
             # Joint anchor = same as proximity target (= place_pos), per
             # user request. snap_attach converts mesh-frame target →
             # body-frame anchor internally via mesh_local_in_body.
-            "connect_pos":      (0.16205, 0.16982, 1.045),
+            "connect_pos":      (0.02976, 0.16982, 1.045),
             "connect_rot":      (0.7071, 0.7071, 0.0, 0.0),  # wxyz, from extract 'final' orn
             # connect_rot omitted → defaults to target_rot above.
             # Fine XY grid sweep at the place pose. dwell_steps=1 →
@@ -462,13 +462,13 @@ PART_CONFIG = {
         # pick_pos xy = actual mesh world pos from scene_init.usd (the part
         # prim spawns at JSON pos, but the mesh sits offset from the prim
         # origin); z = pick_z. Overrides the JSON-derived pick_pos.
-        "pick_pos":       np.array([ -0.05114,  0.15554, 1.047]),
+        "pick_pos":       np.array([ -0.18343,  0.15554, 1.047]),
         "gripper_open":  0.2,
-        "place_pos":      np.array([ 0.05024,  0.15639, 1.06423]),
+        "place_pos":      np.array([ -0.08205,  0.15639, 1.06423]),
         # grade_pos is the AABB MIDPOINT (world-axis-aligned bounds of
         # the mesh) extracted from scene_final.usd. Rotation about the
         # battery's long axis doesn't move this value (axis-symmetric).
-        "grade_pos":      np.array([+0.04438, +0.15615, +1.04601]),
+        "grade_pos":      np.array([-0.08791, +0.15615, +1.04601]),
         "grade_use_aabb": True,
         "ee_offset":      np.array([0, 0.015,0.185]),
         #"transit_steps":  12,
@@ -476,18 +476,18 @@ PART_CONFIG = {
     },
     "battery_size5": {
         # pick_pos xy = mesh world pos from scene_init.usd; z = pick_z.
-        "pick_pos":       np.array([-0.09547,  0.16490, 1.04]),
+        "pick_pos":       np.array([-0.22776,  0.16490, 1.04]),
         "gripper_open":  0.11,
-        "place_pos":      np.array([ 0.00553,  0.168, 1.06]),
+        "place_pos":      np.array([ -0.12676,  0.168, 1.06]),
         # AABB midpoint from scene_final.usd.
-        "grade_pos":      np.array([+0.00225, +0.16742, +1.03578]),
+        "grade_pos":      np.array([-0.13004, +0.16742, +1.03578]),
         "grade_use_aabb": True,
         "ee_offset":      np.array([-0.001, 0.015,0.1875]),
     },
     "bolt_8mm": {
         "gripper_open":   0.06,
-        "pick_pos":       np.array([ -0.04061, 0.00093, 1.039]),
-        "place_pos":      np.array([ 0.13055,  0.13135, 1.06]),
+        "pick_pos":       np.array([ -0.1729, 0.00093, 1.039]),
+        "place_pos":      np.array([ -0.00174,  0.13135, 1.06]),
         "ee_offset":      np.array([0.0, 0.0147, 0.2045]),
         "init_height":    0.05, 
         "final_height":   0.1,
@@ -497,13 +497,13 @@ PART_CONFIG = {
             "debug":            False,  # log snap gate pos/rot err each ~30 ticks
             # Shared rack slot _188_028 with rod_16mm.
             "parent_body_path": "/World/task_board/task_board_color/root_001/_188_028",
-            "target_pos":       (0.13055, 0.13135, 1.06),  # = place_pos (mesh-frame)
+            "target_pos":       (-0.00174, 0.13135, 1.06),  # = place_pos (mesh-frame)
             "target_rot":       (0.6892, 0.6892, 0.0, 0.0),   # wxyz
             "pos_tol_axes":     (0.002, 0.0115, 0.005),        # WORLD frame
             "rot_tol_deg":      -1,                      
             "set_kinematic":    False,
             "timeout_steps":    300,
-            "connect_pos":      (0.13055, 0.13135, 1.04),  # = place_pos
+            "connect_pos":      (-0.00174, 0.13135, 1.04),  # = place_pos
             # Force the joint to anchor at exactly target_rot. Without this,
             # _joint_anchor_matrix defaults to the mesh's CURRENT rotation
             # at snap-fire time — and with rot_tol_deg=10 that can be up to
@@ -522,11 +522,11 @@ PART_CONFIG = {
         "gripper_open":   0.12,
         # Lands in the gear_60teeth slot (gear_60teeth was deleted from
         # scene_base.usd; gear_20teeth substitutes for it).
-        "pick_pos":       np.array([0.05890, -0.043, 1.04]),
-        "place_pos":      np.array([ 0.1124714984643, -0.09598882384960386, 1.05798]),
+        "pick_pos":       np.array([-0.07339, -0.043, 1.04]),
+        "place_pos":      np.array([ -0.01981, -0.09598882384960386, 1.05798]),
         # Final settled pose for grading (gear sinks onto the rack post
         # after release; values measured from a known-good run).
-        "grade_pos":      np.array([ 0.1124714984643,
+        "grade_pos":      np.array([ -0.01981,
                                     -0.09598882384960386,
                                      1.033770322353139]),
         "ee_offset":      np.array([0.0, 0.016, 0.197]),
@@ -544,10 +544,10 @@ PART_CONFIG = {
     "gear_60teeth": {
         "gripper_open":   0.2,
         "ee_offset":      np.array([0.0, 0.016, 0.2]),
-        "place_pos":      np.array([ 0.12346, -0.05629, 1.05293]),
+        "place_pos":      np.array([ -0.00883, -0.05629, 1.05293]),
         # Final settled pose for grading (gear sinks onto the rack post
         # after release; values measured from a known-good run).
-        "grade_pos":      np.array([ 0.12377747092278,
+        "grade_pos":      np.array([ -0.00851,
                                     -0.056146127605838425,
                                      1.0315798358785877]),
         "init_height":    0.08,
@@ -556,20 +556,20 @@ PART_CONFIG = {
     },
     "hdmi": {
         # pick_pos xy = mesh world pos from scene_init.usd; z = pick_z.
-        "pick_pos":       np.array([ 0.18809, -0.01949, 1.03854]),
+        "pick_pos":       np.array([ 0.0558, -0.01949, 1.03854]),
         "gripper_open":   0.1,
-        "place_pos":      np.array([ 0.18993,  0.049, 1.055]),
+        "place_pos":      np.array([ 0.05764,  0.049, 1.055]),
         "release_mode":   "snap",
         "snap": {
             "movable_path":     "/World/parts/hdmi",
             "parent_body_path": "/World/task_board/task_board_color",
-            "target_pos":       (0.18993, 0.049, 1.055),   # = place_pos (mesh-frame)
+            "target_pos":       (0.05764, 0.049, 1.055),   # = place_pos (mesh-frame)
             "target_rot":       (0.5, 0.5, 0.5, 0.5),         # wxyz, from part_poses.json 'final'
             "pos_tol_axes":     (0.002, 0.002, 0.005),        # WORLD frame
             "rot_tol_deg":      10,
             "set_kinematic":    False,
             "timeout_steps":    300,
-            "connect_pos":      (0.18993, 0.049, 1.039),
+            "connect_pos":      (0.05764, 0.049, 1.039),
             # Force the joint to anchor at exactly target_rot. Without this,
             # _joint_anchor_matrix defaults to the mesh's CURRENT rotation
             # at snap-fire time — and with rot_tol_deg=10 that can be up to
@@ -584,8 +584,8 @@ PART_CONFIG = {
     },
     "pin": {
         # pick_pos xy = mesh world pos from scene_init.usd; z = pick_z.
-        "pick_pos":       np.array([ 0.10124, -0.01476, 1.04437]),
-        "place_pos":      np.array([ 0.16469,  0.00616, 1.065]),
+        "pick_pos":       np.array([ -0.03105, -0.01476, 1.04437]),
+        "place_pos":      np.array([ 0.0324,  0.00616, 1.065]),
         "ee_offset":      np.array([0.0, 0.017, 0.185]),
         # TODO(sync): the snap dict below is the dev-loop copy. Once these
         # values stabilize, mirror them into author_snap_targets.SNAP_CONFIGS
@@ -595,7 +595,7 @@ PART_CONFIG = {
         "snap": {
             "movable_path":     "/World/parts/pin",
             "parent_body_path": "/World/task_board/task_board_color/_188_001",
-            "target_pos":       (0.16469,  0.00616, 1.065),#(+0.066, +0.00616, +1.05000),
+            "target_pos":       (0.0324,  0.00616, 1.065),#(+0.066, +0.00616, +1.05000),
             "target_rot":       (+0.7071, +0.7071, +0.0000, +0.0000),  # wxyz
             "pos_tol_axes":     (0.002, 0.002, 0.01),  # WORLD frame
             "rot_tol_deg":      -1.0,                   # axis-symmetric, skip rot gate
@@ -607,7 +607,7 @@ PART_CONFIG = {
             # frame, consistent with target_pos. Value = pin mesh world pose
             # in scene_final.usd (extract_part_poses.py 'pos' field).
             # connect_rot omitted → defaults to target_rot.
-            "connect_pos":      (0.1646853614671,
+            "connect_pos":      (0.0324,
                                  0.006163426226573593,
                                  1.0567751179777043),
             # Fine XY grid sweep at the place pose: replace the single
@@ -624,20 +624,20 @@ PART_CONFIG = {
     },
     "usb_a": {
         # pick_pos xy = mesh world pos from scene_init.usd; z = pick_z.
-        "pick_pos":       np.array([ -0.05970, -0.07027, 1.04]),
-        "place_pos":      np.array([ 0.15292,  0.05143, 1.05]),
+        "pick_pos":       np.array([ -0.19199, -0.07027, 1.04]),
+        "place_pos":      np.array([ 0.02063,  0.05143, 1.05]),
         "init_height":    0.02,
         "release_mode":   "snap",
         "snap": {
             "movable_path":     "/World/parts/usb_a",
             "parent_body_path": "/World/task_board/task_board_color",
-            "target_pos":       (0.15292, 0.05143, 1.05),  # = place_pos
+            "target_pos":       (0.02063, 0.05143, 1.05),  # = place_pos
             "target_rot":       (-0.5, -0.5, 0.5, 0.5),       # wxyz, from part_poses.json 'final'
             "pos_tol_axes":     (0.003, 0.003, 0.005),        # WORLD frame
             "rot_tol_deg":      10,
             "set_kinematic":    False,
             "timeout_steps":    300,
-            "connect_pos":      (0.15292, 0.05143, 1.04),
+            "connect_pos":      (0.02063, 0.05143, 1.04),
             "connect_rot":      (-0.5, -0.5, 0.5, 0.5),  # = target_rot
             "search": {
                 "n":          5,
