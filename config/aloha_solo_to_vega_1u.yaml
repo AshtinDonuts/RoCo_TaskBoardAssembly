@@ -80,14 +80,29 @@ retarget:
     depth_inner_m: 0.18
     scale_min: 0.4
   gripper_open_limit: 0.6649704
-  # Full close (0 rad). Soft GRIPPER_DRIVE_* maxForce in param_config
-  # makes contact yield so assets are not crushed.
+  # Soft GRIPPER_DRIVE_* maxForce remains a safety net; when enabled,
+  # primary anti-eject is slow binary close + stall hold
+  # (controllers/gripper_compliance.py).
   gripper_close: 0.0
-  # Leader gripper_norm at/below which DexMate is fully closed (linear
-  # remap of [close_norm, 1] → [closed, open]). Raises early close so a
-  # slightly short physical travel still seals the virtual fingers.
+  # Master switch for the compliance module (slew + stall hold).
+  # false → legacy immediate aperture from map_gripper (linear remap).
+  gripper_compliance_enabled: true
+  # binary (default): leader norm → open/close intent, then slow slew + hold.
+  # continuous: linear aperture map, still through the same slew/hold.
+  # Ignored for mapping when gripper_compliance_enabled is false (linear).
+  gripper_mode: binary
+  # Leader gripper_norm at/below which DexMate close intent fires (binary)
+  # or full close (continuous). Absorbs short physical leader travel.
   gripper_close_norm: 0.20
   gripper_hysteresis: 0.03
+  # Slow close so stall detection has time to freeze aperture on contact.
+  gripper_close_speed_rad_s: 0.05
+  gripper_open_speed_rad_s: 0.25
+  gripper_stall_qd: 0.02
+  gripper_stall_err: 0.02
+  gripper_stall_dq: 0.005
+  gripper_stall_min_close_rad: 0.03
+  gripper_hold_margin: 0.01
   stale_hold_s: 0.10
   stale_pause_s: 0.50
 

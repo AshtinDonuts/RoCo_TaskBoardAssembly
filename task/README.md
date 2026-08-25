@@ -397,7 +397,12 @@ data-flow note above.)
 - Gripper tilts after grip? Friction/grip-force/collider — not
   generally an IK issue. Try `convexHull` only for purely convex
   parts, raise `dynamic_friction` on `/World/PhysicsMaterial`, or
-  raise/lower `GRIPPER_DRIVE_MAX_FORCE` (soft close is always 0 rad).
+  raise/lower `GRIPPER_DRIVE_MAX_FORCE`. Soft close uses binary
+  slow-close + stall hold (`controllers/gripper_compliance.py`) when
+  `gripper_compliance_enabled` / `GRIPPER_COMPLIANCE_ENABLED` is on;
+  set that false for legacy immediate close. Tune
+  `GRIPPER_CLOSE_SPEED_RAD_S` / `gripper_close_speed_rad_s` (slower
+  = more time to detect stall) and `GRIPPER_HOLD_MARGIN`.
 - Per-part hang? `PER_PART_TIMEOUT_STEPS` (default 3000) caps the per-
   part loop. The harness logs the timeout and advances; the part is
   graded on whatever state it ended in.

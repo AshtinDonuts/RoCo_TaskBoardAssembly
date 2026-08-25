@@ -246,14 +246,29 @@ try:
 except ValueError:
     R_WRIST_LASER_TIP_OFFSET_EE = (0.0, 0.0, 0.0)
 
-# Soft parallel-gripper drives. Commanded close aperture is 0 rad (full
-# close); these caps make the finger PD yield on contact so parts are not
-# crushed. Units: stiffness/damping are drive gains; max_force is Nm.
+# Soft parallel-gripper drives. Commanded close still targets a small
+# aperture; GRIPPER_DRIVE_* caps are a safety net. Primary anti-eject is
+# slow binary close + stall hold (see controllers/gripper_compliance.py).
+# Units: stiffness/damping are drive gains; max_force is Nm.
 # Tune via env if a grasp is too weak (raise max_force) or still crushing
 # (lower it).
 GRIPPER_DRIVE_STIFFNESS = float(os.getenv("TASK_GRIPPER_STIFFNESS", "800"))
 GRIPPER_DRIVE_DAMPING = float(os.getenv("TASK_GRIPPER_DAMPING", "80"))
 GRIPPER_DRIVE_MAX_FORCE = float(os.getenv("TASK_GRIPPER_MAX_FORCE", "3.0"))
+
+# Scripted / EEPoseController gripper compliance (mirrors retarget YAML).
+# Set TASK_GRIPPER_COMPLIANCE=0 to disable slew + stall hold globally.
+GRIPPER_COMPLIANCE_ENABLED = os.getenv("TASK_GRIPPER_COMPLIANCE", "1").lower() in {
+    "1", "true", "yes", "on",
+}
+GRIPPER_MODE = os.getenv("TASK_GRIPPER_MODE", "binary")
+GRIPPER_CLOSE_SPEED_RAD_S = float(os.getenv("TASK_GRIPPER_CLOSE_SPEED", "0.05"))
+GRIPPER_OPEN_SPEED_RAD_S = float(os.getenv("TASK_GRIPPER_OPEN_SPEED", "0.25"))
+GRIPPER_STALL_QD = float(os.getenv("TASK_GRIPPER_STALL_QD", "0.02"))
+GRIPPER_STALL_ERR = float(os.getenv("TASK_GRIPPER_STALL_ERR", "0.02"))
+GRIPPER_STALL_DQ = float(os.getenv("TASK_GRIPPER_STALL_DQ", "0.005"))
+GRIPPER_STALL_MIN_CLOSE_RAD = float(os.getenv("TASK_GRIPPER_STALL_MIN_CLOSE", "0.03"))
+GRIPPER_HOLD_MARGIN = float(os.getenv("TASK_GRIPPER_HOLD_MARGIN", "0.01"))
 
 # IK c-space size per arm. Three modes per side, picked by the
 # (OWNS_LIFT, OWNS_TORSO) pair:
@@ -366,8 +381,9 @@ else:
 # gripper_open    (rad): finger spread for "open" command at this part.
 #                 Smaller = tighter fit. ~0.15 sized for the rod_16mm.
 # gripper_close   (rad): commanded finger spread for "close". Keep at 0
-#                 (full close); soft gripper drives (GRIPPER_DRIVE_*)
-#                 provide compliance so contact yields instead of crushing.
+#                 (full close); slow binary close + stall hold
+#                 (controllers/gripper_compliance.py) freezes aperture on
+#                 contact; GRIPPER_DRIVE_* maxForce remains a safety net.
 # ---------------------------------------------------------------------------
 PART_DEFAULTS = {
     "ee_orientation": np.array([0.0, 1.0, 0.0, 0.0]),

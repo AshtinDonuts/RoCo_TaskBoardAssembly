@@ -22,6 +22,7 @@ import numpy as np
 from isaacsim.core.api.controllers.base_controller import BaseController
 from isaacsim.core.utils.types import ArticulationAction
 
+from .gripper_compliance import GripperCompliance, GripperComplianceConfig
 from .lula_ik_controller import LulaIKController
 
 
@@ -118,11 +119,15 @@ class EEPoseController(BaseController):
     joint"; the PD controller will hold its previous target.
 
     gripper_cmd:
-      - "open"  -> gripper joints commanded to opened positions.
-      - "close" -> gripper joints commanded to closed positions.
-      - float v -> primary gripper joint commanded to v (radians); the
-                   USD mimic constraint propagates to the secondary joint.
+      - "open"  -> slow-open intent (stall-hold cleared).
+      - "close" -> slow-close intent with stall hold-on-contact.
+      - float v -> slew toward aperture v (rad) with the same hold logic.
       - None    -> no gripper change (gripper joints left at None).
+
+    By default open/close/float go through GripperCompliance (primary DOF
+    only; USD mimic drives the secondary finger). Pass
+    ``apply_gripper_compliance=False`` when the caller already ran
+    compliance (e.g. teleop).
     """
 
     def __init__(
@@ -133,6 +138,8 @@ class EEPoseController(BaseController):
         owns_torso: bool = True,
         owns_lift: bool = True,
         base_translation_offset=None,
+        gripper_compliance_cfg: GripperComplianceConfig = None,
+        gripper_dt: float = 1.0 / 200.0,
     ) -> None:
         super().__init__(name=name)
         side = side.upper()
@@ -160,6 +167,39 @@ class EEPoseController(BaseController):
         self._gripper_dof_indices = [
             self._dof_index[j] for j in self._gripper_joint_names if j in self._dof_index
         ]
+        self._gripper_primary_idx = (
+            self._gripper_dof_indices[0] if self._gripper_dof_indices else None
+        )
+        self._gripper_dt = float(gripper_dt)
+        cfg = gripper_compliance_cfg
+        if cfg is None:
+            try:
+                import param_config as pc
+
+                cfg = GripperComplianceConfig(
+                    enabled=bool(
+                        getattr(pc, "GRIPPER_COMPLIANCE_ENABLED", True)
+                    ),
+                    mode=str(getattr(pc, "GRIPPER_MODE", "binary")),
+                    open_limit=0.6649704,
+                    close=0.0,
+                    close_speed_rad_s=float(
+                        getattr(pc, "GRIPPER_CLOSE_SPEED_RAD_S", 0.05)
+                    ),
+                    open_speed_rad_s=float(
+                        getattr(pc, "GRIPPER_OPEN_SPEED_RAD_S", 0.25)
+                    ),
+                    stall_qd=float(getattr(pc, "GRIPPER_STALL_QD", 0.02)),
+                    stall_err=float(getattr(pc, "GRIPPER_STALL_ERR", 0.02)),
+                    stall_dq=float(getattr(pc, "GRIPPER_STALL_DQ", 0.005)),
+                    stall_min_close_rad=float(
+                        getattr(pc, "GRIPPER_STALL_MIN_CLOSE_RAD", 0.03)
+                    ),
+                    hold_margin=float(getattr(pc, "GRIPPER_HOLD_MARGIN", 0.01)),
+                )
+            except Exception:
+                cfg = GripperComplianceConfig()
+        self.gripper_compliance = GripperCompliance(cfg)
 
     # ----- accessors for diagnostics -----
     @property
@@ -169,6 +209,89 @@ class EEPoseController(BaseController):
     @property
     def end_effector(self):
         return self._robot.end_effector
+
+    def _measured_gripper(self) -> tuple:
+        """Return (q_meas, qd_meas) for the primary gripper DOF."""
+        idx = self._gripper_primary_idx
+        if idx is None:
+            return 0.0, 0.0
+        q = np.asarray(self._robot.get_joint_positions(), dtype=np.float64)
+        qd = np.asarray(self._robot.get_joint_velocities(), dtype=np.float64)
+        return float(q[idx]), float(qd[idx])
+
+    def resolve_gripper_cmd(
+        self,
+        gripper_cmd,
+        *,
+        dt: float = None,
+        apply_gripper_compliance: bool = True,
+        q_meas: float = None,
+        qd_meas: float = None,
+    ) -> Optional[float]:
+        """Map open/close/float through compliance; return primary aperture.
+
+        Returns None when ``gripper_cmd`` is None.
+        """
+        if gripper_cmd is None:
+            return None
+        # Per-call bypass, or master switch off in YAML/param_config.
+        compliance_on = bool(
+            apply_gripper_compliance
+            and getattr(self.gripper_compliance, "enabled", True)
+        )
+        if not compliance_on:
+            if isinstance(gripper_cmd, str):
+                cmd = gripper_cmd.lower()
+                if cmd == "open":
+                    return float(self.gripper_compliance.cfg.open_limit)
+                if cmd == "close":
+                    return float(self.gripper_compliance.cfg.close)
+                raise ValueError(
+                    f"gripper_cmd string must be 'open' or 'close'; got {gripper_cmd!r}"
+                )
+            return float(gripper_cmd)
+
+        if q_meas is None or qd_meas is None:
+            mq, mqd = self._measured_gripper()
+            if q_meas is None:
+                q_meas = mq
+            if qd_meas is None:
+                qd_meas = mqd
+        step_dt = float(self._gripper_dt if dt is None else dt)
+
+        if isinstance(gripper_cmd, str):
+            cmd = gripper_cmd.lower()
+            if cmd not in ("open", "close"):
+                raise ValueError(
+                    f"gripper_cmd string must be 'open' or 'close'; got {gripper_cmd!r}"
+                )
+            return float(
+                self.gripper_compliance.update(
+                    q_meas=float(q_meas),
+                    qd_meas=float(qd_meas),
+                    dt=step_dt,
+                    intent=cmd,
+                )
+            )
+        try:
+            target = float(gripper_cmd)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"gripper_cmd must be 'open', 'close', float, or None; got {gripper_cmd!r}"
+            )
+        return float(
+            self.gripper_compliance.update(
+                q_meas=float(q_meas),
+                qd_meas=float(qd_meas),
+                dt=step_dt,
+                target_rad=target,
+            )
+        )
+
+    def _write_primary_gripper(self, positions: list, aperture: float) -> None:
+        idx = self._gripper_primary_idx
+        if idx is not None:
+            positions[idx] = float(aperture)
 
     # ----- joint-lerp helpers (used by EEPathFollower transit segments) -----
     def current_cspace_q(self) -> np.ndarray:
@@ -183,7 +306,16 @@ class EEPoseController(BaseController):
         """One-shot IK probe; returns (q, success) without mutating IK state."""
         return self._ik.solve(target_position, target_orientation, seed)
 
-    def forward_raw_q(self, q_cspace, gripper_cmd=None) -> ArticulationAction:
+    def forward_raw_q(
+        self,
+        q_cspace,
+        gripper_cmd=None,
+        *,
+        apply_gripper_compliance: bool = True,
+        gripper_dt: float = None,
+        q_meas: float = None,
+        qd_meas: float = None,
+    ) -> ArticulationAction:
         """Emit an ArticulationAction from raw c-space joint values, bypassing
         IK entirely. Used for joint-space-interpolated transit waypoints
         where running IK at each midpoint would let the solver pick
@@ -193,33 +325,15 @@ class EEPoseController(BaseController):
         for jname, val in zip(self._ik.cspace_joint_names, q_cspace.tolist()):
             full[self._dof_index[jname]] = float(val)
 
-        if gripper_cmd is None:
-            return ArticulationAction(joint_positions=full)
-
-        if isinstance(gripper_cmd, str):
-            cmd = gripper_cmd.lower()
-            if cmd == "open":
-                gripper_action = self._gripper.forward(action="open")
-            elif cmd == "close":
-                gripper_action = self._gripper.forward(action="close")
-            else:
-                raise ValueError(
-                    f"gripper_cmd string must be 'open' or 'close'; got {gripper_cmd!r}"
-                )
-            gp = list(gripper_action.joint_positions or [])
-            n = min(len(gp), self._n_dof)
-            for i in range(n):
-                if gp[i] is not None:
-                    full[i] = float(gp[i])
-        else:
-            try:
-                val = float(gripper_cmd)
-            except (TypeError, ValueError):
-                raise ValueError(
-                    f"gripper_cmd must be 'open', 'close', float, or None; got {gripper_cmd!r}"
-                )
-            for idx in self._gripper_dof_indices:
-                full[idx] = val
+        aperture = self.resolve_gripper_cmd(
+            gripper_cmd,
+            dt=gripper_dt,
+            apply_gripper_compliance=apply_gripper_compliance,
+            q_meas=q_meas,
+            qd_meas=qd_meas,
+        )
+        if aperture is not None:
+            self._write_primary_gripper(full, aperture)
         return ArticulationAction(joint_positions=full)
 
     # ----- forward -----
@@ -229,6 +343,11 @@ class EEPoseController(BaseController):
         target_orientation: np.ndarray = None,
         gripper_cmd=None,
         orientation_cone_rad: float = None,
+        *,
+        apply_gripper_compliance: bool = True,
+        gripper_dt: float = None,
+        q_meas: float = None,
+        qd_meas: float = None,
     ) -> ArticulationAction:
         ik_action = self._ik.forward(
             target_position,
@@ -238,41 +357,26 @@ class EEPoseController(BaseController):
         if gripper_cmd is None:
             return ik_action
 
-        # Build/merge gripper joint commands on top of IK joints.
         ik_positions = list(ik_action.joint_positions or [None] * self._n_dof)
-
-        if isinstance(gripper_cmd, str):
-            cmd = gripper_cmd.lower()
-            if cmd == "open":
-                gripper_action = self._gripper.forward(action="open")
-            elif cmd == "close":
-                gripper_action = self._gripper.forward(action="close")
-            else:
-                raise ValueError(
-                    f"gripper_cmd string must be 'open' or 'close'; got {gripper_cmd!r}"
-                )
-            gp = list(gripper_action.joint_positions or [])
-            # Gripper actions from ParallelGripper are typically aligned to the
-            # full articulation DOF order; merge non-None entries onto IK.
-            n = min(len(gp), self._n_dof)
-            for i in range(n):
-                if gp[i] is not None:
-                    ik_positions[i] = float(gp[i])
-        else:
-            try:
-                val = float(gripper_cmd)
-            except (TypeError, ValueError):
-                raise ValueError(
-                    f"gripper_cmd must be 'open', 'close', float, or None; got {gripper_cmd!r}"
-                )
-            for idx in self._gripper_dof_indices:
-                ik_positions[idx] = val
-
+        aperture = self.resolve_gripper_cmd(
+            gripper_cmd,
+            dt=gripper_dt,
+            apply_gripper_compliance=apply_gripper_compliance,
+            q_meas=q_meas,
+            qd_meas=qd_meas,
+        )
+        if aperture is not None:
+            self._write_primary_gripper(ik_positions, aperture)
         return ArticulationAction(joint_positions=ik_positions)
 
     def reset(self) -> None:
         super().reset()
         self._ik.reset()
+        try:
+            q_meas, _ = self._measured_gripper()
+            self.gripper_compliance.reset(q_meas)
+        except Exception:
+            self.gripper_compliance.reset()
 
 
 class EEPathFollower:

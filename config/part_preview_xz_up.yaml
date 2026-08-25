@@ -1,0 +1,35 @@
+# Change this value to load a different part from `assets` below.
+selected_asset: gear_20teeth
+
+assets:
+  gear_20teeth: parts/gear_20teeth.usdc
+  gear_60teeth: parts/gear_60teeth.usdc
+  rod_16mm: parts/rod_16mm.usdc
+  bolt_8mm: parts/bolt_8mm.usdc
+  usb_a: parts/usb_a.usdc
+  hdmi: parts/hdmi.usdc
+  pin: parts/pin.usdc
+  battery_size1: parts/battery_size1.usdc
+  battery_size5: parts/battery_size5.usdc
+
+# XZ-up means the local XZ plane is horizontal. Its normal, local +Y, is
+# rotated onto world +Z by rotating +90 degrees about X.
+orientation:
+  rotate_x_deg: 90.0
+  rotate_y_deg: 0.0
+  rotate_z_deg: 0.0
+
+ground:
+  z_position: 0.0
+  clearance: 0.001
+
+camera:
+  eye: [0.12, 0.12, 0.10]
+  target_xy: [0.0, 0.0]
+  target_height_above_part_origin: 0.01
+
+render:
+  renderer: RaytracedLighting
+  light_intensity: 3000.0
+
+output_usd: scene_part_xz_up.usd

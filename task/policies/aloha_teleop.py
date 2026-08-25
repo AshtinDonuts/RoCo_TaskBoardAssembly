@@ -38,6 +38,7 @@ from teleop.protocol import parse_endpoint  # noqa: E402
 from teleop.recorder_client import RecorderClient  # noqa: E402
 from teleop.retarget import CartesianRetargeter, RetargetConfig  # noqa: E402
 from teleop.export_config import load_export_config  # noqa: E402
+from controllers.gripper_compliance import GripperComplianceConfig  # noqa: E402
 from teleop.schema import (  # noqa: E402
     encode_jpeg,
     gripper_ratio,
@@ -203,6 +204,27 @@ class AlohaTeleopPolicy(Policy):
                 f"inner={self._prox_delta.depth_inner_m:g} m → "
                 f"scale={self._prox_delta.scale_min:g} "
                 "(R-wrist laser → per-frame retarget deltas; no catch-up)",
+                flush=True,
+            )
+        grip_cfg = GripperComplianceConfig.from_retarget_cfg(retarget_cfg)
+        for ctrl, label in ((self.R, "R"), (self.L, "L")):
+            if ctrl is None or not hasattr(ctrl, "gripper_compliance"):
+                continue
+            ctrl.gripper_compliance.cfg = grip_cfg
+            ctrl._gripper_dt = self._dt
+        if grip_cfg.enabled:
+            print(
+                "[aloha_teleop] gripper compliance: ON "
+                f"mode={grip_cfg.mode} "
+                f"close_speed={grip_cfg.close_speed_rad_s:g} rad/s "
+                f"open_speed={grip_cfg.open_speed_rad_s:g} rad/s "
+                f"hold_margin={grip_cfg.hold_margin:g}",
+                flush=True,
+            )
+        else:
+            print(
+                "[aloha_teleop] gripper compliance: OFF "
+                "(gripper_compliance_enabled=false; immediate aperture)",
                 flush=True,
             )
         if retarget_cfg.axes_map is not None:
@@ -403,6 +425,14 @@ class AlohaTeleopPolicy(Policy):
         self._last_right_pos = right_pos
         self._last_right_quat = right_quat
         self._last_right_grip = float(getattr(obs, "R_gripper_position", 0.0) or 0.0)
+        if self._Rg is not None:
+            self._last_right_grip = float(obs.joint_positions[self._Rg])
+        for ctrl, q0 in (
+            (self.L, self._last_left_grip),
+            (self.R, self._last_right_grip),
+        ):
+            if ctrl is not None and hasattr(ctrl, "gripper_compliance"):
+                ctrl.gripper_compliance.reset(float(q0))
         self._home_left_pos = np.asarray(left_pos, dtype=np.float64).copy()
         self._home_left_quat = T.normalize_quat_wxyz(left_quat)
         self._home_left_grip = float(self._last_left_grip)
@@ -482,6 +512,7 @@ class AlohaTeleopPolicy(Policy):
             current_quat=right_quat,
             wall_dt=wall_dt,
             drive=drive_R,
+            obs=obs,
         )
         reason_L = "held"
         age_L = 0.0
@@ -494,6 +525,7 @@ class AlohaTeleopPolicy(Policy):
                 current_quat=left_quat,
                 wall_dt=wall_dt,
                 drive=True,
+                obs=obs,
             )
         elif self._last_left_pos is None:
             self._last_left_pos = np.asarray(left_pos, dtype=np.float64)
@@ -523,6 +555,7 @@ class AlohaTeleopPolicy(Policy):
                     self._last_left_pos,
                     self._last_left_quat,
                     float(self._last_left_grip),
+                    apply_gripper_compliance=False,
                 )
             )
             ik_L = getattr(self.L, "ik", None)
@@ -538,6 +571,7 @@ class AlohaTeleopPolicy(Policy):
                     self._last_right_quat,
                     float(self._last_right_grip),
                     orientation_cone_rad=self._orientation_cone_rad_R,
+                    apply_gripper_compliance=False,
                 )
             )
             ik_R = getattr(self.R, "ik", None)
@@ -588,6 +622,7 @@ class AlohaTeleopPolicy(Policy):
         current_quat,
         wall_dt: float,
         drive: bool,
+        obs: Observation,
     ) -> Tuple[str, float]:
         """Update last_* targets for one arm. Returns (reason, age_s)."""
         is_right = side == "R"
@@ -595,10 +630,14 @@ class AlohaTeleopPolicy(Policy):
             last_pos = self._last_right_pos
             last_quat = self._last_right_quat
             last_grip = self._last_right_grip
+            ctrl = self.R
+            g_idx = self._Rg
         else:
             last_pos = self._last_left_pos
             last_quat = self._last_left_quat
             last_grip = self._last_left_grip
+            ctrl = self.L
+            g_idx = self._Lg
 
         hold, reason = self._global_hold()
         age = 0.0
@@ -636,7 +675,7 @@ class AlohaTeleopPolicy(Policy):
             dex_pos = last_pos if last_pos is not None else current_pos
             dex_quat = last_quat if last_quat is not None else current_quat
             prox_depth = self._laser_range_m() if is_right else None
-            pos, quat, grip, info = retarget.step(
+            pos, quat, _grip_hint, info = retarget.step(
                 leader_pos=sample["ee_pos"],
                 leader_quat=sample["ee_quat_wxyz"],
                 gripper_norm=sample["gripper_norm"],
@@ -647,6 +686,24 @@ class AlohaTeleopPolicy(Policy):
                 current_dex_quat=dex_quat,
                 proximity_depth_m=prox_depth,
             )
+            if g_idx is None:
+                grip = float(_grip_hint)
+            else:
+                compliance = getattr(ctrl, "gripper_compliance", None)
+                if compliance is None or not getattr(compliance, "enabled", True):
+                    # Module off: use retarget map_gripper aperture directly.
+                    grip = float(_grip_hint)
+                else:
+                    q_meas = float(obs.joint_positions[g_idx])
+                    qd_meas = float(obs.joint_velocities[g_idx])
+                    grip = float(
+                        compliance.update(
+                            q_meas=q_meas,
+                            qd_meas=qd_meas,
+                            dt=float(self._dt),
+                            gripper_norm=float(sample["gripper_norm"]),
+                        )
+                    )
             if is_right:
                 self._last_prox_rate_scale = float(
                     info.get("rate_limit_scale", 1.0)
@@ -989,13 +1046,18 @@ class AlohaTeleopPolicy(Policy):
                 else 0.0
             )
             if q is not None and hasattr(self.L, "forward_raw_q"):
-                actions.append(self.L.forward_raw_q(q, grip))
+                actions.append(
+                    self.L.forward_raw_q(
+                        q, grip, apply_gripper_compliance=False
+                    )
+                )
             else:
                 actions.append(
                     self.L.forward(
                         self._last_left_pos,
                         self._last_left_quat,
                         grip,
+                        apply_gripper_compliance=False,
                     )
                 )
         if "R" in self.active_arms and self.R is not None:
@@ -1007,7 +1069,11 @@ class AlohaTeleopPolicy(Policy):
                 else 0.0
             )
             if q is not None and hasattr(self.R, "forward_raw_q"):
-                actions.append(self.R.forward_raw_q(q, grip))
+                actions.append(
+                    self.R.forward_raw_q(
+                        q, grip, apply_gripper_compliance=False
+                    )
+                )
             else:
                 actions.append(
                     self.R.forward(
@@ -1015,6 +1081,7 @@ class AlohaTeleopPolicy(Policy):
                         self._last_right_quat,
                         grip,
                         orientation_cone_rad=self._orientation_cone_rad_R,
+                        apply_gripper_compliance=False,
                     )
                 )
         return merge_joint_position_actions(*actions, n_dof=self._n_dof)

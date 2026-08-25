@@ -243,7 +243,14 @@ def test_deadman_holds():
 
 
 def test_gripper_hysteresis():
-    r = CartesianRetargeter(RetargetConfig(gripper_hysteresis=0.2, gripper_open_limit=1.0, gripper_close_norm=0.0))
+    r = CartesianRetargeter(
+        RetargetConfig(
+            gripper_mode="continuous",
+            gripper_hysteresis=0.2,
+            gripper_open_limit=1.0,
+            gripper_close_norm=0.0,
+        )
+    )
     a = r.map_gripper(0.0)
     b = r.map_gripper(0.05)
     c = r.map_gripper(0.5)
@@ -255,6 +262,7 @@ def test_gripper_close_norm_early_full_close():
     """Almost-closed leader (below close_norm) must fully close DexMate."""
     r = CartesianRetargeter(
         RetargetConfig(
+            gripper_mode="continuous",
             gripper_close=0.0,
             gripper_open_limit=1.0,
             gripper_close_norm=0.20,
@@ -267,6 +275,36 @@ def test_gripper_close_norm_early_full_close():
     mid = r.map_gripper(0.60)
     np.testing.assert_allclose(mid, 0.5, atol=1e-9)
     np.testing.assert_allclose(r.map_gripper(1.0), 1.0, atol=1e-9)
+
+
+def test_gripper_binary_map_endpoints():
+    r = CartesianRetargeter(
+        RetargetConfig(
+            gripper_compliance_enabled=True,
+            gripper_mode="binary",
+            gripper_close=0.0,
+            gripper_open_limit=1.0,
+            gripper_close_norm=0.20,
+            gripper_hysteresis=0.05,
+        )
+    )
+    assert r.map_gripper(0.10) == 0.0
+    assert r.map_gripper(0.50) == 1.0
+
+
+def test_gripper_compliance_disabled_uses_linear_map():
+    r = CartesianRetargeter(
+        RetargetConfig(
+            gripper_compliance_enabled=False,
+            gripper_mode="binary",  # ignored for mapping when disabled
+            gripper_close=0.0,
+            gripper_open_limit=1.0,
+            gripper_close_norm=0.20,
+            gripper_hysteresis=0.0,
+        )
+    )
+    mid = r.map_gripper(0.60)
+    np.testing.assert_allclose(mid, 0.5, atol=1e-9)
 
 
 def test_accel_limit_does_not_overshoot_stopped_target():

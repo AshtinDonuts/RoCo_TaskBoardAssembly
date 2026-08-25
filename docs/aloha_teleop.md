@@ -206,6 +206,17 @@ After Isaac opens, click the viewport, wait for warmup, then hold:
 | f | gripper close |
 | v | gripper open |
 
+**Gripper compliance (default ON):** set `retarget.gripper_compliance_enabled`
+to `false` to disable the whole module (immediate linear aperture, no slew /
+stall hold). When enabled, `retarget.gripper_mode: binary` treats the
+leader/keyboard gripper as open vs close. Fingers **slow-close** at
+`gripper_close_speed_rad_s` (default `0.05` rad/s ≈ 13 s full stroke) and
+**hold** the measured aperture when they stall on contact, so rigid parts
+are not over-squeezed. Open uses `gripper_open_speed_rad_s` (default `0.25`).
+Set `gripper_mode: continuous` for proportional aperture (still slew + hold).
+Tune stall thresholds via `gripper_stall_*` / `gripper_hold_margin` in
+[`config/aloha_solo_to_vega_1u.yaml`](../config/aloha_solo_to_vega_1u.yaml).
+
 You should see `[aloha_teleop] kbd move held=...` in the Isaac log when keys
 register. Task/recording keys are unchanged (`n`, `x`, arrows, Esc).
 Keyboard always drives the **right** arm; with `control.arms: "dual"` the left

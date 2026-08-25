@@ -98,10 +98,23 @@ class RetargetConfig:
     max_lin_acc: float = 2.0
     gripper_open_limit: float = 0.6649704
     gripper_close: float = 0.0
-    # Leader gripper_norm at/below which DexMate is fully closed. Absorbs
-    # leader calibration slack so "almost closed" maps to aperture 0.
+    # Master switch for slow-close + stall hold (controllers/gripper_compliance).
+    # false → legacy immediate aperture commands (no slew / hold).
+    gripper_compliance_enabled: bool = True
+    # binary (default): leader norm → open/close intent; continuous: linear map.
+    gripper_mode: str = "binary"
+    # Leader gripper_norm at/below which DexMate is fully closed (continuous)
+    # or close intent (binary). Absorbs leader calibration slack.
     gripper_close_norm: float = 0.20
     gripper_hysteresis: float = 0.03
+    # Slow-close + stall hold (see controllers/gripper_compliance.py).
+    gripper_close_speed_rad_s: float = 0.05
+    gripper_open_speed_rad_s: float = 0.25
+    gripper_stall_qd: float = 0.02
+    gripper_stall_err: float = 0.02
+    gripper_stall_dq: float = 0.005
+    gripper_stall_min_close_rad: float = 0.03
+    gripper_hold_margin: float = 0.01
     stale_hold_s: float = 0.10
     stale_pause_s: float = 0.50
     # Throttle max_lin/ang_vel (+ accel); absolute map unchanged → catch-up.
@@ -155,6 +168,19 @@ class RetargetConfig:
                 kwargs["orientation_cone_rad"] = None
             else:
                 kwargs["orientation_cone_rad"] = float(raw_c)
+        if "gripper_mode" in kwargs:
+            kwargs["gripper_mode"] = str(kwargs["gripper_mode"]).lower()
+        if "gripper_compliance_enabled" in kwargs:
+            raw_e = kwargs["gripper_compliance_enabled"]
+            if isinstance(raw_e, bool):
+                kwargs["gripper_compliance_enabled"] = raw_e
+            elif isinstance(raw_e, (int, float)):
+                kwargs["gripper_compliance_enabled"] = bool(raw_e)
+            else:
+                s = str(raw_e).strip().lower()
+                kwargs["gripper_compliance_enabled"] = s in (
+                    "1", "true", "yes", "on",
+                )
         for key in ("proximity_rate_limit", "proximity_delta_gain"):
             if key in kwargs:
                 kwargs[key] = ProximityScaleConfig.from_dict(
@@ -234,11 +260,34 @@ class CartesianRetargeter:
 
     def map_gripper(self, gripper_norm: float) -> float:
         cfg = self.cfg
+        # When compliance module is off, always use legacy linear remap
+        # (immediate aperture; no binary endpoint + slew/hold path).
+        compliance_on = bool(getattr(cfg, "gripper_compliance_enabled", True))
+        mode = str(getattr(cfg, "gripper_mode", "binary")).lower()
         g = float(np.clip(gripper_norm, 0.0, 1.0))
+        close_at = float(np.clip(cfg.gripper_close_norm, 0.0, 0.95))
+        if compliance_on and mode == "binary":
+            # Intent → endpoint only; slew/hold runs in GripperCompliance.
+            open_at = float(
+                np.clip(close_at + max(0.0, cfg.gripper_hysteresis), 0.0, 1.0)
+            )
+            prev = self.state.last_gripper
+            prev_close = abs(prev - cfg.gripper_close) <= abs(
+                prev - cfg.gripper_open_limit
+            )
+            if g <= close_at:
+                intent_close = True
+            elif g >= open_at:
+                intent_close = False
+            else:
+                intent_close = prev_close
+            target = cfg.gripper_close if intent_close else cfg.gripper_open_limit
+            self.state.last_gripper = target
+            return target
+
         # Linear remap: leader [close_norm, 1] → DexMate [closed, open].
         # Anything at/below close_norm is treated as fully closed so a
         # slightly short physical travel still seals the virtual fingers.
-        close_at = float(np.clip(cfg.gripper_close_norm, 0.0, 0.95))
         if g <= close_at:
             g_eff = 0.0
         else:
