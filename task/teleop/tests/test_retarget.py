@@ -666,3 +666,207 @@ def test_retarget_config_parses_fix_orientation():
     assert cfg.fix_orientation is True
     assert cfg.rotation_gain == 0.5
 
+
+def test_retarget_config_parses_fixed_orientation_wxyz():
+    cfg = RetargetConfig.from_dict(
+        {"fixed_orientation_wxyz": [0.0, 1.0, 0.0, 0.0], "fix_orientation": False}
+    )
+    assert cfg.fixed_orientation_wxyz == (0.0, 1.0, 0.0, 0.0)
+    assert cfg.fix_orientation is False
+    cfg_none = RetargetConfig.from_dict({"fixed_orientation_wxyz": None})
+    assert cfg_none.fixed_orientation_wxyz is None
+    cfg_false = RetargetConfig.from_dict({"fixed_orientation_wxyz": False})
+    assert cfg_false.fixed_orientation_wxyz is None
+    cfg_empty = RetargetConfig.from_dict({"fixed_orientation_wxyz": []})
+    assert cfg_empty.fixed_orientation_wxyz is None
+
+
+def test_fixed_orientation_wxyz_ignores_leader_wrist_relative():
+    """Constant world quat; XYZ still tracks under relative (non-delta) map."""
+    from teleop import transforms as T
+
+    top_down = (0.0, 1.0, 0.0, 0.0)
+    start_quat = T.normalize_quat_wxyz(
+        T.rotvec_to_quat_wxyz(np.array([0.0, 0.4, 0.0]))
+    )
+    r = CartesianRetargeter(
+        RetargetConfig(
+            fixed_orientation_wxyz=top_down,
+            translation_gain=2.0,
+            max_lin_vel=10.0,
+            # Large enough that one step reaches top-down from start_quat.
+            max_ang_vel=10.0,
+            max_lin_acc=0.0,
+        )
+    )
+    origin = np.array([0.3, 0.0, 0.2])
+    r.capture_origins([0, 0, 0], _identity_quat(), origin, start_quat)
+
+    # Slew onto the lock before asserting tilt-ignore (angle to top-down ≫
+    # one frame at max_ang_vel=10).
+    pos, quat = origin, start_quat
+    for _ in range(80):
+        pos, quat, _, _ = r.step(
+            leader_pos=[0.0, 0.0, 0.0],
+            leader_quat=_identity_quat(),
+            gripper_norm=0.5,
+            dt=0.05,
+            clutch=True,
+            deadman=True,
+            current_dex_pos=pos,
+            current_dex_quat=quat,
+        )
+    np.testing.assert_allclose(quat, top_down, atol=1e-6)
+    np.testing.assert_allclose(pos, origin, atol=1e-6)
+
+    tilted = T.normalize_quat_wxyz(
+        T.rotvec_to_quat_wxyz(np.array([0.4, -0.2, 0.5]))
+    )
+    pos, quat, _, info = r.step(
+        leader_pos=[0.05, 0.0, 0.0],
+        leader_quat=tilted,
+        gripper_norm=0.5,
+        dt=0.05,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=pos,
+        current_dex_quat=quat,
+    )
+    assert info["reason"] == "tracking"
+    np.testing.assert_allclose(pos, origin + np.array([0.10, 0.0, 0.0]), atol=1e-6)
+    np.testing.assert_allclose(quat, top_down, atol=1e-9)
+
+    tilted2 = T.normalize_quat_wxyz(
+        T.rotvec_to_quat_wxyz(np.array([-0.8, 0.1, 0.2]))
+    )
+    pos2, quat2, _, _ = r.step(
+        leader_pos=[0.08, 0.02, 0.0],
+        leader_quat=tilted2,
+        gripper_norm=0.5,
+        dt=0.05,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=pos,
+        current_dex_quat=quat,
+    )
+    np.testing.assert_allclose(pos2, origin + np.array([0.16, 0.04, 0.0]), atol=1e-6)
+    np.testing.assert_allclose(quat2, top_down, atol=1e-9)
+
+
+def test_fixed_orientation_wxyz_ignores_leader_wrist_incremental():
+    """Constant world quat under proximity_delta_gain incremental path."""
+    from teleop import transforms as T
+    from teleop.retarget import ProximityScaleConfig
+
+    top_down = (0.0, 1.0, 0.0, 0.0)
+    start_quat = _identity_quat()
+    r = CartesianRetargeter(
+        RetargetConfig(
+            fixed_orientation_wxyz=top_down,
+            translation_gain=1.0,
+            max_lin_vel=10.0,
+            max_ang_vel=10.0,
+            max_lin_acc=0.0,
+            workspace_min=(-1.5, -1.5, -1.5),
+            proximity_delta_gain=ProximityScaleConfig(
+                enabled=True,
+                depth_outer_m=0.40,
+                depth_inner_m=0.20,
+                scale_min=1.0,
+            ),
+        )
+    )
+    origin = np.array([0.0, 0.0, 0.0])
+    r.capture_origins([0, 0, 0], _identity_quat(), origin, start_quat)
+
+    # Reach the lock first (identity → top-down needs several rate-limited steps).
+    pos, quat = origin, start_quat
+    for _ in range(80):
+        pos, quat, _, _ = r.step(
+            leader_pos=[0.0, 0.0, 0.0],
+            leader_quat=_identity_quat(),
+            gripper_norm=0.0,
+            dt=0.05,
+            clutch=True,
+            deadman=True,
+            current_dex_pos=pos,
+            current_dex_quat=quat,
+            proximity_depth_m=0.50,
+        )
+    np.testing.assert_allclose(quat, top_down, atol=1e-6)
+
+    tilted = T.normalize_quat_wxyz(
+        T.rotvec_to_quat_wxyz(np.array([0.5, -0.3, 0.2]))
+    )
+    pos, quat, _, info = r.step(
+        leader_pos=[0.05, 0.0, 0.0],
+        leader_quat=tilted,
+        gripper_norm=0.0,
+        dt=0.02,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=pos,
+        current_dex_quat=quat,
+        proximity_depth_m=0.50,
+    )
+    assert info["reason"] == "tracking"
+    np.testing.assert_allclose(pos, [0.05, 0.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(quat, top_down, atol=1e-9)
+
+
+def test_fixed_orientation_wxyz_rate_limit_slews_not_snap():
+    """From a non-top-down home, slew toward lock at max_ang_vel (no snap)."""
+    from teleop import transforms as T
+
+    top_down = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float64)
+    # ~90 deg about Y from identity — far from top-down.
+    start_quat = T.normalize_quat_wxyz(
+        T.rotvec_to_quat_wxyz(np.array([0.0, np.pi / 2, 0.0]))
+    )
+    # Small ang vel so one 50 ms step cannot reach top-down.
+    max_ang = 0.5  # rad/s → 0.025 rad per 0.05 s
+    r = CartesianRetargeter(
+        RetargetConfig(
+            fixed_orientation_wxyz=tuple(top_down.tolist()),
+            translation_gain=1.0,
+            max_lin_vel=10.0,
+            max_ang_vel=max_ang,
+            max_lin_acc=0.0,
+        )
+    )
+    origin = np.array([0.3, 0.0, 0.2])
+    r.capture_origins([0, 0, 0], _identity_quat(), origin, start_quat)
+
+    pos, quat, _, info = r.step(
+        leader_pos=[0.0, 0.0, 0.0],
+        leader_quat=_identity_quat(),
+        gripper_norm=0.0,
+        dt=0.05,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=origin,
+        current_dex_quat=start_quat,
+    )
+    assert info["reason"] == "tracking"
+    np.testing.assert_allclose(pos, origin, atol=1e-9)
+    # Must have moved toward top-down, but not arrived in one step.
+    assert not np.allclose(quat, start_quat, atol=1e-6)
+    assert not np.allclose(quat, top_down, atol=1e-3)
+    q_rel = T.quat_multiply_wxyz(T.quat_conjugate_wxyz(start_quat), quat)
+    angle = float(np.linalg.norm(T.quat_wxyz_to_rotvec(q_rel)))
+    np.testing.assert_allclose(angle, max_ang * 0.05, atol=1e-6)
+
+    # After enough steps, should reach the lock.
+    for _ in range(200):
+        pos, quat, _, _ = r.step(
+            leader_pos=[0.0, 0.0, 0.0],
+            leader_quat=_identity_quat(),
+            gripper_norm=0.0,
+            dt=0.05,
+            clutch=True,
+            deadman=True,
+            current_dex_pos=pos,
+            current_dex_quat=quat,
+        )
+    np.testing.assert_allclose(quat, top_down, atol=1e-6)
+

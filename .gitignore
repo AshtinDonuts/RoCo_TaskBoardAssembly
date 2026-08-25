@@ -24,6 +24,9 @@ task/teleop_recorder.log
 # large run-output binaries (kept on disk, not version-controlled)
 task/scene_final.usd
 task/demo.mp4
+task/reachable_*.ply
+task/reachable_*_summary.txt
+task/reachable_*_free_vs_fixed.txt
 
 # ignore Sharpa North files
 robot/sharpa_north/

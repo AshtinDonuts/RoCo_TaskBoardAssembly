@@ -200,9 +200,9 @@ After Isaac opens, click the viewport, wait for warmup, then hold:
 | i / k | EE into / out of headcam view |
 | j / l | EE left / right in headcam view |
 | t / g | EE up / down |
-| q / a | yaw (no-op when `retarget.fix_orientation`) |
-| w / d | pitch (no-op when `retarget.fix_orientation`) |
-| z / c | roll (no-op when `retarget.fix_orientation`) |
+| q / a | yaw (no-op when orientation is locked) |
+| w / d | pitch (no-op when orientation is locked) |
+| z / c | roll (no-op when orientation is locked) |
 | f | gripper close |
 | v | gripper open |
 
@@ -213,21 +213,45 @@ arm stays held (no second keyboard stream).
 
 ## Calibration
 
+**Fixed right EE orientation:** Solo→Vega defaults to a **constant world
+top-down** quat via `retarget.fixed_orientation_wxyz: [0, 1, 0, 0]` (same
+wxyz as scripted left `PART_DEFAULTS["ee_orientation"]`). Teleop then tracks
+**XYZ + gripper only**; leader wrist tilts and keyboard rotate keys are
+ignored. Lula IK still receives the locked quat so joints compensate while
+translating. If the arm starts off top-down, retarget **slews** toward the
+lock at `max_ang_vel` (no hard snap). Dual-mode left clears
+`fixed_orientation_wxyz` so the left arm keeps full relative orientation.
+To turn the lock **off** (full 6DoF wrist again), set
+`fixed_orientation_wxyz: null` (or `false`) in the YAML, or remove the key.
+
+**Why fixed orientation feels workspace-restricted:** retarget still commands
+the same XYZ span (`python3 -m teleop.diag_fix_orientation_sweep`). The
+shrink is Lula IK: many board EE poses have no solution at a frozen top-down
+quat, so teleop holds the last good joints (`ik_ok=False`). Compare modes with:
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES ISAACSIM_HEADLESS=1 \
+  .venv/bin/python task/find_reachable_r_arm_orn_compare.py \
+  --target-is-ee-pos --also-free --xy-res 12 --z-steps 5
+```
+
+On a representative board grid, fixed top-down / home-engage ≈ 65% reachable
+EE poses; allowing wrist tilts ≈ 90%+; `orn=None` ≈ 98%.
+
+Alternatively, `retarget.fix_orientation: true` (default **false** in the
+Solo→Vega YAML) holds the quaternion captured at clutch engage / reanchor
+instead of a hardcoded world quat. Prefer `fixed_orientation_wxyz` when the
+desired lock is a known world orientation (e.g. top-down grasp).
+
 Leader deltas are mapped through `retarget.axes_map` in
 [`config/aloha_solo_to_vega_1u.yaml`](../config/aloha_solo_to_vega_1u.yaml)
 so motion matches the **head camera view** (into-image / image-left-right /
-image-up), including the INIT `head_j1` pitch. Orientation uses the same map
-as a **space-fixed** conjugation (tilt the leader in the image → DexMate tilts
-the same way in the image). If the robot root is rotated in the stage, recompute
-that 3×3 (or fall back to `axes_perm` / `axes_sign`). Keep rotation gains ≤ 1
-until the map feels natural.
-
-**Fixed right EE orientation:** with `retarget.fix_orientation: true` (default
-in the Solo→Vega config), the right arm holds the quaternion captured at clutch
-engage / reanchor. Leader wrist tilts and keyboard rotate keys are ignored for
-that target; Lula IK still receives the fixed quat so joints compensate while
-translation tracks. Dual-mode left arm always keeps relative orientation
-mapping.
+image-up), including the INIT `head_j1` pitch. When orientation is **not**
+locked, wrist mapping uses the same map as a **space-fixed** conjugation
+(tilt the leader in the image → DexMate tilts the same way in the image).
+If the robot root is rotated in the stage, recompute that 3×3 (or fall back
+to `axes_perm` / `axes_sign`). Keep rotation gains ≤ 1 until the map feels
+natural.
 
 **Distance units:** both the physical ALOHA leader EE (Interbotix FK) and the
 DexMate stage use **meters**. `retarget.translation_gain` scales leader meter

@@ -154,11 +154,20 @@ class AlohaTeleopPolicy(Policy):
             # Orientation lock is right-arm only even when YAML enables it.
             left_raw = dict(raw.get("retarget") or {})
             left_raw["fix_orientation"] = False
+            left_raw["fixed_orientation_wxyz"] = None
             self._retarget_L = CartesianRetargeter(
                 RetargetConfig.from_dict(left_raw)
             )
         # Primary retarget used by recenter / reset operator cmds.
         self._retarget = self._retarget_R
+        locked_q = retarget_cfg.fixed_orientation_wxyz
+        if locked_q is not None:
+            print(
+                "[aloha_teleop] right EE fixed_orientation_wxyz="
+                f"{list(locked_q)} (world top-down; "
+                "track XYZ + gripper only)",
+                flush=True,
+            )
         self._prox_rate = retarget_cfg.proximity_rate_limit
         self._prox_delta = retarget_cfg.proximity_delta_gain
         self._last_prox_rate_scale = 1.0

@@ -81,6 +81,11 @@ class RetargetConfig:
     # keyboard wrist tilts ignored). Lula IK still receives the fixed quat
     # so joints compensate while translation tracks.
     fix_orientation: bool = False
+    # When set, command this constant world/stage EE quat (wxyz) instead of
+    # mapping leader wrist tilts. Translation and gripper still track.
+    # Takes precedence over fix_orientation for the commanded orientation;
+    # _rate_limit slews toward it at max_ang_vel (no hard snap).
+    fixed_orientation_wxyz: Optional[Tuple[float, float, float, float]] = None
     workspace_min: Tuple[float, float, float] = (-1.5, -1.5, 0.02)
     workspace_max: Tuple[float, float, float] = (1.5, 1.5, 1.5)
     max_lin_vel: float = 0.35
@@ -126,6 +131,19 @@ class RetargetConfig:
             kwargs["workspace_min"] = tuple(float(v) for v in kwargs["workspace_min"])
         if "workspace_max" in kwargs:
             kwargs["workspace_max"] = tuple(float(v) for v in kwargs["workspace_max"])
+        if "fixed_orientation_wxyz" in kwargs:
+            raw_q = kwargs["fixed_orientation_wxyz"]
+            # null / false / [] / omit → unlocked (full 6DoF orientation).
+            if raw_q is None or raw_q is False or raw_q == [] or raw_q == ():
+                kwargs["fixed_orientation_wxyz"] = None
+            else:
+                q = tuple(float(v) for v in raw_q)
+                if len(q) != 4:
+                    raise ValueError(
+                        "fixed_orientation_wxyz must be a length-4 wxyz quat "
+                        f"(got len={len(q)})"
+                    )
+                kwargs["fixed_orientation_wxyz"] = q
         for key in ("proximity_rate_limit", "proximity_delta_gain"):
             if key in kwargs:
                 kwargs[key] = ProximityScaleConfig.from_dict(
@@ -221,6 +239,13 @@ class CartesianRetargeter:
             return prev
         self.state.last_gripper = target
         return target
+
+    def _locked_target_quat(self) -> Optional[np.ndarray]:
+        """Normalized constant world EE quat, or None if unlocked."""
+        q = self.cfg.fixed_orientation_wxyz
+        if q is None:
+            return None
+        return T.normalize_quat_wxyz(q)
 
     def step(
         self,
@@ -327,6 +352,10 @@ class CartesianRetargeter:
         dp_m = cfg.map_leader_vec(dp) * cfg.translation_gain
         pos = st.dex_origin_pos + dp_m
 
+        locked = self._locked_target_quat()
+        if locked is not None:
+            return pos, locked
+
         if cfg.fix_orientation:
             return pos, T.normalize_quat_wxyz(st.dex_origin_quat)
 
@@ -374,7 +403,10 @@ class CartesianRetargeter:
         dL = leader - prev_l
         pos = st.last_pos + cfg.map_leader_vec(dL) * cfg.translation_gain * scale
 
-        if cfg.fix_orientation:
+        locked = self._locked_target_quat()
+        if locked is not None:
+            quat = locked
+        elif cfg.fix_orientation:
             quat = T.normalize_quat_wxyz(st.last_quat)
         else:
             # Space-fixed leader rotation since previous sample, scaled.
@@ -425,7 +457,12 @@ class CartesianRetargeter:
             self.state.last_lin_vel = limited_dp / dt
         pos_out = prev_pos + limited_dp
 
-        if self.cfg.fix_orientation:
+        # Constant world quat: slew toward it (do not hold prev_quat).
+        # fix_orientation alone still freezes engage quat with no slew.
+        locked = self._locked_target_quat()
+        if locked is not None:
+            quat = locked
+        elif self.cfg.fix_orientation:
             return pos_out, T.normalize_quat_wxyz(prev_quat)
 
         max_angle = self.cfg.max_ang_vel * scale * dt
