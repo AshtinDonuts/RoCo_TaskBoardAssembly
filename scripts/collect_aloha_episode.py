@@ -185,6 +185,18 @@ def main() -> int:
             "(or all / none). Passed through to run_pick_place.py."
         ),
     )
+    parser.add_argument(
+        "--part",
+        "--asset",
+        dest="part",
+        default=None,
+        help=(
+            "Asset / part name for this collection (e.g. gear_20teeth). "
+            "Sets ROCO_PART_ORDER and ROCO_TELEOP_PART so teleop close uses "
+            "geometric grasp_width_m from config/part_local_aabb_extents.json "
+            "(Design D). Isaac UI buttons can change the target live."
+        ),
+    )
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument(
         "--synthetic",
@@ -200,6 +212,16 @@ def main() -> int:
     if args.synthetic and args.keyboard:
         print("Use only one of --synthetic or --keyboard.", file=sys.stderr)
         return 2
+    if args.part:
+        import param_config as pc  # noqa: WPS433 — validate after parse
+
+        known = set(pc.known_part_names())
+        if args.part not in known:
+            print(
+                f"Unknown --part {args.part!r}. Known: {', '.join(sorted(known))}",
+                file=sys.stderr,
+            )
+            return 2
     if args.export_config.resolve() != export_cfg.source_path:
         try:
             export_cfg = load_export_config(args.export_config)
@@ -247,6 +269,15 @@ def main() -> int:
         "ROCO_WARMUP_TIME_S": str(args.warmup_time_s),
         "ROCO_NUM_EPISODES": str(args.num_episodes),
     }
+    if args.part:
+        # Single-part harness iteration + teleop Design D close target.
+        extra["ROCO_PART_ORDER"] = args.part
+        extra["ROCO_TELEOP_PART"] = args.part
+        print(
+            f"[collect] part={args.part} "
+            f"(ROCO_PART_ORDER + ROCO_TELEOP_PART → geometric grasp_width_m)",
+            flush=True,
+        )
     if args.headless:
         extra["ISAACSIM_HEADLESS"] = "1"
 

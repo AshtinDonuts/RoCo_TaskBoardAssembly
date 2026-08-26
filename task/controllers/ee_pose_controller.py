@@ -180,7 +180,7 @@ class EEPoseController(BaseController):
                     enabled=bool(
                         getattr(pc, "GRIPPER_COMPLIANCE_ENABLED", True)
                     ),
-                    mode=str(getattr(pc, "GRIPPER_MODE", "binary")),
+                    mode=str(getattr(pc, "GRIPPER_MODE", "continuous")),
                     open_limit=0.6649704,
                     close=0.0,
                     close_speed_rad_s=float(

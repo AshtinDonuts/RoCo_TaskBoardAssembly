@@ -170,9 +170,9 @@ def Xform "vega_1u" (
 
             over "R_gripper_joint"
             {
-                float drive:angular:physics:damping = 80
-                float drive:angular:physics:maxForce = 3
-                float drive:angular:physics:stiffness = 800
+                float drive:angular:physics:damping = 25
+                float drive:angular:physics:maxForce = 0.5
+                float drive:angular:physics:stiffness = 80
                 float drive:angular:physics:targetPosition = 10
                 float physics:lowerLimit = 0
                 float physics:upperLimit = 38.1
@@ -271,9 +271,9 @@ def Xform "vega_1u" (
 
             over "L_gripper_joint"
             {
-                float drive:angular:physics:damping = 80
-                float drive:angular:physics:maxForce = 3
-                float drive:angular:physics:stiffness = 800
+                float drive:angular:physics:damping = 25
+                float drive:angular:physics:maxForce = 0.5
+                float drive:angular:physics:stiffness = 80
                 float drive:angular:physics:targetPosition = 10
                 float physics:lowerLimit = 0
                 float physics:upperLimit = 38.1

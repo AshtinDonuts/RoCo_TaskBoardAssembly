@@ -25,6 +25,10 @@ def _cfg(**kwargs) -> GripperComplianceConfig:
         stall_dq=0.005,
         stall_min_close_rad=0.03,
         hold_margin=0.01,
+        # Allow classic lag stall in most unit tests (production uses 0.01).
+        max_close_lag=0.05,
+        stall_hold_ticks=1,
+        stall_progress=0.002,
     )
     base.update(kwargs)
     return GripperComplianceConfig(**base)
@@ -67,6 +71,92 @@ def test_stall_enters_hold():
     # Further close ticks keep the hold aperture.
     cmd2 = g.update(q_meas=q_stall, qd_meas=0.0, dt=0.02, intent="close")
     np.testing.assert_allclose(cmd2, cmd, atol=1e-9)
+
+
+def test_max_close_lag_blocks_catchup():
+    """Leader-0 catch-up must not command far past measured contact."""
+    g = GripperCompliance(
+        _cfg(
+            mode="continuous",
+            close_speed_rad_s=10.0,
+            max_close_lag=0.01,
+            stall_err=0.008,
+            stall_hold_ticks=50,  # don't latch yet; inspect lag cap
+            stall_min_close_rad=0.03,
+        )
+    )
+    q_contact = 0.40
+    # Seed so close_start is past min close.
+    g.reset(q_meas=0.50)
+    for _ in range(5):
+        cmd = g.update(
+            q_meas=q_contact,
+            qd_meas=0.0,
+            dt=0.02,
+            gripper_norm=0.0,  # full close demand
+        )
+        assert cmd >= q_contact - 0.01 - 1e-9
+        assert g.phase != GripperPhase.HOLDING
+
+
+def test_lag_saturated_stall_holds():
+    """Contact: lag at cap + frozen fingers → hold (not want_more_close alone)."""
+    g = GripperCompliance(
+        _cfg(
+            mode="continuous",
+            close_speed_rad_s=0.5,
+            max_close_lag=0.01,
+            stall_err=0.008,
+            stall_hold_ticks=3,
+            hold_margin=0.002,
+            stall_min_close_rad=0.03,
+            stall_progress=0.002,
+        )
+    )
+    q = 0.55
+    g.reset(q_meas=0.60)
+    for _ in range(8):
+        cmd = g.update(q_meas=q, qd_meas=-0.2, dt=0.02, gripper_norm=0.0)
+        q = float(cmd)
+    q_stall = float(q)
+    for _ in range(10):
+        cmd = g.update(q_meas=q_stall, qd_meas=0.0, dt=0.02, gripper_norm=0.0)
+        if g.phase == GripperPhase.HOLDING:
+            break
+    assert g.phase == GripperPhase.HOLDING
+    np.testing.assert_allclose(cmd, q_stall - 0.002, atol=1e-9)
+    cmd2 = g.update(q_meas=q_stall, qd_meas=0.0, dt=0.02, gripper_norm=0.0)
+    np.testing.assert_allclose(cmd2, cmd, atol=1e-9)
+
+
+def test_no_false_hold_slow_free_air_creep():
+    """Soft-drive free-air creep must reach full close, not mid-hold."""
+    g = GripperCompliance(
+        _cfg(
+            mode="continuous",
+            close_speed_rad_s=0.25,
+            max_close_lag=0.01,
+            stall_err=0.008,
+            stall_dq=0.005,
+            stall_hold_ticks=12,
+            stall_progress=0.002,
+            stall_min_close_rad=0.03,
+            hold_margin=0.002,
+        )
+    )
+    q = 0.60
+    g.reset(q_meas=q)
+    # Creep ~0.001 rad/tick with lag saturated (typical soft free-air).
+    for _ in range(800):
+        cmd = g.update(q_meas=q, qd_meas=-0.01, dt=0.02, gripper_norm=0.0)
+        assert g.phase != GripperPhase.HOLDING
+        step = min(0.001, abs(float(cmd) - q))
+        q = q + np.sign(float(cmd) - q) * step
+        if q <= 1e-6 and abs(cmd) <= 1e-6:
+            break
+    assert q <= 1e-5
+    assert abs(cmd) <= 1e-5
+    assert g.phase != GripperPhase.HOLDING
 
 
 def test_open_clears_hold():
@@ -114,12 +204,18 @@ def test_config_from_retarget_aliases():
             "gripper_mode": "binary",
             "gripper_close_speed_rad_s": 0.07,
             "gripper_hold_margin": 0.02,
+            "gripper_max_close_lag": 0.015,
+            "gripper_stall_hold_ticks": 4,
+            "gripper_stall_progress": 0.003,
         }
     )
     assert cfg.enabled is True
     assert cfg.mode == "binary"
     assert cfg.close_speed_rad_s == 0.07
     assert cfg.hold_margin == 0.02
+    assert cfg.max_close_lag == 0.015
+    assert cfg.stall_hold_ticks == 4
+    assert cfg.stall_progress == 0.003
 
 
 def test_disabled_snaps_without_slew_or_hold():

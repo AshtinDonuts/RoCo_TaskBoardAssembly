@@ -1,8 +1,9 @@
 """Binary / continuous gripper slew with stall hold-on-contact.
 
 Position-only compliance: slowly drive toward open or closed, and when
-fingers stall against an object while closing, freeze (slightly past)
-the measured aperture so the PD drive stops pressing harder.
+fingers stall against an object while closing, freeze near the measured
+aperture so the PD drive stops pressing harder. Command lag is capped
+(``max_close_lag``) so leader catch-up cannot keep squeezing through contact.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ class GripperComplianceConfig:
     """
 
     enabled: bool = True
-    mode: str = "binary"  # binary | continuous
+    mode: str = "continuous"  # continuous | binary
     open_limit: float = 0.6649704
     close: float = 0.0
     close_norm: float = 0.20
@@ -54,10 +55,20 @@ class GripperComplianceConfig:
     close_speed_rad_s: float = 0.05
     open_speed_rad_s: float = 0.25
     stall_qd: float = 0.02
-    stall_err: float = 0.02
+    stall_err: float = 0.008
     stall_dq: float = 0.005
     stall_min_close_rad: float = 0.03
-    hold_margin: float = 0.01
+    # Extra close past measured when latching hold (keep small).
+    hold_margin: float = 0.002
+    # Hard cap: command may not run more closed than q_meas by more than
+    # this (blocks leader-0 "catch-up" through a contacted object).
+    max_close_lag: float = 0.01
+    # Consecutive lag-saturated, no-progress ticks before contact hold.
+    # Keep high enough that slow soft-drive free-air creep does not latch.
+    stall_hold_ticks: int = 12
+    # Net measured close (rad) during a stall window that proves free-air
+    # progress and resets the hold timer.
+    stall_progress: float = 0.002
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]] = None) -> "GripperComplianceConfig":
@@ -80,6 +91,9 @@ class GripperComplianceConfig:
             "gripper_stall_dq": "stall_dq",
             "gripper_stall_min_close_rad": "stall_min_close_rad",
             "gripper_hold_margin": "hold_margin",
+            "gripper_max_close_lag": "max_close_lag",
+            "gripper_stall_hold_ticks": "stall_hold_ticks",
+            "gripper_stall_progress": "stall_progress",
         }
         for key, val in data.items():
             field = alias.get(key, key)
@@ -100,7 +114,7 @@ class GripperComplianceConfig:
             return cls.from_dict(cfg)
         return cls(
             enabled=_as_bool(getattr(cfg, "gripper_compliance_enabled", True), True),
-            mode=str(getattr(cfg, "gripper_mode", "binary")).lower(),
+            mode=str(getattr(cfg, "gripper_mode", "continuous")).lower(),
             open_limit=float(getattr(cfg, "gripper_open_limit", 0.6649704)),
             close=float(getattr(cfg, "gripper_close", 0.0)),
             close_norm=float(getattr(cfg, "gripper_close_norm", 0.20)),
@@ -108,12 +122,15 @@ class GripperComplianceConfig:
             close_speed_rad_s=float(getattr(cfg, "gripper_close_speed_rad_s", 0.05)),
             open_speed_rad_s=float(getattr(cfg, "gripper_open_speed_rad_s", 0.25)),
             stall_qd=float(getattr(cfg, "gripper_stall_qd", 0.02)),
-            stall_err=float(getattr(cfg, "gripper_stall_err", 0.02)),
+            stall_err=float(getattr(cfg, "gripper_stall_err", 0.008)),
             stall_dq=float(getattr(cfg, "gripper_stall_dq", 0.005)),
             stall_min_close_rad=float(
                 getattr(cfg, "gripper_stall_min_close_rad", 0.03)
             ),
-            hold_margin=float(getattr(cfg, "gripper_hold_margin", 0.01)),
+            hold_margin=float(getattr(cfg, "gripper_hold_margin", 0.002)),
+            max_close_lag=float(getattr(cfg, "gripper_max_close_lag", 0.01)),
+            stall_hold_ticks=int(getattr(cfg, "gripper_stall_hold_ticks", 12)),
+            stall_progress=float(getattr(cfg, "gripper_stall_progress", 0.002)),
         )
 
 
@@ -164,6 +181,8 @@ class GripperCompliance:
         self._q_hold: Optional[float] = None
         self._q_meas_prev: Optional[float] = None
         self._close_start_q: Optional[float] = None
+        self._stall_ticks: int = 0
+        self._stall_q_ref: Optional[float] = None
 
     def reset(self, q_meas: Optional[float] = None) -> None:
         self.phase = GripperPhase.OPEN
@@ -172,6 +191,8 @@ class GripperCompliance:
         self._q_hold = None
         self._q_meas_prev = None if q_meas is None else float(q_meas)
         self._close_start_q = None
+        self._stall_ticks = 0
+        self._stall_q_ref = None
 
     @property
     def enabled(self) -> bool:
@@ -280,6 +301,8 @@ class GripperCompliance:
             self._intent = intent
             self._q_hold = None
             self._close_start_q = None
+            self._stall_ticks = 0
+            self._stall_q_ref = None
             self._q_cmd = float(target)
             self._q_meas_prev = q_meas
             self.phase = (
@@ -297,44 +320,87 @@ class GripperCompliance:
         if intent == "open":
             self._q_hold = None
             self._close_start_q = None
-            if self.phase in (GripperPhase.HOLDING, GripperPhase.CLOSING, GripperPhase.OPEN):
-                if abs(self._q_cmd - cfg.open_limit) > 1e-6:
-                    self.phase = GripperPhase.OPENING
-            self._q_cmd = self._slew(self._q_cmd, cfg.open_limit, cfg.open_speed_rad_s, dt)
-            if abs(self._q_cmd - cfg.open_limit) <= 1e-6:
-                self._q_cmd = cfg.open_limit
-                self.phase = GripperPhase.OPEN
+            self._stall_ticks = 0
+            self._stall_q_ref = None
+            open_target = float(target)
+            if abs(self._q_cmd - open_target) > 1e-6:
+                self.phase = GripperPhase.OPENING
+            self._q_cmd = self._slew(self._q_cmd, open_target, cfg.open_speed_rad_s, dt)
+            if abs(self._q_cmd - open_target) <= 1e-6:
+                self._q_cmd = open_target
+                self.phase = (
+                    GripperPhase.OPEN
+                    if abs(open_target - cfg.open_limit) <= 1e-6
+                    else GripperPhase.OPENING
+                )
             else:
                 self.phase = GripperPhase.OPENING
             self._q_meas_prev = q_meas
             return float(np.clip(self._q_cmd, q_lo, q_hi))
 
-        # intent == close
-        if prev_intent != "close":
-            self._close_start_q = q_meas
-            if self.phase != GripperPhase.HOLDING:
-                self.phase = GripperPhase.CLOSING
-        elif self.phase in (GripperPhase.OPEN, GripperPhase.OPENING):
-            self._close_start_q = q_meas
-            self.phase = GripperPhase.CLOSING
-
+        # intent == close — hold always wins over catch-up to a more-closed target.
         if self.phase == GripperPhase.HOLDING and self._q_hold is not None:
+            # Only leave hold when the resolved target opens past the hold.
+            if float(target) > float(self._q_hold) + max(cfg.hysteresis * 0.1, 1e-3):
+                self._q_hold = None
+                self._stall_ticks = 0
+                self._stall_q_ref = None
+                self.phase = GripperPhase.OPENING
+                self._intent = "open"
+                self._q_cmd = self._slew(
+                    float(self._q_cmd), float(target), cfg.open_speed_rad_s, dt
+                )
+                self._q_meas_prev = q_meas
+                return float(np.clip(self._q_cmd, q_lo, q_hi))
             self._q_cmd = float(self._q_hold)
             self._q_meas_prev = q_meas
             return float(np.clip(self._q_cmd, q_lo, q_hi))
 
-        # Slew toward close target (binary close or continuous target).
+        if prev_intent != "close":
+            self._close_start_q = q_meas
+            self._stall_ticks = 0
+            self._stall_q_ref = None
+            self.phase = GripperPhase.CLOSING
+        elif self.phase in (GripperPhase.OPEN, GripperPhase.OPENING):
+            self._close_start_q = q_meas
+            self._stall_ticks = 0
+            self._stall_q_ref = None
+            self.phase = GripperPhase.CLOSING
+
         close_target = float(target)
         self._q_cmd = self._slew(
             self._q_cmd, close_target, cfg.close_speed_rad_s, dt
         )
+        # Compliance priority: never command more closed than measured
+        # beyond max_close_lag (stops leader-0 catch-up through contact).
+        lag = max(0.0, float(cfg.max_close_lag))
+        floor = float(q_meas) - lag
+        if self._q_cmd < floor:
+            self._q_cmd = floor
         self.phase = GripperPhase.CLOSING
 
         if self._stalled(q_meas, qd_meas, close_target):
+            if self._stall_ticks == 0 or self._stall_q_ref is None:
+                self._stall_q_ref = q_meas
+            # Slow soft-drive free-air creep still reduces q_meas; that is
+            # progress, not contact — reset the hold timer.
+            progress = float(self._stall_q_ref) - float(q_meas)
+            if progress > float(cfg.stall_progress):
+                self._stall_q_ref = q_meas
+                self._stall_ticks = 1
+            else:
+                self._stall_ticks += 1
+        else:
+            self._stall_ticks = 0
+            self._stall_q_ref = None
+
+        if self._stall_ticks >= max(1, int(cfg.stall_hold_ticks)):
             hold = float(np.clip(q_meas - cfg.hold_margin, q_lo, q_hi))
             self._q_hold = hold
             self._q_cmd = hold
             self.phase = GripperPhase.HOLDING
+            self._stall_ticks = 0
+            self._stall_q_ref = None
 
         self._q_meas_prev = q_meas
         return float(np.clip(self._q_cmd, q_lo, q_hi))
@@ -347,28 +413,36 @@ class GripperCompliance:
         return float(q + np.sign(delta) * max_step)
 
     def _stalled(self, q_meas: float, qd_meas: float, close_target: float) -> bool:
+        """True when lag is saturated and fingers are not making progress.
+
+        Requires ``closing_err >= stall_err`` (command pressing against the
+        lag cap / object). Slow free-air creep must not latch: callers also
+        reset the hold timer on net ``stall_progress``. Near the close
+        target we never hold (empty finish).
+        """
         cfg = self.cfg
         if abs(qd_meas) >= cfg.stall_qd:
             return False
         q_cmd = float(self._q_cmd if self._q_cmd is not None else q_meas)
         start = float(self._close_start_q if self._close_start_q is not None else q_meas)
-        # Larger aperture = more open; closing decreases q.
         closed_cmd = start - q_cmd
         closed_meas = start - float(q_meas)
         if closed_cmd < cfg.stall_min_close_rad and closed_meas < cfg.stall_min_close_rad:
             return False
-        # Positive when command is more closed than the measured fingers.
+        # Empty finish: already at/near commanded close — keep slewing, no hold.
+        near = max(float(cfg.max_close_lag), float(cfg.stall_err))
+        if float(q_meas) <= float(close_target) + near:
+            return False
+        want_more_close = float(close_target) < float(q_meas) - 1e-4
+        if not want_more_close:
+            return False
         closing_err = float(q_meas) - q_cmd
-        dq = abs(float(q_meas) - float(self._q_meas_prev))
-        # Require lag AND near-zero motion so free-air tracking (cmd one
-        # slew-step ahead) does not false-trigger hold.
+        # Must be pressing (lag saturated). Soft "want_more_close alone"
+        # false-triggered mid free-air close with weak drives.
         if closing_err < cfg.stall_err:
             return False
+        dq = abs(float(q_meas) - float(self._q_meas_prev))
         if dq > cfg.stall_dq:
-            return False
-        # Ignore stall once we have already reached the close target with
-        # negligible lag (empty grasp finished).
-        if abs(q_cmd - float(close_target)) <= 1e-6 and closing_err < cfg.stall_err:
             return False
         return True
 

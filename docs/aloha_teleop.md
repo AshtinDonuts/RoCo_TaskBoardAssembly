@@ -206,16 +206,36 @@ After Isaac opens, click the viewport, wait for warmup, then hold:
 | f | gripper close |
 | v | gripper open |
 
-**Gripper compliance (default ON):** set `retarget.gripper_compliance_enabled`
-to `false` to disable the whole module (immediate linear aperture, no slew /
-stall hold). When enabled, `retarget.gripper_mode: binary` treats the
-leader/keyboard gripper as open vs close. Fingers **slow-close** at
-`gripper_close_speed_rad_s` (default `0.05` rad/s ≈ 13 s full stroke) and
-**hold** the measured aperture when they stall on contact, so rigid parts
-are not over-squeezed. Open uses `gripper_open_speed_rad_s` (default `0.25`).
-Set `gripper_mode: continuous` for proportional aperture (still slew + hold).
-Tune stall thresholds via `gripper_stall_*` / `gripper_hold_margin` in
+**Soft gripper drives (default ON):** `GRIPPER_DRIVE_*` (default ~80 / 25 /
+0.5) are applied by the harness the same way as scripted baseline.
+Command-side slew/stall-hold is separate and defaults **OFF** in the teleop
+YAML (`retarget.gripper_compliance_enabled: false`). When enabled, default
+`retarget.gripper_mode: continuous` is linear leader→aperture with slew and
+hold; use `binary` for open/close intent only. On contact, hold and
+`gripper_max_close_lag` take priority over leader aperture catch-up. Tune via
+`gripper_stall_*` / `gripper_hold_margin` / `gripper_max_close_lag` in
 [`config/aloha_solo_to_vega_1u.yaml`](../config/aloha_solo_to_vega_1u.yaml).
+
+**Design D (geometric grasp stop):** close target comes from
+`grasp_width_m` in [`config/part_local_aabb_extents.json`](../config/part_local_aabb_extents.json).
+At runtime, the object width plus 0.5 mm clearance is inverted through a
+drive-settled PhysX aperture lookup; `grasp_close_rad` is only a precomputed
+audit value. The scripted baseline uses the same resolver and makes its
+pre-grasp opening at least 10 mm wider than the object. Pass
+`--part <name>` to [`scripts/collect_aloha_episode.py`](../scripts/collect_aloha_episode.py)
+to seed the target, or use the Isaac panel **RoCo Grasp Target (Design D)**
+(one button per asset; `full close (0 rad)` clears). Disable the panel with
+`ROCO_GRASP_UI=0`. Falls back to `PART_CONFIG.gripper_close` if a part is
+missing from the AABB file.
+
+Validate the configured width, commanded joint, mimic-finger motion, and
+measured distal gap against the real asset mesh in a headless Isaac scene:
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y PRIVACY_CONSENT=Y \
+  .venv/bin/python task/validate_grasp_aperture_physics.py \
+  --asset gear_60teeth
+```
 
 You should see `[aloha_teleop] kbd move held=...` in the Isaac log when keys
 register. Task/recording keys are unchanged (`n`, `x`, arrows, Esc).
@@ -259,7 +279,9 @@ motion covers more of the task-board workspace; raise/lower that gain (and
 keep `max_lin_vel` high enough that rate limiting does not cancel it) if
 DexMate still feels short or overshoots. Workspace bounds and velocity limits
 are the software safety layer; stale packets hold the last target at 100 ms and
-pause tracking at 500 ms.
+pause tracking at 500 ms. `retarget.spike_filter_*` rejects one-frame leader
+jumps above configured lin/ang/gripper speeds (holds the last good sample) so
+delta-gain does not permanently integrate a glitch.
 
 **Proximity fine control** (R-wrist laser `last_length`):
 

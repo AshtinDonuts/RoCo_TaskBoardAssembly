@@ -38,7 +38,12 @@ from teleop.protocol import parse_endpoint  # noqa: E402
 from teleop.recorder_client import RecorderClient  # noqa: E402
 from teleop.retarget import CartesianRetargeter, RetargetConfig  # noqa: E402
 from teleop.export_config import load_export_config  # noqa: E402
+from teleop.grasp_aperture import (  # noqa: E402
+    grasp_width_m as _grasp_width_m,
+    resolve_grasp_close_rad,
+)
 from controllers.gripper_compliance import GripperComplianceConfig  # noqa: E402
+import param_config as pc  # noqa: E402
 from teleop.schema import (  # noqa: E402
     encode_jpeg,
     gripper_ratio,
@@ -149,6 +154,15 @@ class AlohaTeleopPolicy(Policy):
             num_episodes=_env_int("ROCO_NUM_EPISODES", int(sess.num_episodes)),
         )
         retarget_cfg = RetargetConfig.from_dict(raw.get("retarget"))
+        self._grasp_part = (
+            os.environ.get("ROCO_TELEOP_PART")
+            or os.environ.get("ALOHA_GRASP_PART")
+            or ""
+        ).strip() or None
+        self._grasp_width_m: Optional[float] = None
+        self._grasp_ui = None
+        if self._grasp_part:
+            self._apply_grasp_part_to_cfg(retarget_cfg, self._grasp_part)
         self._retarget_R = CartesianRetargeter(retarget_cfg)
         self._retarget_L: Optional[CartesianRetargeter] = None
         if self._control_arms == "dual" and not self._keyboard_mode:
@@ -157,9 +171,10 @@ class AlohaTeleopPolicy(Policy):
             left_raw["fix_orientation"] = False
             left_raw["fixed_orientation_wxyz"] = None
             left_raw["orientation_cone_rad"] = None
-            self._retarget_L = CartesianRetargeter(
-                RetargetConfig.from_dict(left_raw)
-            )
+            left_cfg = RetargetConfig.from_dict(left_raw)
+            if self._grasp_part:
+                left_cfg.gripper_close = float(retarget_cfg.gripper_close)
+            self._retarget_L = CartesianRetargeter(left_cfg)
         # Primary retarget used by recenter / reset operator cmds.
         self._retarget = self._retarget_R
         locked_q = retarget_cfg.fixed_orientation_wxyz
@@ -212,10 +227,26 @@ class AlohaTeleopPolicy(Policy):
                 continue
             ctrl.gripper_compliance.cfg = grip_cfg
             ctrl._gripper_dt = self._dt
+        # Soft PhysX drives (same as scripted baseline) are applied by the
+        # harness via _apply_gripper_compliance (GRIPPER_DRIVE_*).
+        print(
+            "[aloha_teleop] soft gripper drives: harness "
+            f"stiffness={pc.GRIPPER_DRIVE_STIFFNESS:g} "
+            f"damping={pc.GRIPPER_DRIVE_DAMPING:g} "
+            f"max_force={pc.GRIPPER_DRIVE_MAX_FORCE:g} "
+            "(same path as scripted baseline)",
+            flush=True,
+        )
         if grip_cfg.enabled:
+            part_note = (
+                f" part={self._grasp_part!r}"
+                if getattr(self, "_grasp_part", None)
+                else ""
+            )
             print(
-                "[aloha_teleop] gripper compliance: ON "
+                "[aloha_teleop] gripper command compliance: ON "
                 f"mode={grip_cfg.mode} "
+                f"close={grip_cfg.close:g} rad{part_note} "
                 f"close_speed={grip_cfg.close_speed_rad_s:g} rad/s "
                 f"open_speed={grip_cfg.open_speed_rad_s:g} rad/s "
                 f"hold_margin={grip_cfg.hold_margin:g}",
@@ -223,10 +254,11 @@ class AlohaTeleopPolicy(Policy):
             )
         else:
             print(
-                "[aloha_teleop] gripper compliance: OFF "
-                "(gripper_compliance_enabled=false; immediate aperture)",
+                "[aloha_teleop] gripper command compliance: OFF "
+                "(gripper_compliance_enabled=false; soft PhysX drives still on)",
                 flush=True,
             )
+        self._maybe_open_grasp_ui()
         if retarget_cfg.axes_map is not None:
             print(
                 "[aloha_teleop] retarget frame=headcam_view (axes_map, "
@@ -404,6 +436,109 @@ class AlohaTeleopPolicy(Policy):
             self._reset_requested = False
             return True
         return False
+
+    def _apply_grasp_part_to_cfg(self, retarget_cfg: RetargetConfig, part: str) -> float:
+        """Set ``retarget_cfg.gripper_close`` from geometric grasp_width_m."""
+        fallback = float(pc.get_part_config(part).get("gripper_close", 0.0))
+        close_rad = float(resolve_grasp_close_rad(part, fallback_rad=fallback))
+        width = _grasp_width_m(part)
+        retarget_cfg.gripper_close = close_rad
+        self._grasp_part = part
+        self._grasp_width_m = width
+        if width is None:
+            print(
+                "[aloha_teleop] Design D grasp close: "
+                f"part={part!r} grasp_width_m=n/a → gripper_close={close_rad:g} rad",
+                flush=True,
+            )
+        else:
+            print(
+                "[aloha_teleop] Design D grasp close: "
+                f"part={part!r} grasp_width_m={width:g} "
+                f"({width * 1000.0:.2f} mm) → gripper_close={close_rad:g} rad",
+                flush=True,
+            )
+        return close_rad
+
+    def set_grasp_target_part(self, part: str) -> float:
+        """Live Design D: set close endpoint from AABB ``grasp_width_m``."""
+        part = str(part).strip()
+        fallback = float(pc.get_part_config(part).get("gripper_close", 0.0))
+        close_rad = float(resolve_grasp_close_rad(part, fallback_rad=fallback))
+        width = _grasp_width_m(part)
+        self._grasp_part = part
+        self._grasp_width_m = width
+        self._set_gripper_close_rad(close_rad)
+        w_txt = "n/a" if width is None else f"{width * 1000.0:.2f} mm"
+        print(
+            "[aloha_teleop] grasp target ← "
+            f"{part!r} width={w_txt} close={close_rad:g} rad",
+            flush=True,
+        )
+        return close_rad
+
+    def set_grasp_full_close(self) -> float:
+        """Live Design D: command full close (0 rad)."""
+        self._grasp_part = None
+        self._grasp_width_m = 0.0
+        self._set_gripper_close_rad(0.0)
+        print("[aloha_teleop] grasp target ← full close (0 rad)", flush=True)
+        return 0.0
+
+    def _set_gripper_close_rad(self, close_rad: float) -> None:
+        close_rad = float(close_rad)
+        for ret in (self._retarget_R, self._retarget_L):
+            if ret is None:
+                continue
+            ret.cfg.gripper_close = close_rad
+        for ctrl in (self.R, self.L):
+            if ctrl is None or not hasattr(ctrl, "gripper_compliance"):
+                continue
+            g = ctrl.gripper_compliance
+            g.cfg.close = close_rad
+            # Clear stall hold so the new close floor can be approached.
+            g._q_hold = None
+            if hasattr(g, "_stall_ticks"):
+                g._stall_ticks = 0
+            if hasattr(g, "phase"):
+                from controllers.gripper_compliance import GripperPhase
+
+                if g.phase == GripperPhase.HOLDING:
+                    g.phase = GripperPhase.CLOSING
+
+    def _grasp_status_text(self) -> str:
+        part = self._grasp_part or "(none)"
+        w = self._grasp_width_m
+        close = float(self._retarget_R.cfg.gripper_close)
+        if w is None:
+            return f"part={part}\nclose={close:g} rad"
+        return f"part={part}\nwidth={w * 1000.0:.2f} mm\nclose={close:g} rad"
+
+    def _maybe_open_grasp_ui(self) -> None:
+        if os.environ.get("ISAACSIM_HEADLESS", "").strip() in ("1", "true", "True"):
+            return
+        if os.environ.get("ROCO_GRASP_UI", "1").strip().lower() in (
+            "0",
+            "false",
+            "off",
+            "no",
+        ):
+            return
+        try:
+            from teleop.grasp_target_ui import GraspTargetPanel
+            from teleop.grasp_aperture import list_grasp_parts as _list
+
+            names = list(_list())
+            if not names:
+                names = list(pc.known_part_names())
+            self._grasp_ui = GraspTargetPanel(
+                names,
+                on_select=self.set_grasp_target_part,
+                on_full_close=self.set_grasp_full_close,
+                get_status=self._grasp_status_text,
+            )
+        except Exception as exc:
+            print(f"[aloha_teleop] grasp target UI not opened: {exc}", flush=True)
 
     def reset(self, obs: Observation, target: PartTarget) -> None:
         self._target = target
@@ -1435,6 +1570,12 @@ class AlohaTeleopPolicy(Policy):
         if self._closed:
             return
         self._closed = True
+        if self._grasp_ui is not None:
+            try:
+                self._grasp_ui.destroy()
+            except Exception:
+                pass
+            self._grasp_ui = None
         if self._recorder is not None:
             try:
                 self._recorder.send({

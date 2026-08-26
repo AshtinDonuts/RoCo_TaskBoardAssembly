@@ -250,18 +250,19 @@ except ValueError:
 # aperture; GRIPPER_DRIVE_* caps are a safety net. Primary anti-eject is
 # slow binary close + stall hold (see controllers/gripper_compliance.py).
 # Units: stiffness/damping are drive gains; max_force is Nm.
+# Softer defaults (was 800/80/3): yield earlier on rigid contact.
 # Tune via env if a grasp is too weak (raise max_force) or still crushing
 # (lower it).
-GRIPPER_DRIVE_STIFFNESS = float(os.getenv("TASK_GRIPPER_STIFFNESS", "800"))
-GRIPPER_DRIVE_DAMPING = float(os.getenv("TASK_GRIPPER_DAMPING", "80"))
-GRIPPER_DRIVE_MAX_FORCE = float(os.getenv("TASK_GRIPPER_MAX_FORCE", "3.0"))
+GRIPPER_DRIVE_STIFFNESS = float(os.getenv("TASK_GRIPPER_STIFFNESS", "80"))
+GRIPPER_DRIVE_DAMPING = float(os.getenv("TASK_GRIPPER_DAMPING", "25"))
+GRIPPER_DRIVE_MAX_FORCE = float(os.getenv("TASK_GRIPPER_MAX_FORCE", "0.5"))
 
 # Scripted / EEPoseController gripper compliance (mirrors retarget YAML).
 # Set TASK_GRIPPER_COMPLIANCE=0 to disable slew + stall hold globally.
 GRIPPER_COMPLIANCE_ENABLED = os.getenv("TASK_GRIPPER_COMPLIANCE", "1").lower() in {
     "1", "true", "yes", "on",
 }
-GRIPPER_MODE = os.getenv("TASK_GRIPPER_MODE", "binary")
+GRIPPER_MODE = os.getenv("TASK_GRIPPER_MODE", "continuous")
 GRIPPER_CLOSE_SPEED_RAD_S = float(os.getenv("TASK_GRIPPER_CLOSE_SPEED", "0.05"))
 GRIPPER_OPEN_SPEED_RAD_S = float(os.getenv("TASK_GRIPPER_OPEN_SPEED", "0.25"))
 GRIPPER_STALL_QD = float(os.getenv("TASK_GRIPPER_STALL_QD", "0.02"))
@@ -380,10 +381,10 @@ else:
 #                 don't enclose the object in phase 3.
 # gripper_open    (rad): finger spread for "open" command at this part.
 #                 Smaller = tighter fit. ~0.15 sized for the rod_16mm.
-# gripper_close   (rad): commanded finger spread for "close". Keep at 0
-#                 (full close); slow binary close + stall hold
-#                 (controllers/gripper_compliance.py) freezes aperture on
-#                 contact; GRIPPER_DRIVE_* maxForce remains a safety net.
+# gripper_close   (rad): commanded finger spread for "close". Prefer
+#                 geometric Design D from config/part_local_aabb_extents.json
+#                 (grasp_width_m → rad) when collecting with --part / UI;
+#                 PART_CONFIG overrides remain the fallback.
 # ---------------------------------------------------------------------------
 PART_DEFAULTS = {
     "ee_orientation": np.array([0.0, 1.0, 0.0, 0.0]),
@@ -442,9 +443,9 @@ PART_DEFAULTS = {
 PART_CONFIG = {
     # Each entry only sets keys that differ from PART_DEFAULTS. pick_pos /
     # place_pos are world OBJECT positions (bottom-mesh, scraped from
-    # part_poses.json). Tune ee_offset / gripper_open per part by adding the override
-    # key when you start testing that part. gripper_close stays 0;
-    # soft GRIPPER_DRIVE_* gains provide grasp compliance.
+    # part_poses.json). Tune ee_offset / gripper_open / gripper_close per
+    # part. gripper_close is the Design D close target (scripted + teleop
+    # --part); leave at default 0 for full close when untuned.
     "rod_16mm": {
         "place_pos":      np.array([ 0.02976,  0.16982, 1.057]),
         "ee_offset":      np.array([0.0, 0.016, 0.21]),
@@ -724,6 +725,49 @@ def get_part_config(name: str) -> dict:
             cfg.update(seq)
     cfg.pop("sequence", None)
     return cfg
+
+
+def part_grasp_close_rad(name: str) -> float:
+    """Design D close aperture (rad).
+
+    Prefer geometric ``grasp_width_m`` from
+    ``config/part_local_aabb_extents.json``; fall back to PART_CONFIG.
+    """
+    from teleop.grasp_aperture import resolve_grasp_close_rad
+
+    return resolve_grasp_close_rad(
+        name, fallback_rad=float(get_part_config(name)["gripper_close"])
+    )
+
+
+GRASP_OPEN_CLEARANCE_M = 0.010
+
+
+def part_grasp_open_rad(name: str) -> float:
+    """Pre-grasp opening wide enough for the configured object geometry.
+
+    Preserve a wider hand-tuned ``gripper_open`` value, but never approach an
+    object with less than 10 mm total jaw clearance. Parts absent from the
+    geometry file retain their hand-tuned fallback.
+    """
+    from teleop.grasp_aperture import grasp_width_m, grasp_width_to_close_rad
+
+    fallback = float(get_part_config(name)["gripper_open"])
+    width = grasp_width_m(name)
+    if width is None:
+        return fallback
+    geometric = grasp_width_to_close_rad(
+        width,
+        margin_m=0.0,
+        clearance_m=GRASP_OPEN_CLEARANCE_M,
+    )
+    return max(fallback, geometric)
+
+
+def known_part_names() -> tuple:
+    """Names accepted by ``--part`` / ``ROCO_TELEOP_PART``."""
+    names = set(PART_CONFIG.keys()) | set(part_order) | set(PART_INIT_POSES.keys())
+    return tuple(sorted(names))
 
 # Hover delta-z above the grasp/place EE pose (m).
 INIT_HEIGHT      = 0.1

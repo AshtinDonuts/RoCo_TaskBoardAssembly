@@ -1,0 +1,201 @@
+{
+  "description": "Local-root AABB extents from mesh points in each parts/<name>.usdc (asset-frame XYZ). grasp_width_m is the geometric object width: max(Lx,Lz) for non-batteries; mean(Ly,Lz) cylinder diameter for batteries. Runtime jaw gap adds aperture_calibration.clearance_m.",
+  "frame": "asset_local_root",
+  "units_aabb": "meters (aabb_m) / millimeters (aabb_mm)",
+  "units_grasp_width": "meters",
+  "measured_at": "2026-08-25",
+  "measurement": "UsdGeom mesh GetPointsAttr, transformed into default-prim local frame",
+  "parts": {
+    "gear_20teeth": {
+      "aabb_m": {
+        "x": 0.021971,
+        "y": 0.02,
+        "z": 0.021971
+      },
+      "aabb_mm": {
+        "x": 21.971132,
+        "y": 20.000003,
+        "z": 21.971116
+      },
+      "n_meshes": 1,
+      "n_pts": 2790,
+      "source": "points",
+      "grasp_rule": "xz_max",
+      "grasp_width_m": 0.021971,
+      "grasp_close_rad": 0.103312
+    },
+    "gear_60teeth": {
+      "aabb_m": {
+        "x": 0.061966,
+        "y": 0.02,
+        "z": 0.061967
+      },
+      "aabb_mm": {
+        "x": 61.966494,
+        "y": 20.000003,
+        "z": 61.96651
+      },
+      "n_meshes": 1,
+      "n_pts": 5841,
+      "source": "points",
+      "grasp_rule": "xz_max",
+      "grasp_width_m": 0.061967,
+      "grasp_close_rad": 0.293597
+    },
+    "rod_16mm": {
+      "aabb_m": {
+        "x": 0.016,
+        "y": 0.05,
+        "z": 0.015987
+      },
+      "aabb_mm": {
+        "x": 15.999573,
+        "y": 50.000006,
+        "z": 15.986604
+      },
+      "n_meshes": 1,
+      "n_pts": 122,
+      "source": "points",
+      "grasp_rule": "xz_max",
+      "grasp_width_m": 0.016,
+      "grasp_close_rad": 0.075966
+    },
+    "bolt_8mm": {
+      "aabb_m": {
+        "x": 0.013,
+        "y": 0.028,
+        "z": 0.012994
+      },
+      "aabb_mm": {
+        "x": 12.999848,
+        "y": 28.000004,
+        "z": 12.99408
+      },
+      "n_meshes": 1,
+      "n_pts": 15899,
+      "source": "points",
+      "grasp_rule": "xz_max",
+      "grasp_width_m": 0.013,
+      "grasp_close_rad": 0.062211
+    },
+    "usb_a": {
+      "aabb_m": {
+        "x": 0.021157,
+        "y": 0.025,
+        "z": 0.012216
+      },
+      "aabb_mm": {
+        "x": 21.156801,
+        "y": 25.000001,
+        "z": 12.216462
+      },
+      "n_meshes": 1,
+      "n_pts": 20,
+      "source": "points",
+      "grasp_rule": "xz_max",
+      "grasp_width_m": 0.021157,
+      "grasp_close_rad": 0.099586
+    },
+    "hdmi": {
+      "aabb_m": {
+        "x": 0.021157,
+        "y": 0.025,
+        "z": 0.0095
+      },
+      "aabb_mm": {
+        "x": 21.1568,
+        "y": 25.000001,
+        "z": 9.500001
+      },
+      "n_meshes": 1,
+      "n_pts": 20,
+      "source": "points",
+      "grasp_rule": "xz_max",
+      "grasp_width_m": 0.021157,
+      "grasp_close_rad": 0.099586
+    },
+    "pin": {
+      "aabb_m": {
+        "x": 0.0138,
+        "y": 0.0214,
+        "z": 0.013796
+      },
+      "aabb_mm": {
+        "x": 13.800004,
+        "y": 21.399999,
+        "z": 13.795716
+      },
+      "n_meshes": 1,
+      "n_pts": 13937,
+      "source": "points",
+      "grasp_rule": "xz_max",
+      "grasp_width_m": 0.0138,
+      "grasp_close_rad": 0.065879
+    },
+    "battery_size1": {
+      "aabb_m": {
+        "x": 0.061087,
+        "y": 0.032978,
+        "z": 0.033071
+      },
+      "aabb_mm": {
+        "x": 61.086999,
+        "y": 32.978335,
+        "z": 33.070801
+      },
+      "n_meshes": 1,
+      "n_pts": 3922,
+      "source": "points",
+      "grasp_rule": "cylinder_yz_mean_diameter",
+      "grasp_width_m": 0.033025,
+      "cylinder_radius_m": 0.016512,
+      "grasp_close_rad": 0.153933
+    },
+    "battery_size5": {
+      "aabb_m": {
+        "x": 0.0505,
+        "y": 0.014495,
+        "z": 0.0145
+      },
+      "aabb_mm": {
+        "x": 50.500002,
+        "y": 14.495492,
+        "z": 14.500001
+      },
+      "n_meshes": 1,
+      "n_pts": 13166,
+      "source": "points",
+      "grasp_rule": "cylinder_yz_mean_diameter",
+      "grasp_width_m": 0.014498,
+      "cylinder_radius_m": 0.007249,
+      "grasp_close_rad": 0.06908
+    }
+  },
+  "aperture_calibration": {
+    "model": "piecewise_linear_measured",
+    "q_closed_rad": 0.0,
+    "gap_at_q_closed_m": 0.0,
+    "q_open_rad": 0.6649704,
+    "gap_at_q_open_m": 0.141577671,
+    "clearance_m": 0.0005,
+    "margin_m": 0.0,
+    "measurement": "Isaac Sim 5.1 PhysX articulation, Vega right gripper and mimic joint drive-settled for 240 steps per sample at 120 Hz; inner mesh gap measured in gripper_link frame at distal vertices z >= 0.18 m.",
+    "samples": [
+      {"q_rad": 0.0, "gap_m": 0.0},
+      {"q_rad": 0.025, "gap_m": 0.005398502},
+      {"q_rad": 0.05, "gap_m": 0.010836844},
+      {"q_rad": 0.075, "gap_m": 0.016289167},
+      {"q_rad": 0.1, "gap_m": 0.021747398},
+      {"q_rad": 0.125, "gap_m": 0.027209722},
+      {"q_rad": 0.15, "gap_m": 0.032668057},
+      {"q_rad": 0.2, "gap_m": 0.043561689},
+      {"q_rad": 0.25, "gap_m": 0.053889767},
+      {"q_rad": 0.3, "gap_m": 0.063726733},
+      {"q_rad": 0.4, "gap_m": 0.083577122},
+      {"q_rad": 0.5, "gap_m": 0.104180116},
+      {"q_rad": 0.6, "gap_m": 0.126430282},
+      {"q_rad": 0.6649704, "gap_m": 0.141577671}
+    ],
+    "note": "Runtime target gap = grasp_width_m + clearance_m - margin_m, inverted through the measured samples. grasp_close_rad fields are audit values."
+  }
+}

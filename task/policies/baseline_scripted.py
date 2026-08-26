@@ -4,9 +4,9 @@ Wraps the original `EEPathFollower`-driven pick-and-place: per part, build
 a 9-phase EE-pose path from `PART_CONFIG`, drive Lula IK to follow it,
 gate the snap_wait waypoint on `obs.snap_fired`.
 
-Output should be byte-identical to the pre-refactor `run_pick_place.py` when
-the harness selects this policy. Participants should not modify this file;
-copy `template.py` instead.
+The motion path matches the pre-refactor `run_pick_place.py`; its close
+waypoint uses the shared geometric grasp-aperture resolver. Participants
+should not modify this file; copy `template.py` instead.
 """
 from __future__ import annotations
 
@@ -35,8 +35,9 @@ def make_l_path_for_part(part_name, snap_advance_when=None,
     """Build the 9-phase L path for one part using its PART_CONFIG entry.
 
     Pick/place world OBJECT positions are offset by `cfg["ee_offset"]` to
-    get the EE-frame target positions. Orientations and per-part gripper
-    open/close joint values are pulled from cfg too. Returns the (possibly
+    get the EE-frame target positions. Gripper open/close values use
+    ``pc.part_grasp_open_rad`` / ``pc.part_grasp_close_rad`` so geometric
+    Design D and teleop share one resolver. Returns the (possibly
     `MAX_PHASES`-truncated) waypoint list, or `[]` if both pick_pos and
     place_pos are None.
 
@@ -71,6 +72,7 @@ def make_l_path_for_part(part_name, snap_advance_when=None,
     final_height = (cfg.get("final_height")
                     if cfg.get("final_height") is not None
                     else getattr(pc, "FINAL_HEIGHT", None))
+    gripper_open = pc.part_grasp_open_rad(part_name)
     full = build_pick_place_phases(
         pick_pos=pick_pos_ee,
         pick_orn=orn if pick_pos_ee is not None else None,
@@ -87,8 +89,8 @@ def make_l_path_for_part(part_name, snap_advance_when=None,
         transit_steps=int(transit_steps),
         descend_pick_steps=pc.DESCEND_PICK_STEPS,
         descend_place_steps=pc.DESCEND_PLACE_STEPS,
-        gripper_open_value=cfg.get("gripper_open"),
-        gripper_close_value=cfg.get("gripper_close"),
+        gripper_open_value=gripper_open,
+        gripper_close_value=pc.part_grasp_close_rad(part_name),
         release_mode=cfg.get("release_mode", "open"),
         snap_advance_when=snap_advance_when,
         snap_timeout_steps=snap_timeout_steps,
@@ -99,7 +101,7 @@ def make_l_path_for_part(part_name, snap_advance_when=None,
         snap_search_dwell_steps=int(((cfg.get("snap") or {}).get("search") or {})
                                     .get("dwell_steps", 1)),
         return_home_q=return_home_q,
-        return_home_gripper=cfg.get("gripper_open"),
+        return_home_gripper=gripper_open,
         return_home_cspace_tol=getattr(pc, "RETURN_HOME_CSPACE_TOL", None),
         return_home_settle_steps=getattr(pc, "RETURN_HOME_SETTLE_STEPS", 20),
     )

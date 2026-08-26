@@ -64,6 +64,12 @@ retarget:
   max_lin_vel: 0.70
   max_ang_vel: 1.2
   max_lin_acc: 3.0
+  # Drop one-frame leader jumps above these speeds (hold last good sample).
+  # Removes spurious FK/IPC jerks so proximity_delta_gain does not integrate them.
+  spike_filter_enabled: true
+  spike_max_lin_vel: 1.5
+  spike_max_ang_vel: 8.0
+  spike_max_gripper_vel: 5.0
   # Near-contact fine control from R-wrist laser last_length.
   # proximity_rate_limit: scale max_lin/ang_vel (+accel); absolute map
   #   unchanged → EEF catches up (default off).
@@ -80,29 +86,39 @@ retarget:
     depth_inner_m: 0.18
     scale_min: 0.4
   gripper_open_limit: 0.6649704
-  # Soft GRIPPER_DRIVE_* maxForce remains a safety net; when enabled,
-  # primary anti-eject is slow binary close + stall hold
-  # (controllers/gripper_compliance.py).
+  # Soft GRIPPER_DRIVE_* (stiffness/damping/maxForce) are applied by the
+  # harness the same way as scripted baseline (_apply_gripper_compliance).
+  # Command-side slow close + stall hold is separate (below).
+  # Default close endpoint when ROCO_TELEOP_PART is unset. With
+  # collect --part NAME, aloha_teleop overrides this from
+  # grasp_width_m + aperture_calibration in part_local_aabb_extents.json
+  # (Design D), falling back to PART_CONFIG[NAME].gripper_close.
   gripper_close: 0.0
-  # Master switch for the compliance module (slew + stall hold).
-  # false → legacy immediate aperture from map_gripper (linear remap).
-  gripper_compliance_enabled: true
-  # binary (default): leader norm → open/close intent, then slow slew + hold.
-  # continuous: linear aperture map, still through the same slew/hold.
-  # Ignored for mapping when gripper_compliance_enabled is false (linear).
-  gripper_mode: binary
-  # Leader gripper_norm at/below which DexMate close intent fires (binary)
-  # or full close (continuous). Absorbs short physical leader travel.
+  # Master switch for command-side compliance (slew + stall hold).
+  # Soft PhysX drives stay on regardless.
+  gripper_compliance_enabled: false
+  # continuous (default): linear leader norm → aperture, then optional slew/hold.
+  # binary: open/close intent only.
+  gripper_mode: continuous
+  # Leader gripper_norm at/below which DexMate full close (continuous) or
+  # close intent (binary). Absorbs short physical leader travel.
   gripper_close_norm: 0.20
   gripper_hysteresis: 0.03
   # Slow close so stall detection has time to freeze aperture on contact.
-  gripper_close_speed_rad_s: 0.05
-  gripper_open_speed_rad_s: 0.25
+  gripper_close_speed_rad_s: 0.4
+  gripper_open_speed_rad_s: 0.75
   gripper_stall_qd: 0.02
-  gripper_stall_err: 0.02
+  # Must be <= gripper_max_close_lag so lag-based stall can fire when capped.
+  gripper_stall_err: 0.008
   gripper_stall_dq: 0.005
   gripper_stall_min_close_rad: 0.03
-  gripper_hold_margin: 0.01
+  gripper_hold_margin: 0.002
+  # Hard cap: never command more closed than measured by more than this
+  # (compliance beats continuous leader-0 aperture catch-up).
+  gripper_max_close_lag: 0.01
+  # ~0.24s at 50Hz; slow soft-drive free-air creep must not false-hold.
+  gripper_stall_hold_ticks: 12
+  gripper_stall_progress: 0.002
   stale_hold_s: 0.10
   stale_pause_s: 0.50
 

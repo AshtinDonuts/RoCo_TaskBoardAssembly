@@ -176,9 +176,9 @@ def _apply_gripper_compliance(robot) -> None:
     aperture crushed assets. Soft maxForce + moderate stiffness keeps the
     commanded aperture at 0 while contact compliance holds the part.
     """
-    stiffness = float(getattr(pc, "GRIPPER_DRIVE_STIFFNESS", 800.0))
-    damping = float(getattr(pc, "GRIPPER_DRIVE_DAMPING", 80.0))
-    max_force = float(getattr(pc, "GRIPPER_DRIVE_MAX_FORCE", 3.0))
+    stiffness = float(getattr(pc, "GRIPPER_DRIVE_STIFFNESS", 80.0))
+    damping = float(getattr(pc, "GRIPPER_DRIVE_DAMPING", 25.0))
+    max_force = float(getattr(pc, "GRIPPER_DRIVE_MAX_FORCE", 0.5))
     joint_names = ("L_gripper_joint", "R_gripper_joint")
 
     # Prefer live articulation gains once PhysX has the robot.

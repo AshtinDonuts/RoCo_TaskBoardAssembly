@@ -101,20 +101,32 @@ class RetargetConfig:
     # Master switch for slow-close + stall hold (controllers/gripper_compliance).
     # false → legacy immediate aperture commands (no slew / hold).
     gripper_compliance_enabled: bool = True
-    # binary (default): leader norm → open/close intent; continuous: linear map.
-    gripper_mode: str = "binary"
+    # continuous (default): linear leader→aperture; binary: open/close intent.
+    gripper_mode: str = "continuous"
     # Leader gripper_norm at/below which DexMate is fully closed (continuous)
     # or close intent (binary). Absorbs leader calibration slack.
     gripper_close_norm: float = 0.20
     gripper_hysteresis: float = 0.03
     # Slow-close + stall hold (see controllers/gripper_compliance.py).
-    gripper_close_speed_rad_s: float = 0.05
-    gripper_open_speed_rad_s: float = 0.25
+    gripper_close_speed_rad_s: float = 0.4
+    gripper_open_speed_rad_s: float = 0.8
     gripper_stall_qd: float = 0.02
-    gripper_stall_err: float = 0.02
+    gripper_stall_err: float = 0.008
     gripper_stall_dq: float = 0.005
     gripper_stall_min_close_rad: float = 0.03
-    gripper_hold_margin: float = 0.01
+    gripper_hold_margin: float = 0.002
+    # Cap how far q_cmd may lead closed vs q_meas (beats leader catch-up).
+    gripper_max_close_lag: float = 0.01
+    gripper_stall_hold_ticks: int = 12
+    gripper_stall_progress: float = 0.002
+    # Reject one-frame leader jumps larger than these (hold last good sample).
+    # Rate limiting still applies afterward; this removes spurious spikes so
+    # delta-gain does not permanently integrate a glitch. Enabled in the
+    # Solo→Vega YAML; off by default so unit tests can take large steps.
+    spike_filter_enabled: bool = False
+    spike_max_lin_vel: float = 1.5  # m/s of leader EE translation
+    spike_max_ang_vel: float = 8.0  # rad/s of leader EE rotation
+    spike_max_gripper_vel: float = 5.0  # leader gripper_norm units/s
     stale_hold_s: float = 0.10
     stale_pause_s: float = 0.50
     # Throttle max_lin/ang_vel (+ accel); absolute map unchanged → catch-up.
@@ -220,6 +232,10 @@ class RetargetState:
     last_gripper: float = 0.0
     last_lin_vel: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
     last_cmd: str = "none"
+    # Last accepted leader sample for spike rejection (may lag a glitch).
+    spike_pos: Optional[np.ndarray] = None
+    spike_quat: Optional[np.ndarray] = None
+    spike_gripper: Optional[float] = None
 
 
 class CartesianRetargeter:
@@ -248,6 +264,9 @@ class CartesianRetargeter:
         st.last_pos = st.dex_origin_pos.copy()
         st.last_quat = st.dex_origin_quat.copy()
         st.last_lin_vel[:] = 0.0
+        st.spike_pos = st.leader_origin_pos.copy()
+        st.spike_quat = st.leader_origin_quat.copy()
+        st.spike_gripper = None
 
     def disengage(self) -> None:
         self.state.engaged = False
@@ -257,13 +276,16 @@ class CartesianRetargeter:
         self.state.dex_origin_quat = None
         self.state.leader_prev_pos = None
         self.state.leader_prev_quat = None
+        self.state.spike_pos = None
+        self.state.spike_quat = None
+        self.state.spike_gripper = None
 
     def map_gripper(self, gripper_norm: float) -> float:
         cfg = self.cfg
         # When compliance module is off, always use legacy linear remap
         # (immediate aperture; no binary endpoint + slew/hold path).
         compliance_on = bool(getattr(cfg, "gripper_compliance_enabled", True))
-        mode = str(getattr(cfg, "gripper_mode", "binary")).lower()
+        mode = str(getattr(cfg, "gripper_mode", "continuous")).lower()
         g = float(np.clip(gripper_norm, 0.0, 1.0))
         close_at = float(np.clip(cfg.gripper_close_norm, 0.0, 0.95))
         if compliance_on and mode == "binary":
@@ -336,6 +358,7 @@ class CartesianRetargeter:
             "delta_gain_scale": float(delta_scale),
             "rate_limit_scale": float(rate_scale),
             "motion_scale": float(rate_scale),  # back-compat alias
+            "spike_rejected": False,
         }
         if not deadman:
             info["held"] = True
@@ -354,9 +377,10 @@ class CartesianRetargeter:
                 current_dex_pos, current_dex_quat, self.state.last_gripper, info
             )
 
-        grip = self.map_gripper(gripper_norm)
         if clutch and not self.state.engaged:
             self.capture_origins(leader_pos, leader_quat, current_dex_pos, current_dex_quat)
+            self.state.spike_gripper = float(np.clip(gripper_norm, 0.0, 1.0))
+            grip = self.map_gripper(gripper_norm)
             info["engaged"] = True
             info["reason"] = "clutch_engage"
             return (
@@ -365,6 +389,12 @@ class CartesianRetargeter:
                 grip,
                 info,
             )
+
+        leader_pos, leader_quat, gripper_norm, spike_info = self._spike_filter(
+            leader_pos, leader_quat, gripper_norm, dt
+        )
+        info.update(spike_info)
+        grip = self.map_gripper(gripper_norm)
 
         if self.cfg.proximity_delta_gain.enabled:
             pos, quat = self._incremental_target(
@@ -381,6 +411,80 @@ class CartesianRetargeter:
         self.state.last_quat = quat
         info["reason"] = "tracking"
         return pos, quat, grip, info
+
+    def _spike_filter(
+        self,
+        leader_pos: Sequence[float],
+        leader_quat: Sequence[float],
+        gripper_norm: float,
+        dt: float,
+    ) -> Tuple[np.ndarray, np.ndarray, float, Dict[str, Any]]:
+        """Drop one-frame leader jumps above configured velocity caps.
+
+        Rejected samples are replaced with the last accepted leader pose /
+        gripper so delta-gain does not integrate a glitch and absolute
+        mapping does not snap to a bad FK sample.
+        """
+        cfg = self.cfg
+        st = self.state
+        pos = T.as_vec(leader_pos, 3)
+        quat = T.normalize_quat_wxyz(leader_quat)
+        grip = float(np.clip(gripper_norm, 0.0, 1.0))
+        info: Dict[str, Any] = {
+            "spike_rejected": False,
+            "spike_lin": False,
+            "spike_ang": False,
+            "spike_gripper": False,
+        }
+        if not bool(getattr(cfg, "spike_filter_enabled", True)):
+            st.spike_pos = pos.copy()
+            st.spike_quat = quat.copy()
+            st.spike_gripper = grip
+            return pos, quat, grip, info
+
+        dt = max(float(dt), 1e-4)
+        if st.spike_pos is None or st.spike_quat is None:
+            st.spike_pos = pos.copy()
+            st.spike_quat = quat.copy()
+            st.spike_gripper = grip
+            return pos, quat, grip, info
+
+        max_dp = float(cfg.spike_max_lin_vel) * dt
+        max_da = float(cfg.spike_max_ang_vel) * dt
+        max_dg = float(cfg.spike_max_gripper_vel) * dt
+
+        dp = float(np.linalg.norm(pos - st.spike_pos))
+        q_rel = T.quat_multiply_wxyz(quat, T.quat_conjugate_wxyz(st.spike_quat))
+        da = float(np.linalg.norm(T.quat_wxyz_to_rotvec(q_rel)))
+        prev_g = float(st.spike_gripper if st.spike_gripper is not None else grip)
+        dg = abs(grip - prev_g)
+
+        rejected = False
+        out_pos, out_quat = pos, quat
+        out_grip = grip
+        if max_dp > 0.0 and dp > max_dp:
+            info["spike_lin"] = True
+            rejected = True
+            out_pos = st.spike_pos.copy()
+            out_quat = st.spike_quat.copy()
+        if max_da > 0.0 and da > max_da:
+            info["spike_ang"] = True
+            rejected = True
+            out_pos = st.spike_pos.copy()
+            out_quat = st.spike_quat.copy()
+        if max_dg > 0.0 and dg > max_dg:
+            info["spike_gripper"] = True
+            rejected = True
+            out_grip = prev_g
+
+        info["spike_rejected"] = rejected
+        # Accept channels independently so a gripper glitch does not freeze EE.
+        if not info["spike_lin"] and not info["spike_ang"]:
+            st.spike_pos = pos.copy()
+            st.spike_quat = quat.copy()
+        if not info["spike_gripper"]:
+            st.spike_gripper = grip
+        return out_pos, out_quat, out_grip, info
 
     def _sync_leader_prev(
         self, leader_pos: Sequence[float], leader_quat: Sequence[float]

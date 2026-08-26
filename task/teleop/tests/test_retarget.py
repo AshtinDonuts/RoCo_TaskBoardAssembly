@@ -908,3 +908,91 @@ def test_fixed_orientation_wxyz_rate_limit_slews_not_snap():
         )
     np.testing.assert_allclose(quat, top_down, atol=1e-6)
 
+
+def test_spike_filter_rejects_large_leader_jump():
+    """One-frame leader glitch must not move the DexMate target."""
+    from teleop.retarget import ProximityScaleConfig
+
+    origin = np.array([0.1, 0.2, 0.3])
+    r = CartesianRetargeter(
+        RetargetConfig(
+            translation_gain=1.0,
+            max_lin_vel=10.0,
+            max_ang_vel=10.0,
+            max_lin_acc=0.0,
+            spike_filter_enabled=True,
+            spike_max_lin_vel=1.0,  # 0.02 m/frame at dt=0.02
+            spike_max_ang_vel=100.0,
+            spike_max_gripper_vel=100.0,
+            proximity_delta_gain=ProximityScaleConfig(enabled=False),
+        )
+    )
+    identity = np.array([1.0, 0.0, 0.0, 0.0])
+    pos, _, _, info = r.step(
+        leader_pos=[0.0, 0.0, 0.0],
+        leader_quat=identity,
+        gripper_norm=1.0,
+        dt=0.02,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=origin,
+        current_dex_quat=identity,
+    )
+    assert info["reason"] == "clutch_engage"
+    np.testing.assert_allclose(pos, origin)
+
+    pos, _, _, info = r.step(
+        leader_pos=[0.01, 0.0, 0.0],
+        leader_quat=identity,
+        gripper_norm=1.0,
+        dt=0.02,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=origin,
+        current_dex_quat=identity,
+    )
+    assert info["spike_rejected"] is False
+    assert float(np.linalg.norm(pos - origin)) > 1e-6
+    good = pos.copy()
+
+    pos2, _, _, info2 = r.step(
+        leader_pos=[0.21, 0.0, 0.0],
+        leader_quat=identity,
+        gripper_norm=1.0,
+        dt=0.02,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=good,
+        current_dex_quat=identity,
+    )
+    assert info2["spike_rejected"] is True
+    assert info2["spike_lin"] is True
+    np.testing.assert_allclose(pos2, good, atol=1e-9)
+
+    pos3, _, _, info3 = r.step(
+        leader_pos=[0.015, 0.0, 0.0],
+        leader_quat=identity,
+        gripper_norm=1.0,
+        dt=0.02,
+        clutch=True,
+        deadman=True,
+        current_dex_pos=good,
+        current_dex_quat=identity,
+    )
+    assert info3["spike_rejected"] is False
+
+
+def test_spike_filter_config_from_dict():
+    cfg = RetargetConfig.from_dict(
+        {
+            "spike_filter_enabled": True,
+            "spike_max_lin_vel": 2.0,
+            "spike_max_ang_vel": 4.0,
+            "spike_max_gripper_vel": 3.0,
+        }
+    )
+    assert cfg.spike_filter_enabled is True
+    assert cfg.spike_max_lin_vel == 2.0
+    assert cfg.spike_max_ang_vel == 4.0
+    assert cfg.spike_max_gripper_vel == 3.0
+
