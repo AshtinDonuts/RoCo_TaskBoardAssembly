@@ -42,6 +42,7 @@ from policies.asset_centroid_motion import (  # noqa: E402
     sample_joint_segment,
     sample_pose_segment,
     top_down_yaw_candidates,
+    top_down_yaw_quat,
     unwrap_revolute_delta,
 )
 
@@ -295,8 +296,13 @@ class AssetCentroidScriptedPolicy(Policy):
             raise RuntimeError("part spec not loaded")
         tcp = self._part_spec.tcp_to_grasp_tool
         clear = self._cfg.path_clearances
-        pick = ee_position_for_grasp_center(grasp_center, pick_orn, tcp)
-        place = ee_position_for_grasp_center(place_center, place_orn, tcp)
+        frame = clear.tcp_offset_frame
+        pick = ee_position_for_grasp_center(
+            grasp_center, pick_orn, tcp, offset_frame=frame
+        )
+        place = ee_position_for_grasp_center(
+            place_center, place_orn, tcp, offset_frame=frame
+        )
         return {
             "pick": pick,
             "hover_pick": pick + np.array([0.0, 0.0, clear.hover_pick_m]),
@@ -305,6 +311,12 @@ class AssetCentroidScriptedPolicy(Policy):
             "hover_place": place + np.array([0.0, 0.0, clear.hover_place_m]),
             "retract": place + np.array([0.0, 0.0, clear.final_retract_m]),
         }
+
+    def _yaw_candidates(self) -> tuple[np.ndarray, ...]:
+        clear = self._cfg.path_clearances
+        if clear.force_yaw_deg is not None:
+            return (top_down_yaw_quat(clear.force_yaw_deg),)
+        return top_down_yaw_candidates(clear.yaw_step_deg)
 
     def _prismatic_mask(self) -> np.ndarray:
         names = list(self._controller.cspace_joint_names())
@@ -331,9 +343,19 @@ class AssetCentroidScriptedPolicy(Policy):
         seed0 = np.asarray(self._controller.current_cspace_q(), dtype=np.float64)
         best = None
         pick_keys = ("hover_pick", "pick", "lift_pick")
-        place_keys = ("hover_place", "place", "retract")
+        # Do not require retract in preflight: yaw=0 place can be fine while
+        # retract IK fails, which previously aborted the whole plan.
+        place_keys = ("hover_place", "place")
         failure_counts = {key: 0 for key in pick_keys + place_keys}
-        candidates = top_down_yaw_candidates(self._cfg.path_clearances.yaw_step_deg)
+        candidates = self._yaw_candidates()
+        clear = self._cfg.path_clearances
+        print(
+            f"[asset_centroid] Test-path: tcp_offset_frame={clear.tcp_offset_frame!r} "
+            f"force_yaw_deg={clear.force_yaw_deg} "
+            f"n_yaw={len(candidates)} "
+            f"tcp={list(self._part_spec.tcp_to_grasp_tool) if self._part_spec else None}",
+            flush=True,
+        )
         for pick_rank, pick_orn in enumerate(candidates):
             poses = self._pose_set(grasp_center, place_center, pick_orn)
             seed = seed0.copy()
@@ -379,6 +401,60 @@ class AssetCentroidScriptedPolicy(Policy):
                         place_orn.copy(),
                         pair_poses,
                     )
+        if best is None and clear.force_yaw_deg is not None:
+            fallback = top_down_yaw_candidates(clear.yaw_step_deg)
+            print(
+                f"[asset_centroid] forced yaw {clear.force_yaw_deg:g} deg infeasible "
+                f"(failures={failure_counts}); falling back to {len(fallback)} yaws",
+                flush=True,
+            )
+            candidates = fallback
+            failure_counts = {key: 0 for key in pick_keys + place_keys}
+            for pick_rank, pick_orn in enumerate(candidates):
+                poses = self._pose_set(grasp_center, place_center, pick_orn)
+                seed = seed0.copy()
+                pick_score = pick_rank * 1e-6
+                feasible = True
+                for key in pick_keys:
+                    q, ok = self._controller.solve_q(poses[key], pick_orn, seed=seed)
+                    if not ok or q is None:
+                        failure_counts[key] += 1
+                        feasible = False
+                        break
+                    q = np.asarray(q, dtype=np.float64).reshape(-1)
+                    pick_score += self._joint_step_cost(seed, q)
+                    seed = q
+                if not feasible:
+                    continue
+                lift_seed = seed.copy()
+                for place_rank, place_orn in enumerate(candidates):
+                    pair_poses = self._pose_set(
+                        grasp_center, place_center, pick_orn, place_orn
+                    )
+                    seed = lift_seed.copy()
+                    place_score = place_rank * 1e-6
+                    place_ok = True
+                    for key in place_keys:
+                        q, ok = self._controller.solve_q(
+                            pair_poses[key], place_orn, seed=seed
+                        )
+                        if not ok or q is None:
+                            failure_counts[key] += 1
+                            place_ok = False
+                            break
+                        q = np.asarray(q, dtype=np.float64).reshape(-1)
+                        place_score += self._joint_step_cost(seed, q)
+                        seed = q
+                    if not place_ok:
+                        continue
+                    score = pick_score + place_score
+                    if best is None or score < best[0]:
+                        best = (
+                            score,
+                            pick_orn.copy(),
+                            place_orn.copy(),
+                            pair_poses,
+                        )
         if best is None:
             preferred_poses = self._pose_set(
                 grasp_center, place_center, candidates[0]
@@ -393,11 +469,17 @@ class AssetCentroidScriptedPolicy(Policy):
             )
         pick_yaw = self._nominal_yaw_degrees(best[1])
         place_yaw = self._nominal_yaw_degrees(best[2])
+        poses = best[3]
+        xy_err_pick = float(
+            np.linalg.norm(poses["hover_pick"][:2] - grasp_center[:2])
+        )
         print(
             "[asset_centroid] selected world-down TCP yaws "
             f"(pick={pick_yaw:.1f} deg, place={place_yaw:.1f} deg) "
-            f"on right arm; hover_place="
-            f"{np.round(best[3]['hover_place'], 5).tolist()}",
+            f"on {self._cfg.active_arm} arm; frame={self._cfg.path_clearances.tcp_offset_frame}; "
+            f"hover_pick={np.round(poses['hover_pick'], 5).tolist()} "
+            f"(|xy−grasp|={xy_err_pick * 1000:.1f} mm); "
+            f"hover_place={np.round(poses['hover_place'], 5).tolist()}",
             flush=True,
         )
         return best[1], best[2], best[3]
@@ -490,8 +572,22 @@ class AssetCentroidScriptedPolicy(Policy):
                 )
         return self._last_action
 
-    def _advance_phase(self) -> None:
+    def _log_pose_error(self, obs: Observation, phase: _Phase) -> None:
+        actual_pos, actual_orn = self._actual_ee_pose(obs)
+        pos_err = float(np.linalg.norm(np.asarray(actual_pos) - phase.pos))
+        orn_err = float(quat_angle(actual_orn, phase.orn))
+        print(
+            f"[asset_centroid] arrive {phase.name}: "
+            f"cmd={np.round(phase.pos, 5).tolist()} "
+            f"meas={np.round(actual_pos, 5).tolist()} "
+            f"pos_err={pos_err * 1000:.1f} mm orn_err={np.degrees(orn_err):.1f} deg",
+            flush=True,
+        )
+
+    def _advance_phase(self, obs: Optional[Observation] = None) -> None:
         completed = self._phases[self._phase_index].name
+        if obs is not None:
+            self._log_pose_error(obs, self._phases[self._phase_index])
         self._phase_index += 1
         self._phase_ticks = 0
         self._segment = ()
@@ -516,7 +612,7 @@ class AssetCentroidScriptedPolicy(Policy):
             if self._ik_failure_steps == 0:
                 self._phase_ticks += 1
                 if self._phase_ticks >= phase.dwell_steps:
-                    self._advance_phase()
+                    self._advance_phase(obs)
             return action
 
         if not self._segment:
@@ -549,7 +645,7 @@ class AssetCentroidScriptedPolicy(Policy):
             and quat_angle(actual_orn, phase.orn) <= guards.orn_tol_rad
         )
         if reached:
-            self._advance_phase()
+            self._advance_phase(obs)
         else:
             self._final_hold_steps += 1
             if self._final_hold_steps >= guards.max_final_hold_steps:

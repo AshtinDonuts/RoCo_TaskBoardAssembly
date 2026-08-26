@@ -3,8 +3,8 @@
   "comment": "Tunables for policies.asset_centroid_scripted.AssetCentroidScriptedPolicy (V1, right arm). Override path with ROCO_ASSET_CENTROID_CONFIG.",
   "active_arm": "R",
   "motion": {
-    "max_linear_speed_m_s": 0.30,
-    "max_angular_speed_deg_s": 20.0,
+    "max_linear_speed_m_s": 0.10,
+    "max_angular_speed_deg_s": 40.0,
     "minimum_move_s": 0.5
   },
   "path": {

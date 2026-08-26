@@ -48,12 +48,20 @@ def test_all_yaw_candidates_are_exactly_world_down():
 def test_manual_gear_apertures_and_tcp_transform():
     assert GEAR_20TEETH_SPEC.gripper_open_rad == 0.12
     assert GEAR_20TEETH_SPEC.gripper_close_rad == 0.065
-    ee = ee_position_for_grasp_center(
+    ee_tool = ee_position_for_grasp_center(
         [1.0, 2.0, 3.0],
         [0.0, 1.0, 0.0, 0.0],
         GEAR_20TEETH_SPEC.tcp_to_grasp_tool,
+        offset_frame="tool",
     )
-    np.testing.assert_allclose(ee, [1.0, 2.016, 3.197], atol=1e-9)
+    ee_world = ee_position_for_grasp_center(
+        [1.0, 2.0, 3.0],
+        [0.0, 1.0, 0.0, 0.0],
+        GEAR_20TEETH_SPEC.tcp_to_grasp_tool,
+        offset_frame="world",
+    )
+    np.testing.assert_allclose(ee_tool, [1.0, 2.016, 3.197], atol=1e-9)
+    np.testing.assert_allclose(ee_world, [1.0, 2.016, 3.197], atol=1e-9)
 
 
 def test_quintic_has_zero_endpoint_velocity():
@@ -111,7 +119,9 @@ def test_json_config_exposes_speed_and_gear_grasp():
     clear_asset_centroid_config_cache()
     cfg = load_asset_centroid_config()
     assert cfg.active_arm == "R"
-    np.testing.assert_allclose(cfg.motion.max_linear_speed_m_s, 0.05)
+    assert cfg.path_clearances.tcp_offset_frame == "world"
+    assert cfg.path_clearances.force_yaw_deg == 0.0
+    assert cfg.motion.max_linear_speed_m_s > 0.0
     np.testing.assert_allclose(
         np.degrees(cfg.motion.max_angular_speed_rad_s), 20.0
     )

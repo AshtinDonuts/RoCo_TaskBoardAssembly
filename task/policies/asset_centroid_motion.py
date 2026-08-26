@@ -31,6 +31,11 @@ class PathClearances:
     hover_place_m: float
     final_retract_m: float
     yaw_step_deg: float
+    # None = search with yaw_step_deg; otherwise lock both pick/place to this yaw.
+    force_yaw_deg: float | None
+    # "world": baseline-style EE = grasp + offset (no yaw rotation of lateral).
+    # "tool": EE = grasp - R(orn)·offset (lateral swings with yaw).
+    tcp_offset_frame: str
 
 
 @dataclass(frozen=True)
@@ -116,7 +121,18 @@ def load_asset_centroid_config(path: Path | str | None = None) -> AssetCentroidC
         hover_place_m=float(path_raw.get("hover_place_m", 0.05)),
         final_retract_m=float(path_raw.get("final_retract_m", 0.10)),
         yaw_step_deg=float(path_raw.get("yaw_step_deg", 15.0)),
+        force_yaw_deg=(
+            None
+            if path_raw.get("force_yaw_deg", None) is None
+            else float(path_raw["force_yaw_deg"])
+        ),
+        tcp_offset_frame=str(path_raw.get("tcp_offset_frame", "tool")).lower(),
     )
+    if path_clearances.tcp_offset_frame not in ("tool", "world"):
+        raise ValueError(
+            "path.tcp_offset_frame must be 'tool' or 'world', got "
+            f"{path_clearances.tcp_offset_frame!r}"
+        )
     timing = TimingSpec(
         close_dwell_s=float(timing_raw.get("close_dwell_s", 1.5)),
         settle_place_s=float(timing_raw.get("settle_place_s", 0.5)),
@@ -215,24 +231,26 @@ def rotate_vector(quat: Sequence[float], vector: Sequence[float]) -> np.ndarray:
     return rot @ np.asarray(vector, dtype=np.float64).reshape(3)
 
 
+def top_down_yaw_quat(yaw_deg: float) -> np.ndarray:
+    angle = np.deg2rad(float(yaw_deg))
+    yaw = np.array(
+        [np.cos(angle / 2.0), 0.0, 0.0, np.sin(angle / 2.0)],
+        dtype=np.float64,
+    )
+    return quat_mul_wxyz(yaw, TOP_DOWN_WXYZ)
+
+
 def top_down_yaw_candidates(step_degrees: float = 15.0) -> tuple[np.ndarray, ...]:
     """Top-down quaternions ordered 0, +step, -step, ... around world Z."""
     if step_degrees <= 0.0 or 360.0 % step_degrees > 1e-9:
         raise ValueError("step_degrees must be a positive divisor of 360")
     n = int(round(180.0 / step_degrees))
-    angles = [0.0]
+    angles_deg = [0.0]
     for i in range(1, n + 1):
-        angles.append(np.deg2rad(i * step_degrees))
+        angles_deg.append(i * step_degrees)
         if i < n:
-            angles.append(np.deg2rad(-i * step_degrees))
-    out = []
-    for angle in angles:
-        yaw = np.array(
-            [np.cos(angle / 2.0), 0.0, 0.0, np.sin(angle / 2.0)],
-            dtype=np.float64,
-        )
-        out.append(quat_mul_wxyz(yaw, TOP_DOWN_WXYZ))
-    return tuple(out)
+            angles_deg.append(-i * step_degrees)
+    return tuple(top_down_yaw_quat(a) for a in angles_deg)
 
 
 def local_aabb_midpoint(points: Sequence[Sequence[float]]) -> np.ndarray:
@@ -258,11 +276,23 @@ def ee_position_for_grasp_center(
     grasp_center_world: Sequence[float],
     ee_orientation_wxyz: Sequence[float],
     tcp_to_grasp_tool: Sequence[float],
+    *,
+    offset_frame: str = "tool",
 ) -> np.ndarray:
-    """EE origin that places the tool-frame grasp center at a world point."""
-    return np.asarray(grasp_center_world, dtype=np.float64).reshape(3) - rotate_vector(
-        ee_orientation_wxyz, tcp_to_grasp_tool
-    )
+    """EE origin that places the grasp center at a world point.
+
+    offset_frame:
+      - ``tool``: EE = grasp − R(orn)·tcp  (lateral swings with yaw)
+      - ``world``: EE = grasp + tcp  (baseline-style world ``ee_offset``)
+    """
+    grasp = np.asarray(grasp_center_world, dtype=np.float64).reshape(3)
+    tcp = np.asarray(tcp_to_grasp_tool, dtype=np.float64).reshape(3)
+    frame = str(offset_frame).lower()
+    if frame == "world":
+        return grasp + tcp
+    if frame == "tool":
+        return grasp - rotate_vector(ee_orientation_wxyz, tcp)
+    raise ValueError(f"offset_frame must be 'tool' or 'world', got {offset_frame!r}")
 
 
 def quintic_smoothstep(u: float | np.ndarray) -> float | np.ndarray:
