@@ -136,6 +136,12 @@ def test_endpoint_motion_larger_than_runtime_jump_gate_still_plans(monkeypatch):
         PartTarget("gear_20teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])),
     )
     assert not policy.is_done(obs)
+    # Default gripper.mode=compliant: numeric open (baseline-style) + soft close.
+    assert policy._cfg.gripper.mode == "compliant"
+    by_name = {p.name: p.gripper for p in policy._phases}
+    assert by_name["close"] == "close"
+    assert by_name["hover_pick"] == pytest.approx(0.12)
+    assert by_name["open"] == pytest.approx(0.12)
 
 
 def test_repeated_runtime_ik_failure_aborts_at_guard(monkeypatch):

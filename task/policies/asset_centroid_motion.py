@@ -64,6 +64,20 @@ class AssetMotionSpec:
 
 
 @dataclass(frozen=True)
+class GripperSpec:
+    """How close/open commands are issued to EEPoseController.
+
+    - ``compliant``: approach/release use ``gripper_open_rad``; close is
+      string ``"close"`` → GripperCompliance slow-close toward 0 with stall
+      (soft PhysX drives yield). Matches baseline approach aperture + soft
+      close endpoint.
+    - ``aperture``: numeric ``gripper_*_rad`` from the part block.
+    """
+
+    mode: str  # "compliant" | "aperture"
+
+
+@dataclass(frozen=True)
 class AssetCentroidConfig:
     path: Path
     active_arm: str
@@ -71,6 +85,7 @@ class AssetCentroidConfig:
     path_clearances: PathClearances
     timing: TimingSpec
     guards: GuardSpec
+    gripper: GripperSpec
     parts: dict[str, AssetMotionSpec]
 
     def part(self, name: str) -> AssetMotionSpec:
@@ -107,6 +122,7 @@ def load_asset_centroid_config(path: Path | str | None = None) -> AssetCentroidC
     path_raw = raw.get("path") or {}
     timing_raw = raw.get("timing") or {}
     guards_raw = raw.get("guards") or {}
+    gripper_raw = raw.get("gripper") or {}
     parts_raw = raw.get("parts") or {}
 
     motion = MotionLimits(
@@ -144,6 +160,13 @@ def load_asset_centroid_config(path: Path | str | None = None) -> AssetCentroidC
         max_final_hold_steps=int(guards_raw.get("max_final_hold_steps", 500)),
         max_ik_failure_steps=int(guards_raw.get("max_ik_failure_steps", 100)),
     )
+    gripper_mode = str(gripper_raw.get("mode", "compliant")).lower()
+    if gripper_mode not in ("compliant", "aperture"):
+        raise ValueError(
+            "gripper.mode must be 'compliant' or 'aperture', got "
+            f"{gripper_mode!r}"
+        )
+    gripper = GripperSpec(mode=gripper_mode)
     parts: dict[str, AssetMotionSpec] = {}
     for name, entry in parts_raw.items():
         if not isinstance(entry, dict):
@@ -172,6 +195,7 @@ def load_asset_centroid_config(path: Path | str | None = None) -> AssetCentroidC
         path_clearances=path_clearances,
         timing=timing,
         guards=guards,
+        gripper=gripper,
         parts=parts,
     )
 

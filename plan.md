@@ -15,8 +15,7 @@ Configure gear-20 manually:
 Axial direction: asset-local +Y.
 Centroid-to-grasp offset: [0, -0.005, 0] metres, matching the existing 5 mm lowered grasp.
 Tool-frame grasp-center offset: [0, -0.0144, 0.1972] metres (R fingertip midpoint in `R_ee_link_gripper_link` from gripper meshes + URDF).
-Gripper open/close: 0.12 / 0.065 rad, using the prior hand-tuned values from param_config.bak.
-Do not call the geometric aperture resolver or read part_local_aabb_extents.json for gripper commands.
+Gripper open/close: default ``gripper.mode=compliant`` (``"open"``/``"close"`` → soft GripperCompliance stall). Set ``gripper.mode=aperture`` to use hand-tuned ``0.12`` / ``0.065`` rad instead. Do not call the geometric aperture resolver or read part_local_aabb_extents.json for gripper commands.
 Keep tool +Z exactly world-down. Generate top-down yaw candidates in 15° increments and choose the candidate with feasible, continuous IK across the pick/place keyframes and the lowest joint-motion cost. Do not fall back to a tilt cone.
 Generate the canonical path: current pose → hover pick → descend → compliant close → lift → transfer hover → descend place → settle → compliant open → retract.
 Preserve target.place_pos as the scripted release/grasp-center target.
@@ -46,5 +45,5 @@ one-part results JSON and optional video
 Acceptance requires a completed smooth rollout on the **right** gripper, no snap behavior, successful compliant grasp/release, and a gear-20 grading pass within the existing 10 mm tolerance.
 
 ## Tunables
-Edit [`config/asset_centroid_policy.json`](config/asset_centroid_policy.json) (or set `ROCO_ASSET_CENTROID_CONFIG` to another JSON path). Speed lives under `motion.max_linear_speed_m_s` / `motion.max_angular_speed_deg_s` / `motion.minimum_move_s`. Path clearances, dwell times, IK guards, and per-part grasp/gripper values are in the same file.
+Edit [`config/asset_centroid_policy.json`](config/asset_centroid_policy.json) (or set `ROCO_ASSET_CENTROID_CONFIG` to another JSON path). Speed lives under `motion.max_linear_speed_m_s` / `motion.max_angular_speed_deg_s` / `motion.minimum_move_s`. Gripper: `gripper.mode` is `compliant` (soft stall close) or `aperture` (numeric `parts.*.gripper_*_rad`). Path clearances, dwell times, IK guards, and per-part grasp/TCP values are in the same file.
 

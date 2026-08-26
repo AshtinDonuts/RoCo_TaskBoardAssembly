@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "comment": "Tunables for AssetCentroidScriptedPolicy (V1, right arm). tcp_to_grasp_tool_m is the R fingertip midpoint in R_ee_link_gripper_link (active+passive distal tips from URDF+meshes); EE = grasp - R(orn)*tcp so the tip coincides with the target centroid. Override path with ROCO_ASSET_CENTROID_CONFIG.",
+  "comment": "Tunables for AssetCentroidScriptedPolicy (V1, right arm). gripper.mode=compliant: approach uses parts.*.gripper_open_rad (baseline-like 0.12 for gear_20); close is soft \"close\" + stall. mode=aperture: numeric open and close rads. tcp_to_grasp_tool_m is R fingertip midpoint. Override with ROCO_ASSET_CENTROID_CONFIG.",
   "active_arm": "R",
   "motion": {
-    "max_linear_speed_m_s": 0.10,
+    "max_linear_speed_m_s": 0.40,
     "max_angular_speed_deg_s": 40.0,
     "minimum_move_s": 0.5
   },
@@ -23,6 +23,9 @@
     "orn_tol_rad": 0.05,
     "max_final_hold_steps": 500,
     "max_ik_failure_steps": 100
+  },
+  "gripper": {
+    "mode": "compliant"
   },
   "parts": {
     "gear_20teeth": {

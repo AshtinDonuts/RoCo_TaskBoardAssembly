@@ -1,9 +1,17 @@
 """Privileged asset-centroid scripted policy (V1: gear_20teeth only).
 
 V1 drives the **right** gripper (`env_info.R_controller`, `active_arms=("R",)`).
-The policy reads live USD geometry at reset, plans a smooth top-down path,
-and uses hand-tuned gripper apertures. It intentionally does not use the
-geometry-derived grasp aperture resolver.
+The policy reads live USD geometry at reset and plans a smooth top-down path.
+
+Gripper close/open mode is configured by ``gripper.mode`` in
+``config/asset_centroid_policy.json``:
+
+- ``compliant`` (default): approach/release use ``parts.*.gripper_open_rad``
+  (same idea as baseline ``part_grasp_open_rad``); close uses ``"close"`` →
+  GripperCompliance slow-close toward 0 with stall hold (soft drives).
+- ``aperture``: numeric ``parts.*.gripper_*_rad`` for both open and close.
+
+Neither mode calls the Design-D geometric aperture resolver.
 """
 
 from __future__ import annotations
@@ -60,7 +68,7 @@ class _Phase:
     kind: str
     pos: np.ndarray
     orn: np.ndarray
-    gripper: float
+    gripper: float | str
     dwell_steps: int = 0
 
 
@@ -171,45 +179,45 @@ class AssetCentroidScriptedPolicy(Policy):
         close_steps = max(1, int(np.ceil(timing.close_dwell_s / self._dt)))
         settle_steps = max(1, int(np.ceil(timing.settle_place_s / self._dt)))
         open_steps = max(1, int(np.ceil(timing.open_dwell_s / self._dt)))
-        spec = self._part_spec
+        open_cmd, close_cmd = self._gripper_cmds()
         self._phases = [
             _Phase(
                 "hover_pick",
                 "move",
                 poses["hover_pick"],
                 pick_orn,
-                spec.gripper_open_rad,
+                open_cmd,
             ),
             _Phase(
-                "descend_pick", "move", poses["pick"], pick_orn, spec.gripper_open_rad
+                "descend_pick", "move", poses["pick"], pick_orn, open_cmd
             ),
             _Phase(
                 "close",
                 "dwell",
                 poses["pick"],
                 pick_orn,
-                spec.gripper_close_rad,
+                close_cmd,
                 close_steps,
             ),
             _Phase(
-                "lift_pick", "move", poses["lift_pick"], pick_orn, spec.gripper_close_rad
+                "lift_pick", "move", poses["lift_pick"], pick_orn, close_cmd
             ),
             _Phase(
                 "hover_place",
                 "move",
                 poses["hover_place"],
                 place_orn,
-                spec.gripper_close_rad,
+                close_cmd,
             ),
             _Phase(
-                "descend_place", "move", poses["place"], place_orn, spec.gripper_close_rad
+                "descend_place", "move", poses["place"], place_orn, close_cmd
             ),
             _Phase(
                 "settle_place",
                 "dwell",
                 poses["place"],
                 place_orn,
-                spec.gripper_close_rad,
+                close_cmd,
                 settle_steps,
             ),
             _Phase(
@@ -217,18 +225,31 @@ class AssetCentroidScriptedPolicy(Policy):
                 "dwell",
                 poses["place"],
                 place_orn,
-                spec.gripper_open_rad,
+                open_cmd,
                 open_steps,
             ),
-            _Phase("retract", "move", poses["retract"], place_orn, spec.gripper_open_rad),
+            _Phase("retract", "move", poses["retract"], place_orn, open_cmd),
         ]
         self._done = False
         print(
             f"[asset_centroid] {target.name}: centroid="
             f"{np.round(centroid_world, 5).tolist()} grasp_center="
-            f"{np.round(grasp_center, 5).tolist()} yaw-ready phases={len(self._phases)}",
+            f"{np.round(grasp_center, 5).tolist()} "
+            f"gripper.mode={self._cfg.gripper.mode} "
+            f"open={open_cmd!r} close={close_cmd!r} "
+            f"yaw-ready phases={len(self._phases)}",
             flush=True,
         )
+
+    def _gripper_cmds(self) -> tuple[float | str, float | str]:
+        """Return (open_cmd, close_cmd) for EEPoseController.forward."""
+        if self._part_spec is None:
+            raise RuntimeError("part spec not loaded")
+        open_rad = float(self._part_spec.gripper_open_rad)
+        if self._cfg.gripper.mode == "compliant":
+            # Baseline-style approach aperture + soft stall close (→ 0 rad).
+            return open_rad, "close"
+        return open_rad, float(self._part_spec.gripper_close_rad)
 
     def _part_paths(self, name: str) -> tuple[str, Optional[str]]:
         path = os.path.join(_TASK_DIR, "part_init_poses.json")

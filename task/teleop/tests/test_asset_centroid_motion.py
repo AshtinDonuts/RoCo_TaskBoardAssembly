@@ -124,6 +124,7 @@ def test_json_config_exposes_speed_and_gear_grasp():
     clear_asset_centroid_config_cache()
     cfg = load_asset_centroid_config()
     assert cfg.active_arm == "R"
+    assert cfg.gripper.mode == "compliant"
     assert cfg.path_clearances.tcp_offset_frame == "tool"
     assert cfg.path_clearances.force_yaw_deg is None
     assert cfg.motion.max_linear_speed_m_s > 0.0
