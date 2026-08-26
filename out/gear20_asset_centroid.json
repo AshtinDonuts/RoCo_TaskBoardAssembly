@@ -3,8 +3,8 @@
     "completion_reason": "max_parts",
     "current_part": null,
     "completed_parts": 1,
-    "total_task_steps": 1191,
-    "sim_time_s": 119.31,
+    "total_task_steps": 2449,
+    "sim_time_s": 245.11,
     "max_steps": null,
     "max_sim_seconds": null,
     "max_parts": 1,
@@ -19,12 +19,12 @@
       "name": "gear_20teeth",
       "release_mode": "open",
       "measure": "meshT",
-      "pos_err_m": 0.07683927531211646,
+      "pos_err_m": 0.0910821912099175,
       "tolerance_m": 0.01,
       "actual": [
-        -0.0733972174635727,
-        -0.040930624921700326,
-        1.0349012891158689
+        -0.08305972667840544,
+        -0.030459058960365437,
+        1.0349050224316245
       ],
       "target": [
         -0.01981,

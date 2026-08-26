@@ -48,6 +48,10 @@ def test_all_yaw_candidates_are_exactly_world_down():
 def test_manual_gear_apertures_and_tcp_transform():
     assert GEAR_20TEETH_SPEC.gripper_open_rad == 0.12
     assert GEAR_20TEETH_SPEC.gripper_close_rad == 0.065
+    # Mesh-derived R tip midpoint in gripper_link: Y is negative (not +0.016).
+    np.testing.assert_allclose(
+        GEAR_20TEETH_SPEC.tcp_to_grasp_tool, [0.0, -0.0144, 0.1972], atol=1e-9
+    )
     ee_tool = ee_position_for_grasp_center(
         [1.0, 2.0, 3.0],
         [0.0, 1.0, 0.0, 0.0],
@@ -60,8 +64,9 @@ def test_manual_gear_apertures_and_tcp_transform():
         GEAR_20TEETH_SPEC.tcp_to_grasp_tool,
         offset_frame="world",
     )
-    np.testing.assert_allclose(ee_tool, [1.0, 2.016, 3.197], atol=1e-9)
-    np.testing.assert_allclose(ee_world, [1.0, 2.016, 3.197], atol=1e-9)
+    # Top-down (0,1,0,0) = 180° about X: R*(x,y,z)=(x,-y,-z) → EE_tool = grasp - R*tcp.
+    np.testing.assert_allclose(ee_tool, [1.0, 1.9856, 3.1972], atol=1e-9)
+    np.testing.assert_allclose(ee_world, [1.0, 1.9856, 3.1972], atol=1e-9)
 
 
 def test_quintic_has_zero_endpoint_velocity():
@@ -119,14 +124,17 @@ def test_json_config_exposes_speed_and_gear_grasp():
     clear_asset_centroid_config_cache()
     cfg = load_asset_centroid_config()
     assert cfg.active_arm == "R"
-    assert cfg.path_clearances.tcp_offset_frame == "world"
-    assert cfg.path_clearances.force_yaw_deg == 0.0
+    assert cfg.path_clearances.tcp_offset_frame == "tool"
+    assert cfg.path_clearances.force_yaw_deg is None
     assert cfg.motion.max_linear_speed_m_s > 0.0
     np.testing.assert_allclose(
-        np.degrees(cfg.motion.max_angular_speed_rad_s), 20.0
+        np.degrees(cfg.motion.max_angular_speed_rad_s), 40.0
     )
     gear = cfg.part("gear_20teeth")
     assert gear.gripper_open_rad == 0.12
     assert gear.gripper_close_rad == 0.065
+    np.testing.assert_allclose(
+        gear.tcp_to_grasp_tool, [0.0, -0.0144, 0.1972], atol=1e-9
+    )
     assert GEAR_20TEETH_SPEC.gripper_close_rad == gear.gripper_close_rad
 

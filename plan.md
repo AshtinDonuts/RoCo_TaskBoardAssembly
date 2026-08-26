@@ -14,7 +14,7 @@ Fail safely with a clear diagnostic and no arm movement if the prim, mesh geomet
 Configure gear-20 manually:
 Axial direction: asset-local +Y.
 Centroid-to-grasp offset: [0, -0.005, 0] metres, matching the existing 5 mm lowered grasp.
-Tool-frame grasp-center offset: [0, 0.016, 0.197] metres.
+Tool-frame grasp-center offset: [0, -0.0144, 0.1972] metres (R fingertip midpoint in `R_ee_link_gripper_link` from gripper meshes + URDF).
 Gripper open/close: 0.12 / 0.065 rad, using the prior hand-tuned values from param_config.bak.
 Do not call the geometric aperture resolver or read part_local_aabb_extents.json for gripper commands.
 Keep tool +Z exactly world-down. Generate top-down yaw candidates in 15° increments and choose the candidate with feasible, continuous IK across the pick/place keyframes and the lowest joint-motion cost. Do not fall back to a tilt cone.
