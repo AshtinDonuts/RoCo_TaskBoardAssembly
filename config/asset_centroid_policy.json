@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "comment": "Tunables for policies.asset_centroid_scripted.AssetCentroidScriptedPolicy (V1, right arm). Override path with ROCO_ASSET_CENTROID_CONFIG.",
+  "active_arm": "R",
+  "motion": {
+    "max_linear_speed_m_s": 0.30,
+    "max_angular_speed_deg_s": 20.0,
+    "minimum_move_s": 0.5
+  },
+  "path": {
+    "hover_pick_m": 0.05,
+    "hover_place_m": 0.05,
+    "final_retract_m": 0.10,
+    "yaw_step_deg": 15.0
+  },
+  "timing": {
+    "close_dwell_s": 1.5,
+    "settle_place_s": 0.5,
+    "open_dwell_s": 0.5
+  },
+  "guards": {
+    "pos_tol_m": 0.004,
+    "orn_tol_rad": 0.05,
+    "max_final_hold_steps": 500,
+    "max_ik_failure_steps": 100
+  },
+  "parts": {
+    "gear_20teeth": {
+      "centroid_grasp_offset_asset_m": [0.0, -0.005, 0.0],
+      "tcp_to_grasp_tool_m": [0.0, 0.016, 0.197],
+      "gripper_open_rad": 0.12,
+      "gripper_close_rad": 0.065
+    }
+  }
+}
