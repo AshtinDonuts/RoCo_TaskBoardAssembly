@@ -16,16 +16,11 @@ from typing import Optional
 
 import omni.kit.commands
 import omni.usd
-from omni.kit.viewport.utility import (
-    create_viewport_window,
-    get_active_viewport_window,
-)
+from omni.kit.viewport.utility import create_viewport_window
 
 from isaacsim.core.api import World
 from isaacsim.sensors.camera import Camera
 from isaacsim.core.utils.stage import open_stage
-from isaacsim.core.utils.rotations import euler_angles_to_quat
-from isaacsim.core.utils.viewports import set_camera_view
 
 from .ee_pose_controller import EEPoseController
 from .pick_place_task import PickPlaceTask_scene_bimanual, ROBOT_PRIM_PATH
@@ -170,11 +165,11 @@ def _set_angular_drive(
 
 
 def _apply_gripper_compliance(robot) -> None:
-    """Command full close (0 rad) with soft finger effort so grasps yield.
+    """Configure soft gripper drive gains and force limits.
 
-    The URDF/USD gripper effort was effectively unbounded, so targeting 0
-    aperture crushed assets. Soft maxForce + moderate stiffness keeps the
-    commanded aperture at 0 while contact compliance holds the part.
+    This does not issue a position command and is not a second gripper command
+    writer. Position targets come from the merged policy action; these drive
+    settings only limit the effort used to reach that target.
     """
     stiffness = float(getattr(pc, "GRIPPER_DRIVE_STIFFNESS", 80.0))
     damping = float(getattr(pc, "GRIPPER_DRIVE_DAMPING", 25.0))

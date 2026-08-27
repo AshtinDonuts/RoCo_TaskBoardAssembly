@@ -47,7 +47,7 @@ def test_all_yaw_candidates_are_exactly_world_down():
 
 def test_manual_gear_apertures_and_tcp_transform():
     assert GEAR_20TEETH_SPEC.gripper_open_rad == 0.12
-    assert GEAR_20TEETH_SPEC.gripper_close_rad == 0.065
+    assert GEAR_20TEETH_SPEC.gripper_close_rad == 0.075
     # Mesh-derived R tip midpoint in gripper_link: Y is negative (not +0.016).
     np.testing.assert_allclose(
         GEAR_20TEETH_SPEC.tcp_to_grasp_tool, [0.0, -0.0144, 0.1972], atol=1e-9
@@ -125,6 +125,7 @@ def test_json_config_exposes_speed_and_gear_grasp():
     cfg = load_asset_centroid_config()
     assert cfg.active_arm == "R"
     assert cfg.gripper.mode == "compliant"
+    assert cfg.gripper.close_speed_rad_s == 0.20
     assert cfg.path_clearances.tcp_offset_frame == "tool"
     assert cfg.path_clearances.force_yaw_deg is None
     assert cfg.motion.max_linear_speed_m_s > 0.0
@@ -133,9 +134,8 @@ def test_json_config_exposes_speed_and_gear_grasp():
     )
     gear = cfg.part("gear_20teeth")
     assert gear.gripper_open_rad == 0.12
-    assert gear.gripper_close_rad == 0.065
+    assert gear.gripper_close_rad == 0.075
     np.testing.assert_allclose(
         gear.tcp_to_grasp_tool, [0.0, -0.0144, 0.1972], atol=1e-9
     )
     assert GEAR_20TEETH_SPEC.gripper_close_rad == gear.gripper_close_rad
-

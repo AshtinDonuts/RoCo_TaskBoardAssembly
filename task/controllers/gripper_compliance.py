@@ -206,6 +206,34 @@ class GripperCompliance:
     def q_cmd(self) -> Optional[float]:
         return self._q_cmd
 
+    def freeze(self, q_meas: Optional[float] = None) -> Optional[float]:
+        """Latch HOLDING at the existing hold or current measured aperture.
+
+        This is a dwell-boundary safety net for scripted grasps.  A normal
+        contact latch keeps its existing hold command.  If contact detection
+        was late, prefer the measured aperture (plus the configured small
+        closing margin) over ``q_cmd``, which may still be lag-capped farther
+        closed than the fingers.
+        """
+        q_lo = float(min(self.cfg.close, self.cfg.open_limit))
+        q_hi = float(max(self.cfg.close, self.cfg.open_limit))
+        if self._q_hold is not None:
+            hold = float(self._q_hold)
+        elif q_meas is not None:
+            hold = float(q_meas) - float(self.cfg.hold_margin)
+        elif self._q_cmd is not None:
+            hold = float(self._q_cmd)
+        else:
+            return None
+        hold = float(np.clip(hold, q_lo, q_hi))
+        self._q_hold = hold
+        self._q_cmd = hold
+        self.phase = GripperPhase.HOLDING
+        self._intent = "close"
+        self._stall_ticks = 0
+        self._stall_q_ref = None
+        return hold
+
     def intent_from_norm(self, gripper_norm: float) -> str:
         return binary_intent_from_norm(
             gripper_norm,

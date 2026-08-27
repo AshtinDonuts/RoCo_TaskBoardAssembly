@@ -1,37 +1,37 @@
 {
   "metadata": {
-    "completion_reason": "interrupted",
-    "current_part": "gear_20teeth",
-    "completed_parts": 0,
-    "total_task_steps": 737,
-    "sim_time_s": 0.0,
+    "completion_reason": "max_parts",
+    "current_part": null,
+    "completed_parts": 1,
+    "total_task_steps": 1032,
+    "sim_time_s": 103.41,
     "max_steps": null,
     "max_sim_seconds": null,
     "max_parts": 1,
     "snap_fired_parts": []
   },
   "pos_tol_m": 0.01,
-  "n_pass": 0,
-  "n_fail": 1,
+  "n_pass": 1,
+  "n_fail": 0,
   "n_missing": 0,
   "per_part": [
     {
       "name": "gear_20teeth",
       "release_mode": "open",
       "measure": "meshT",
-      "pos_err_m": 0.08956380557993732,
+      "pos_err_m": 0.001158903594298594,
       "tolerance_m": 0.01,
       "actual": [
-        -0.0831440205640922,
-        -0.032670774367872246,
-        1.0349112513504661
+        -0.019988673082785846,
+        -0.09607314828499902,
+        1.0349122605563537
       ],
       "target": [
         -0.01981,
         -0.09598882384960386,
         1.033770322353139
       ],
-      "pass": false
+      "pass": true
     }
   ]
 }

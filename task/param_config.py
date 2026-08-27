@@ -266,10 +266,16 @@ GRIPPER_MODE = os.getenv("TASK_GRIPPER_MODE", "continuous")
 GRIPPER_CLOSE_SPEED_RAD_S = float(os.getenv("TASK_GRIPPER_CLOSE_SPEED", "0.05"))
 GRIPPER_OPEN_SPEED_RAD_S = float(os.getenv("TASK_GRIPPER_OPEN_SPEED", "0.25"))
 GRIPPER_STALL_QD = float(os.getenv("TASK_GRIPPER_STALL_QD", "0.02"))
-GRIPPER_STALL_ERR = float(os.getenv("TASK_GRIPPER_STALL_ERR", "0.02"))
+# Must be <= GRIPPER_MAX_CLOSE_LAG so lag-capped contact can enter HOLDING
+# (teleop YAML uses 0.008 / 0.01). A larger stall_err than the lag cap
+# means the gripper never latches and keeps squeezing through the object.
+GRIPPER_STALL_ERR = float(os.getenv("TASK_GRIPPER_STALL_ERR", "0.008"))
 GRIPPER_STALL_DQ = float(os.getenv("TASK_GRIPPER_STALL_DQ", "0.005"))
 GRIPPER_STALL_MIN_CLOSE_RAD = float(os.getenv("TASK_GRIPPER_STALL_MIN_CLOSE", "0.03"))
-GRIPPER_HOLD_MARGIN = float(os.getenv("TASK_GRIPPER_HOLD_MARGIN", "0.01"))
+GRIPPER_HOLD_MARGIN = float(os.getenv("TASK_GRIPPER_HOLD_MARGIN", "0.002"))
+GRIPPER_MAX_CLOSE_LAG = float(os.getenv("TASK_GRIPPER_MAX_CLOSE_LAG", "0.01"))
+GRIPPER_STALL_HOLD_TICKS = int(os.getenv("TASK_GRIPPER_STALL_HOLD_TICKS", "12"))
+GRIPPER_STALL_PROGRESS = float(os.getenv("TASK_GRIPPER_STALL_PROGRESS", "0.002"))
 
 # IK c-space size per arm. Three modes per side, picked by the
 # (OWNS_LIFT, OWNS_TORSO) pair:

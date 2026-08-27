@@ -7,6 +7,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from controllers.gripper_compliance import (
+    GripperCompliance,
+    GripperComplianceConfig,
+    GripperPhase,
+)
 from policies.asset_centroid_scripted import AssetCentroidScriptedPolicy
 from policy_api import Observation, PartTarget
 
@@ -141,6 +146,40 @@ def test_endpoint_motion_larger_than_runtime_jump_gate_still_plans(monkeypatch):
     by_name = {p.name: p.gripper for p in policy._phases}
     assert by_name["close"] == "close"
     assert by_name["hover_pick"] == pytest.approx(0.12)
+    assert by_name["open"] == pytest.approx(0.12)
+
+
+def test_close_dwell_freezes_remaining_grasp_at_measured_aperture(monkeypatch):
+    controller = _Controller(solve_delta=2.0)
+    controller.gripper_compliance = GripperCompliance(
+        GripperComplianceConfig(hold_margin=0.002)
+    )
+    controller._measured_gripper = lambda: (0.09, 0.0)
+    policy = _policy(controller)
+    monkeypatch.setattr(
+        policy,
+        "_live_asset_centroid",
+        lambda name: (np.array([0.0, 0.0, 1.0]), np.zeros(3)),
+    )
+    obs = _obs()
+    policy.reset(
+        obs,
+        PartTarget("gear_20teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])),
+    )
+    assert controller.gripper_compliance.cfg.close_speed_rad_s == pytest.approx(0.20)
+    assert controller.gripper_compliance.cfg.close == pytest.approx(0.075)
+    policy._phase_index = next(
+        i for i, phase in enumerate(policy._phases) if phase.name == "close"
+    )
+    controller.gripper_compliance._q_cmd = 0.08
+
+    policy._freeze_compliant_grasp_aperture()
+
+    assert controller.gripper_compliance.phase == GripperPhase.HOLDING
+    assert controller.gripper_compliance.q_cmd == pytest.approx(0.088)
+    by_name = {phase.name: phase.gripper for phase in policy._phases}
+    for name in ("close", "lift_pick", "hover_place", "descend_place", "settle_place"):
+        assert by_name[name] == pytest.approx(0.088)
     assert by_name["open"] == pytest.approx(0.12)
 
 

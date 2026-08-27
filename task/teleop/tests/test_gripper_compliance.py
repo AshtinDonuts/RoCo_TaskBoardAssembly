@@ -226,3 +226,40 @@ def test_disabled_snaps_without_slew_or_hold():
     cmd2 = g.update(q_meas=0.5, qd_meas=0.0, dt=0.02, intent="close")
     np.testing.assert_allclose(cmd2, 0.0, atol=1e-9)
     assert g._q_hold is None
+
+
+def test_freeze_prefers_measured_aperture_over_lagged_command():
+    g = GripperCompliance(
+        _cfg(hold_margin=0.002, max_close_lag=0.01, stall_hold_ticks=50)
+    )
+    g.reset(q_meas=0.12)
+    g._q_cmd = 0.06
+    hold = g.freeze(q_meas=0.07)
+    np.testing.assert_allclose(hold, 0.068, atol=1e-9)
+    assert g.phase == GripperPhase.HOLDING
+    np.testing.assert_allclose(g.q_cmd, hold, atol=1e-9)
+
+
+def test_production_defaults_latch_hold_when_stall_err_le_lag():
+    """Regression: stall_err > max_close_lag never latches (keeps squeezing)."""
+    contact = 0.07
+
+    def _run(cfg: GripperComplianceConfig):
+        g = GripperCompliance(cfg)
+        q = 0.12
+        g.reset(q_meas=q)
+        for _ in range(2000):
+            q_meas = max(contact, float(g.q_cmd) if g.q_cmd is not None else q)
+            qd = 0.0 if q_meas <= contact + 1e-9 else -0.05
+            if q_meas <= contact + 1e-9:
+                q_meas = contact
+            g.update(q_meas=q_meas, qd_meas=qd, dt=0.005, intent="close")
+            if g.phase == GripperPhase.HOLDING:
+                return True
+        return False
+
+    bad_cfg = GripperComplianceConfig(stall_err=0.02, max_close_lag=0.01)
+    production_cfg = GripperComplianceConfig()
+    assert production_cfg.stall_err <= production_cfg.max_close_lag
+    assert _run(bad_cfg) is False
+    assert _run(production_cfg) is True

@@ -67,14 +67,14 @@ class AssetMotionSpec:
 class GripperSpec:
     """How close/open commands are issued to EEPoseController.
 
-    - ``compliant``: approach/release use ``gripper_open_rad``; close is
-      string ``"close"`` → GripperCompliance slow-close toward 0 with stall
-      (soft PhysX drives yield). Matches baseline approach aperture + soft
-      close endpoint.
+    - ``compliant``: GripperCompliance slow-closes toward the part's
+      ``gripper_close_rad`` and may stall-hold earlier on contact. The part
+      aperture is therefore a hard lower bound, not an ignored fallback.
     - ``aperture``: numeric ``gripper_*_rad`` from the part block.
     """
 
     mode: str  # "compliant" | "aperture"
+    close_speed_rad_s: float
 
 
 @dataclass(frozen=True)
@@ -166,7 +166,16 @@ def load_asset_centroid_config(path: Path | str | None = None) -> AssetCentroidC
             "gripper.mode must be 'compliant' or 'aperture', got "
             f"{gripper_mode!r}"
         )
-    gripper = GripperSpec(mode=gripper_mode)
+    close_speed_rad_s = float(gripper_raw.get("close_speed_rad_s", 0.05))
+    if not np.isfinite(close_speed_rad_s) or close_speed_rad_s <= 0.0:
+        raise ValueError(
+            "gripper.close_speed_rad_s must be a positive finite number, got "
+            f"{close_speed_rad_s!r}"
+        )
+    gripper = GripperSpec(
+        mode=gripper_mode,
+        close_speed_rad_s=close_speed_rad_s,
+    )
     parts: dict[str, AssetMotionSpec] = {}
     for name, entry in parts_raw.items():
         if not isinstance(entry, dict):

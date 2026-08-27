@@ -6,9 +6,10 @@ The policy reads live USD geometry at reset and plans a smooth top-down path.
 Gripper close/open mode is configured by ``gripper.mode`` in
 ``config/asset_centroid_policy.json``:
 
-- ``compliant`` (default): approach/release use ``parts.*.gripper_open_rad``
-  (same idea as baseline ``part_grasp_open_rad``); close uses ``"close"`` →
-  GripperCompliance slow-close toward 0 with stall hold (soft drives).
+- ``compliant`` (default): approach/release use ``parts.*.gripper_open_rad``;
+  close uses GripperCompliance to slew toward ``parts.*.gripper_close_rad``
+  and stall-hold earlier on contact. The configured aperture prevents a late
+  stall from driving all the way toward 0.
 - ``aperture``: numeric ``parts.*.gripper_*_rad`` for both open and close.
 
 Neither mode calls the Design-D geometric aperture resolver.
@@ -110,6 +111,8 @@ class AssetCentroidScriptedPolicy(Policy):
         self._aborted = False
         self._last_action = self._noop()
         self._part_spec = None
+        self._compliance_log_accum_s = 0.0
+        self._configure_compliance()
         print(
             f"[asset_centroid] config={self._cfg.path} "
             f"arm={arm} "
@@ -118,6 +121,7 @@ class AssetCentroidScriptedPolicy(Policy):
             f"t_min={self._cfg.motion.minimum_move_s:g} s",
             flush=True,
         )
+        self._log_compliance_params(prefix="init")
 
     def _noop(self) -> ArticulationAction:
         return ArticulationAction(joint_positions=[None] * self._n_dof)
@@ -142,6 +146,7 @@ class AssetCentroidScriptedPolicy(Policy):
         self._aborted = False
         self._last_action = self._noop()
         self._part_spec = None
+        self._compliance_log_accum_s = 0.0
 
         if target.release_mode == "snap":
             print(f"[asset_centroid] skip snap target {target.name!r}", flush=True)
@@ -158,6 +163,18 @@ class AssetCentroidScriptedPolicy(Policy):
 
         try:
             self._part_spec = self._cfg.part(target.name)
+            self._configure_compliance()
+            # Fresh compliance state so approach→close can latch HOLDING.
+            comp = self._compliance()
+            if comp is not None:
+                meas_fn = getattr(self._controller, "_measured_gripper", None)
+                q0 = None
+                if callable(meas_fn):
+                    try:
+                        q0, _ = meas_fn()
+                    except Exception:
+                        q0 = None
+                comp.reset(None if q0 is None else float(q0))
             centroid_world, asset_offset_world = self._live_asset_centroid(target.name)
             grasp_center = centroid_world + asset_offset_world
             print(
@@ -250,6 +267,136 @@ class AssetCentroidScriptedPolicy(Policy):
             # Baseline-style approach aperture + soft stall close (→ 0 rad).
             return open_rad, "close"
         return open_rad, float(self._part_spec.gripper_close_rad)
+
+    def _compliance(self):
+        return getattr(self._controller, "gripper_compliance", None)
+
+    def _configure_compliance(self) -> None:
+        """Apply policy-local speed and, once known, the part close bound."""
+        g = self._compliance()
+        if g is None:
+            return
+        g.cfg.close_speed_rad_s = float(self._cfg.gripper.close_speed_rad_s)
+        if self._cfg.gripper.mode == "compliant" and self._part_spec is not None:
+            g.cfg.close = float(self._part_spec.gripper_close_rad)
+
+    def _log_compliance_params(self, *, prefix: str = "compliance") -> None:
+        """Print GripperCompliance tunables + live state (call at ~1 Hz)."""
+        g = self._compliance()
+        phase_name = (
+            self._phases[self._phase_index].name
+            if self._phases and 0 <= self._phase_index < len(self._phases)
+            else "-"
+        )
+        if g is None:
+            print(
+                f"[asset_centroid] {prefix}: no gripper_compliance on controller "
+                f"(policy_phase={phase_name})",
+                flush=True,
+            )
+            return
+        cfg = g.cfg
+        q_meas = qd_meas = None
+        meas_fn = getattr(self._controller, "_measured_gripper", None)
+        if callable(meas_fn):
+            try:
+                q_meas, qd_meas = meas_fn()
+            except Exception:
+                q_meas = qd_meas = None
+        q_cmd = None if g.q_cmd is None else float(g.q_cmd)
+        close_lag = (
+            None if q_meas is None or q_cmd is None else float(q_meas) - q_cmd
+        )
+        q_meas_prev = getattr(g, "_q_meas_prev", None)
+        meas_dq = (
+            None
+            if q_meas is None or q_meas_prev is None
+            else float(q_meas) - float(q_meas_prev)
+        )
+        print(
+            f"[asset_centroid] {prefix}: policy_phase={phase_name} "
+            f"comp_phase={getattr(g.phase, 'value', g.phase)} "
+            f"intent={g.intent!r} enabled={bool(g.enabled)} "
+            f"q_cmd={None if q_cmd is None else f'{q_cmd:.4f}'} "
+            f"q_hold={None if g._q_hold is None else f'{float(g._q_hold):.4f}'} "
+            f"q_meas={None if q_meas is None else f'{float(q_meas):.4f}'} "
+            f"qd_meas={None if qd_meas is None else f'{float(qd_meas):.4f}'} "
+            f"close_lag={None if close_lag is None else f'{close_lag:.4f}'} "
+            f"meas_dq={None if meas_dq is None else f'{meas_dq:.4f}'} "
+            f"stall_ticks={int(g._stall_ticks)} "
+            f"close_target={float(cfg.close):g} "
+            f"close_speed={float(cfg.close_speed_rad_s):g} "
+            f"open_speed={float(cfg.open_speed_rad_s):g} "
+            f"stall_err={float(cfg.stall_err):g} "
+            f"max_close_lag={float(cfg.max_close_lag):g} "
+            f"stall_qd={float(cfg.stall_qd):g} "
+            f"stall_dq={float(cfg.stall_dq):g} "
+            f"stall_min_close={float(cfg.stall_min_close_rad):g} "
+            f"hold_margin={float(cfg.hold_margin):g} "
+            f"stall_hold_ticks={int(cfg.stall_hold_ticks)} "
+            f"stall_progress={float(cfg.stall_progress):g}",
+            flush=True,
+        )
+
+    def _maybe_log_compliance_1hz(self) -> None:
+        self._compliance_log_accum_s += self._dt
+        if self._compliance_log_accum_s < 1.0:
+            return
+        self._compliance_log_accum_s %= 1.0
+        self._log_compliance_params()
+
+    def _freeze_compliant_grasp_aperture(self) -> None:
+        """After close dwell, hold the latched/measured grasp aperture.
+
+        Prevents continued soft squeeze if HOLDING did not latch during dwell,
+        while the configured part aperture remains a hard lower bound.
+        """
+        if self._cfg.gripper.mode != "compliant":
+            return
+        g = self._compliance()
+        q_meas: Optional[float] = None
+        meas_fn = getattr(self._controller, "_measured_gripper", None)
+        if callable(meas_fn):
+            try:
+                q_meas, _ = meas_fn()
+                q_meas = float(q_meas)
+            except Exception:
+                q_meas = None
+        freeze: Optional[float] = None
+        if g is not None:
+            freeze = g.freeze(q_meas)
+        elif q_meas is not None:
+            freeze = q_meas
+        if freeze is None:
+            print(
+                "[asset_centroid] compliant close ended but no aperture to freeze",
+                flush=True,
+            )
+            return
+        # Rewrite remaining phases that still request soft \"close\".
+        new_phases: list[_Phase] = []
+        replaced = 0
+        for i, phase in enumerate(self._phases):
+            if i >= self._phase_index and phase.gripper == "close":
+                new_phases.append(
+                    _Phase(
+                        phase.name,
+                        phase.kind,
+                        phase.pos,
+                        phase.orn,
+                        float(freeze),
+                        phase.dwell_steps,
+                    )
+                )
+                replaced += 1
+            else:
+                new_phases.append(phase)
+        self._phases = new_phases
+        print(
+            f"[asset_centroid] freeze compliant grasp at {freeze:.4f} rad "
+            f"(rewrote {replaced} phase gripper cmds)",
+            flush=True,
+        )
 
     def _part_paths(self, name: str) -> tuple[str, Optional[str]]:
         path = os.path.join(_TASK_DIR, "part_init_poses.json")
@@ -609,6 +756,8 @@ class AssetCentroidScriptedPolicy(Policy):
         completed = self._phases[self._phase_index].name
         if obs is not None:
             self._log_pose_error(obs, self._phases[self._phase_index])
+        if completed == "close":
+            self._freeze_compliant_grasp_aperture()
         self._phase_index += 1
         self._phase_ticks = 0
         self._segment = ()
@@ -625,6 +774,7 @@ class AssetCentroidScriptedPolicy(Policy):
     def act(self, obs: Observation) -> ArticulationAction:
         if self._done:
             return self._noop()
+        self._maybe_log_compliance_1hz()
         phase = self._phases[self._phase_index]
         if phase.kind == "dwell":
             action = self._command(phase.pos, phase.orn, phase.gripper)

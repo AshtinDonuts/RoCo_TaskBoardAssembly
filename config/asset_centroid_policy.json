@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "comment": "Tunables for AssetCentroidScriptedPolicy (V1, right arm). gripper.mode=compliant: approach uses parts.*.gripper_open_rad (baseline-like 0.12 for gear_20); close is soft \"close\" + stall. mode=aperture: numeric open and close rads. tcp_to_grasp_tool_m is R fingertip midpoint. Override with ROCO_ASSET_CENTROID_CONFIG.",
+  "comment": "Tunables for AssetCentroidScriptedPolicy (V1, right arm). gripper.mode=compliant: close slews toward parts.*.gripper_close_rad and may stall-hold earlier on contact; the configured close aperture is a hard lower bound. mode=aperture: numeric open and close rads. tcp_to_grasp_tool_m is R fingertip midpoint. Override with ROCO_ASSET_CENTROID_CONFIG.",
   "active_arm": "R",
   "motion": {
-    "max_linear_speed_m_s": 0.40,
+    "max_linear_speed_m_s": 0.90,
     "max_angular_speed_deg_s": 40.0,
     "minimum_move_s": 0.5
   },
@@ -14,9 +14,9 @@
     "yaw_step_deg": 15.0
   },
   "timing": {
-    "close_dwell_s": 1.5,
-    "settle_place_s": 0.5,
-    "open_dwell_s": 0.5
+    "close_dwell_s": 0.2,
+    "settle_place_s": 0.2,
+    "open_dwell_s": 0.2
   },
   "guards": {
     "pos_tol_m": 0.004,
@@ -25,14 +25,17 @@
     "max_ik_failure_steps": 100
   },
   "gripper": {
-    "mode": "compliant"
+    "mode": "compliant",
+    "close_speed_rad_s": 0.40
   },
   "parts": {
     "gear_20teeth": {
       "centroid_grasp_offset_asset_m": [0.0, -0.005, 0.0],
-      "tcp_to_grasp_tool_m": [0.0, -0.0144, 0.1972],
+      "tcp_to_grasp_tool_m": [0.0, -0.0150, 0.1972],
+      "tcp_to_grasp_tool_m_bak": [0.0, -0.0144, 0.1972],
       "gripper_open_rad": 0.12,
-      "gripper_close_rad": 0.065
+      "gripper_close_rad": 0.075,
+      "gripper_close_rad_bak": 0.065
     }
   }
 }

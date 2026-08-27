@@ -190,12 +190,21 @@ class EEPoseController(BaseController):
                         getattr(pc, "GRIPPER_OPEN_SPEED_RAD_S", 0.25)
                     ),
                     stall_qd=float(getattr(pc, "GRIPPER_STALL_QD", 0.02)),
-                    stall_err=float(getattr(pc, "GRIPPER_STALL_ERR", 0.02)),
+                    stall_err=float(getattr(pc, "GRIPPER_STALL_ERR", 0.008)),
                     stall_dq=float(getattr(pc, "GRIPPER_STALL_DQ", 0.005)),
                     stall_min_close_rad=float(
                         getattr(pc, "GRIPPER_STALL_MIN_CLOSE_RAD", 0.03)
                     ),
-                    hold_margin=float(getattr(pc, "GRIPPER_HOLD_MARGIN", 0.01)),
+                    hold_margin=float(getattr(pc, "GRIPPER_HOLD_MARGIN", 0.002)),
+                    max_close_lag=float(
+                        getattr(pc, "GRIPPER_MAX_CLOSE_LAG", 0.01)
+                    ),
+                    stall_hold_ticks=int(
+                        getattr(pc, "GRIPPER_STALL_HOLD_TICKS", 12)
+                    ),
+                    stall_progress=float(
+                        getattr(pc, "GRIPPER_STALL_PROGRESS", 0.002)
+                    ),
                 )
             except Exception:
                 cfg = GripperComplianceConfig()
