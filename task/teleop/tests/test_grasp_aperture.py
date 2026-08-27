@@ -126,11 +126,32 @@ def test_scripted_open_target_clears_every_known_object():
         q_open = pc.part_grasp_open_rad(name)
         q_close = pc.part_grasp_close_rad(name)
         assert q_open > q_close, name
+        cfg = pc.get_part_config(name)
+        if bool(cfg.get("use_param_config_aperture", False)):
+            np.testing.assert_allclose(q_open, float(cfg["gripper_open"]))
+            np.testing.assert_allclose(q_close, float(cfg["gripper_close"]))
+            continue
+        explicit = pc.PART_CONFIG.get(name, {}).get("gripper_open")
+        if explicit is not None:
+            # Hand-tuned PART_CONFIG open is honored (clamped above close).
+            assert q_open >= float(explicit) - 1e-9 or q_open >= q_close + 1e-3 - 1e-9, name
+            continue
         assert close_rad_to_aperture_m(q_open) >= (
             grasp_width_m(name) + pc.GRASP_OPEN_CLEARANCE_M - 1e-6
         ), name
 
 
+def test_bolt_uses_param_config_aperture_when_flag_set():
+    import param_config as pc
+
+    cfg = pc.get_part_config("bolt_8mm")
+    assert cfg["use_param_config_aperture"] is True
+    q_open = pc.part_grasp_open_rad("bolt_8mm")
+    q_close = pc.part_grasp_close_rad("bolt_8mm")
+    np.testing.assert_allclose(q_open, float(cfg["gripper_open"]))
+    np.testing.assert_allclose(q_close, float(cfg["gripper_close"]))
+    # Design D alone would be ~0.062; flag must bypass that.
+    assert q_close < 0.01
 def test_param_config_does_not_hide_malformed_geometry(tmp_path, monkeypatch):
     import param_config as pc
 

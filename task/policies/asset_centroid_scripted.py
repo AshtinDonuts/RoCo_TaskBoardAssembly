@@ -106,7 +106,10 @@ class AssetCentroidScriptedPolicy(Policy):
         self._aborted = False
         self._last_action = self._noop()
         self._part_spec = None
+        self._target: Optional[PartTarget] = None
         self._hover_place_q: Optional[np.ndarray] = None
+        self._place_q: Optional[np.ndarray] = None
+        self._hold_q: Optional[np.ndarray] = None
         self._compliance_log_accum_s = 0.0
         self._configure_compliance()
         print(
@@ -142,7 +145,10 @@ class AssetCentroidScriptedPolicy(Policy):
         self._aborted = False
         self._last_action = self._noop()
         self._part_spec = None
+        self._target = target
         self._hover_place_q = None
+        self._place_q = None
+        self._hold_q = None
         self._compliance_log_accum_s = 0.0
 
         if target.place_pos is None:
@@ -185,7 +191,7 @@ class AssetCentroidScriptedPolicy(Policy):
         settle_steps = max(1, int(np.ceil(timing.settle_place_s / self._dt)))
         open_steps = max(1, int(np.ceil(timing.open_dwell_s / self._dt)))
         open_cmd, close_cmd = self._gripper_cmds()
-        self._phases = [
+        phases = [
             _Phase(
                 "hover_pick",
                 "move",
@@ -214,27 +220,48 @@ class AssetCentroidScriptedPolicy(Policy):
                 place_orn,
                 close_cmd,
             ),
-            _Phase(
-                "descend_place", "move", poses["place"], place_orn, close_cmd
-            ),
-            _Phase(
-                "settle_place",
-                "dwell",
-                poses["place"],
-                place_orn,
-                close_cmd,
-                settle_steps,
-            ),
-            _Phase(
-                "open",
-                "dwell",
-                poses["place"],
-                place_orn,
-                open_cmd,
-                open_steps,
-            ),
-            _Phase("retract", "move", poses["retract"], place_orn, open_cmd),
         ]
+        # Null/near-null place descent (e.g. hover_place_height≈0) still used
+        # to run a long joint segment and caused sideways EE wander; skip it.
+        descend_delta = float(np.linalg.norm(poses["place"] - poses["hover_place"]))
+        if descend_delta > 1e-4:
+            phases.append(
+                _Phase(
+                    "descend_place",
+                    "move",
+                    poses["place"],
+                    place_orn,
+                    close_cmd,
+                )
+            )
+        else:
+            print(
+                f"[asset_centroid] skip descend_place "
+                f"(||place−hover_place||={descend_delta * 1000:.2f} mm)",
+                flush=True,
+            )
+        phases.extend(
+            [
+                _Phase(
+                    "settle_place",
+                    "dwell",
+                    poses["place"],
+                    place_orn,
+                    close_cmd,
+                    settle_steps,
+                ),
+                _Phase(
+                    "open",
+                    "dwell",
+                    poses["place"],
+                    place_orn,
+                    open_cmd,
+                    open_steps,
+                ),
+                _Phase("retract", "move", poses["retract"], place_orn, open_cmd),
+            ]
+        )
+        self._phases = phases
         self._done = False
         print(
             f"[asset_centroid] {target.name}: centroid="
@@ -504,6 +531,57 @@ class AssetCentroidScriptedPolicy(Policy):
         offset_world = np.asarray(tuple(offset_gf), dtype=np.float64)
         return centroid_world, offset_world
 
+    def _path_heights_m(self) -> tuple[float, float, float]:
+        """Return (hover_pick, hover_place, retract) clearances in meters.
+
+        When the active part sets ``use_param_config_height``, map PART_CONFIG
+        ``init_height`` → hover_pick, ``hover_place_height`` → hover_place
+        (falls back to ``init_height`` when unset), and ``final_height`` →
+        retract. Otherwise use asset-centroid JSON path clearances.
+        """
+        clear = self._cfg.path_clearances
+        hover_pick = float(clear.hover_pick_m)
+        hover_place = float(clear.hover_place_m)
+        retract = float(clear.final_retract_m)
+        name = None if self._target is None else self._target.name
+        if not name:
+            return hover_pick, hover_place, retract
+        try:
+            import param_config as pc
+
+            cfg = pc.get_part_config(name)
+        except Exception:
+            return hover_pick, hover_place, retract
+        if not bool(cfg.get("use_param_config_height", False)):
+            return hover_pick, hover_place, retract
+        init_h = cfg.get("init_height")
+        place_h = cfg.get("hover_place_height")
+        final_h = cfg.get("final_height")
+        if init_h is None:
+            init_h = getattr(pc, "INIT_HEIGHT", hover_pick)
+        if place_h is None:
+            place_h = init_h
+        if final_h is None:
+            final_h = getattr(pc, "FINAL_HEIGHT", None)
+        if final_h is None:
+            final_h = init_h
+        return float(init_h), float(place_h), float(final_h)
+
+    def _place_z_offset_m(self) -> float:
+        """World +Z on the place EE when use_param_config_height is set."""
+        name = None if self._target is None else self._target.name
+        if not name:
+            return 0.0
+        try:
+            import param_config as pc
+
+            cfg = pc.get_part_config(name)
+        except Exception:
+            return 0.0
+        if not bool(cfg.get("use_param_config_height", False)):
+            return 0.0
+        return float(cfg.get("place_z_offset") or 0.0)
+
     def _pose_set(
         self,
         grasp_center: np.ndarray,
@@ -518,19 +596,22 @@ class AssetCentroidScriptedPolicy(Policy):
         tcp = self._part_spec.tcp_to_grasp_tool
         clear = self._cfg.path_clearances
         frame = clear.tcp_offset_frame
+        hover_pick_m, hover_place_m, retract_m = self._path_heights_m()
+        place_z_off = self._place_z_offset_m()
         pick = ee_position_for_grasp_center(
             grasp_center, pick_orn, tcp, offset_frame=frame
         )
         place = ee_position_for_grasp_center(
             place_center, place_orn, tcp, offset_frame=frame
         )
+        place = place + np.array([0.0, 0.0, place_z_off], dtype=np.float64)
         return {
             "pick": pick,
-            "hover_pick": pick + np.array([0.0, 0.0, clear.hover_pick_m]),
-            "lift_pick": pick + np.array([0.0, 0.0, clear.hover_pick_m]),
+            "hover_pick": pick + np.array([0.0, 0.0, hover_pick_m]),
+            "lift_pick": pick + np.array([0.0, 0.0, hover_pick_m]),
             "place": place,
-            "hover_place": place + np.array([0.0, 0.0, clear.hover_place_m]),
-            "retract": place + np.array([0.0, 0.0, clear.final_retract_m]),
+            "hover_place": place + np.array([0.0, 0.0, hover_place_m]),
+            "retract": place + np.array([0.0, 0.0, retract_m]),
         }
 
     def _yaw_candidates(self) -> tuple[np.ndarray, ...]:
@@ -557,9 +638,9 @@ class AssetCentroidScriptedPolicy(Policy):
         """Pick/place yaw from keyframe endpoint IK only.
 
         Dense Cartesian transfer is intentionally not required: like the
-        baseline transit, runtime hover_place uses joint-space quintic lerp
-        between lift_pick and hover_place solutions so Lula cannot flip
-        wrist branches at midpoints.
+        baseline transit, runtime hover_place uses a joint-space quintic
+        between preflight endpoints so Lula cannot flip wrist branches.
+        Short vertical descend_place stays Cartesian (task-space Z).
         """
         seed0 = np.asarray(self._controller.current_cspace_q(), dtype=np.float64)
         best = None
@@ -602,6 +683,7 @@ class AssetCentroidScriptedPolicy(Policy):
                 place_score = place_rank * 1e-6
                 place_ok = True
                 hover_place_q = None
+                place_q = None
                 for key in place_keys:
                     q, ok = self._controller.solve_q(
                         pair_poses[key], place_orn, seed=seed
@@ -613,6 +695,8 @@ class AssetCentroidScriptedPolicy(Policy):
                     q = np.asarray(q, dtype=np.float64).reshape(-1)
                     if key == "hover_place":
                         hover_place_q = q.copy()
+                    elif key == "place":
+                        place_q = q.copy()
                     place_score += self._joint_step_cost(seed, q)
                     seed = q
                 if not place_ok:
@@ -625,6 +709,7 @@ class AssetCentroidScriptedPolicy(Policy):
                         place_orn.copy(),
                         pair_poses,
                         hover_place_q,
+                        place_q,
                     )
         if best is None and clear.force_yaw_deg is not None:
             fallback = top_down_yaw_candidates(clear.yaw_step_deg)
@@ -660,6 +745,7 @@ class AssetCentroidScriptedPolicy(Policy):
                     place_score = place_rank * 1e-6
                     place_ok = True
                     hover_place_q = None
+                    place_q = None
                     for key in place_keys:
                         q, ok = self._controller.solve_q(
                             pair_poses[key], place_orn, seed=seed
@@ -671,6 +757,8 @@ class AssetCentroidScriptedPolicy(Policy):
                         q = np.asarray(q, dtype=np.float64).reshape(-1)
                         if key == "hover_place":
                             hover_place_q = q.copy()
+                        elif key == "place":
+                            place_q = q.copy()
                         place_score += self._joint_step_cost(seed, q)
                         seed = q
                     if not place_ok:
@@ -683,6 +771,7 @@ class AssetCentroidScriptedPolicy(Policy):
                             place_orn.copy(),
                             pair_poses,
                             hover_place_q,
+                            place_q,
                         )
         if best is None:
             preferred_poses = self._pose_set(
@@ -700,8 +789,20 @@ class AssetCentroidScriptedPolicy(Policy):
         place_yaw = self._nominal_yaw_degrees(best[2])
         poses = best[3]
         self._hover_place_q = best[4].copy()
+        self._place_q = best[5].copy()
+        hover_pick_m, hover_place_m, retract_m = self._path_heights_m()
+        place_z_off = self._place_z_offset_m()
         xy_err_pick = float(
             np.linalg.norm(poses["hover_pick"][:2] - grasp_center[:2])
+        )
+        print(
+            "[asset_centroid] path heights "
+            f"hover_pick={hover_pick_m:.4f} hover_place={hover_place_m:.4f} "
+            f"place_z_offset={place_z_off:.4f} retract={retract_m:.4f} | "
+            f"place_ee_z={poses['place'][2]:.5f} "
+            f"hover_place_z={poses['hover_place'][2]:.5f} "
+            f"retract_z={poses['retract'][2]:.5f}",
+            flush=True,
         )
         print(
             "[asset_centroid] selected world-down TCP yaws "
@@ -709,7 +810,8 @@ class AssetCentroidScriptedPolicy(Policy):
             f"on {self._cfg.active_arm} arm; frame={self._cfg.path_clearances.tcp_offset_frame}; "
             f"hover_pick={np.round(poses['hover_pick'], 5).tolist()} "
             f"(|xy−grasp|={xy_err_pick * 1000:.1f} mm); "
-            f"hover_place={np.round(poses['hover_place'], 5).tolist()}",
+            f"hover_place={np.round(poses['hover_place'], 5).tolist()} "
+            f"place={np.round(poses['place'], 5).tolist()}",
             flush=True,
         )
         return best[1], best[2], best[3]
@@ -752,15 +854,16 @@ class AssetCentroidScriptedPolicy(Policy):
         )
         self._segment_index = 0
         self._segment_q = ()
-        # lift_pick → hover_place: joint-space transit (baseline lesson).
+        # Large lift→hover transit: joint-space quintic (baseline lesson).
+        # Short vertical descend_place stays Cartesian so XY does not arc.
         if phase.name == "hover_place":
+            if self._hover_place_q is None:
+                self._abort(f"missing preflight joint target for {phase.name}")
+                return
             q0 = np.asarray(
                 self._controller.current_cspace_q(), dtype=np.float64
             )
-            if self._hover_place_q is None:
-                self._abort("missing preflight joint target for hover_place")
-                return
-            q1 = self._hover_place_q.copy()
+            q1 = np.asarray(self._hover_place_q, dtype=np.float64).reshape(-1).copy()
             self._segment_q = sample_joint_segment(
                 q0,
                 q1,
@@ -811,12 +914,35 @@ class AssetCentroidScriptedPolicy(Policy):
             flush=True,
         )
 
+    def _latch_hold_q(self) -> None:
+        """Freeze arm joints for place settle/open (avoid per-tick re-IK jitter)."""
+        if self._place_q is not None:
+            self._hold_q = np.asarray(self._place_q, dtype=np.float64).reshape(-1).copy()
+            return
+        try:
+            self._hold_q = np.asarray(
+                self._controller.current_cspace_q(), dtype=np.float64
+            ).reshape(-1).copy()
+        except Exception:
+            self._hold_q = None
+
     def _advance_phase(self, obs: Optional[Observation] = None) -> None:
         completed = self._phases[self._phase_index].name
         if obs is not None:
             self._log_pose_error(obs, self._phases[self._phase_index])
         if completed == "close":
             self._freeze_compliant_grasp_aperture()
+        # Latch joints when we reach the release pose (after descend, or
+        # after hover_place when descend was skipped).
+        if completed in ("descend_place", "hover_place"):
+            next_i = self._phase_index + 1
+            next_name = (
+                self._phases[next_i].name
+                if next_i < len(self._phases)
+                else None
+            )
+            if completed == "descend_place" or next_name == "settle_place":
+                self._latch_hold_q()
         self._phase_index += 1
         self._phase_ticks = 0
         self._segment = ()
@@ -836,7 +962,14 @@ class AssetCentroidScriptedPolicy(Policy):
         self._maybe_log_compliance_1hz()
         phase = self._phases[self._phase_index]
         if phase.kind == "dwell":
-            action = self._command(phase.pos, phase.orn, phase.gripper)
+            if phase.name in ("settle_place", "open") and self._hold_q is not None:
+                action = self._controller.forward_raw_q(
+                    self._hold_q, phase.gripper
+                )
+                self._last_action = action
+                self._ik_failure_steps = 0
+            else:
+                action = self._command(phase.pos, phase.orn, phase.gripper)
             if self._done:
                 return self._noop()
             if self._ik_failure_steps == 0:

@@ -224,11 +224,11 @@ enable_camera_output    = _env_bool("TASK_ENABLE_CAMERA_OUTPUT", False)   # bind
 HEAD_DEPTH_CAMERA_FOCAL_LENGTH = float(os.getenv("TASK_HEAD_DEPTH_FOCAL_LENGTH", "10"))
 
 # Right-wrist TCP approach laser: tool +Z from EE (jaw midline), with depth
-# marched along that ray in the wrist image. Camera-boresight aim is not used
-# (it placed the crosshair under the visual TCP). Optional tip offset shifts
-# emit in EE frame if the Lula/USD EE frame is not on the grasp midline.
-# TASK_R_WRIST_LASER_TIP_OFFSET_EE=x,y,z (meters). Debug marker for cam
-# principal point: TASK_R_WRIST_LASER_AIM_DEBUG=1.
+# marched along that ray in the wrist image. Overlay draws a distal-tip
+# aperture ruler (live jaw gap in mm) instead of a stop-point crosshair.
+# Optional tip offset shifts emit in EE frame if the Lula/USD EE frame is
+# not on the grasp midline. TASK_R_WRIST_LASER_TIP_OFFSET_EE=x,y,z (meters).
+# Debug marker for cam principal point: TASK_R_WRIST_LASER_AIM_DEBUG=1.
 enable_r_wrist_laser = _env_bool("TASK_ENABLE_R_WRIST_LASER", True)
 R_WRIST_LASER_MAX_LENGTH = float(os.getenv("TASK_R_WRIST_LASER_MAX_LENGTH", "2.0"))
 R_WRIST_LASER_LOG_PERIOD_S = float(os.getenv("TASK_R_WRIST_LASER_LOG_PERIOD_S", "0.5"))
@@ -387,16 +387,19 @@ else:
 #                 don't enclose the object in phase 3.
 # gripper_open    (rad): finger spread for "open" command at this part.
 #                 Smaller = tighter fit. ~0.15 sized for the rod_16mm.
-# gripper_close   (rad): commanded finger spread for "close". Prefer
-#                 geometric Design D from config/part_local_aabb_extents.json
-#                 (grasp_width_m → rad) when collecting with --part / UI;
-#                 PART_CONFIG overrides remain the fallback.
+# gripper_close   (rad): commanded finger spread for "close". By default
+#                 Design D geometry from config/part_local_aabb_extents.json
+#                 wins (grasp_width_m → rad); PART_CONFIG is the fallback.
+# use_param_config_aperture (bool): when True for a part, ignore Design D
+#                 and use that part's gripper_open / gripper_close directly
+#                 (baseline + asset-centroid via part_grasp_*_rad).
 # ---------------------------------------------------------------------------
 PART_DEFAULTS = {
     "ee_orientation": np.array([0.0, 1.0, 0.0, 0.0]),
     "ee_offset":      np.array([0.0, 0.016, 0.196]),
     "gripper_open":   0.15,
     "gripper_close":  0.0,
+    "use_param_config_aperture": False,
     "pick_pos":       None,   # required per-part; None = skip phases 1-5
     "place_pos":      None,   # required per-part; None = skip phases 6-9
     # Release mode at the place block.
@@ -407,15 +410,29 @@ PART_DEFAULTS = {
     #             dict on the part (see pin / hdmi / usb_a below).
     "release_mode":   "open",
     "snap":           None,
-    # Per-part hover delta-z above the grasp / place EE pose (m). None =
-    # fall back to the global INIT_HEIGHT below.
+    # Per-part hover delta-z above the grasp EE pose (m). None =
+    # fall back to the global INIT_HEIGHT below. With
+    # use_param_config_height, asset-centroid maps this to hover_pick /
+    # lift_pick (and hover_place when hover_place_height is None).
     "init_height":    None,
+    # Per-part hover delta-z above the place EE pose (m). None = use
+    # init_height (same pick/place hover). Asset-centroid only when
+    # use_param_config_height is True. This is clearance ABOVE the release
+    # pose — it does not lower the release itself (see place_z_offset).
+    "hover_place_height": None,
+    # World +Z added to the place EE pose (m) when use_param_config_height
+    # is True. Negative values lower the gripper before release. Default 0.
+    "place_z_offset": 0.0,
     # Per-part delta-z above the place pose for the post-open lift_place
     # waypoint (the retract after the gripper releases). None = fall back
     # to the global FINAL_HEIGHT (and if that's None too, init_height).
     # Set to a value like 0.05 if you want a low retract that hugs the
     # part, or 0.15 to clear a tall obstacle on the way out.
     "final_height":   None,
+    # When True, asset-centroid uses this part's init_height /
+    # hover_place_height / place_z_offset / final_height instead of
+    # policy-JSON path clearances. Default False keeps JSON.
+    "use_param_config_height": False,
     # Per-part joint-lerp transit waypoint count between lift_pick and
     # hover_place. None = fall back to the global TRANSIT_STEPS below. Set
     # explicitly (e.g. 0) when a specific part needs a different count than
@@ -489,37 +506,28 @@ PART_CONFIG = {
         "ee_offset":      np.array([-0.001, 0.015,0.1875]),
     },
     "bolt_8mm": {
-        "gripper_open":   0.06,
+        # Open pick/drop like rod_16mm / gear_20teeth.
+        # Apertures: use_param_config_aperture → gripper_open/close below.
+        # Heights: use_param_config_height → init_height (hover_pick) /
+        # hover_place_height (above release) / place_z_offset (lower/raise
+        # release EE) / final_height (retract). hover_place_height alone
+        # does not lower the release pose.
+        "use_param_config_aperture": True,
+        "gripper_open":   0.075,
+        "gripper_close":  0.055,
         "pick_pos":       np.array([ -0.1729, 0.00093, 1.039]),
         "place_pos":      np.array([ -0.00174,  0.13135, 1.06]),
+        "grade_pos":      np.array([ -0.00174,  0.13135, 1.06]),
         "ee_offset":      np.array([0.0, 0.0147, 0.2045]),
-        "init_height":    0.05, 
-        "final_height":   0.1,
-        "release_mode":   "snap",
-        "snap": {
-            "movable_path":     "/World/parts/bolt_8mm",
-            "debug":            False,  # log snap gate pos/rot err each ~30 ticks
-            # Shared rack slot _188_028 with rod_16mm.
-            "parent_body_path": "/World/task_board/task_board_color/root_001/_188_028",
-            "target_pos":       (-0.00174, 0.13135, 1.06),  # = place_pos (mesh-frame)
-            "target_rot":       (0.6892, 0.6892, 0.0, 0.0),   # wxyz
-            "pos_tol_axes":     (0.002, 0.0115, 0.005),        # WORLD frame
-            "rot_tol_deg":      -1,                      
-            "set_kinematic":    False,
-            "timeout_steps":    300,
-            "connect_pos":      (-0.00174, 0.13135, 1.04),  # = place_pos
-            # Force the joint to anchor at exactly target_rot. Without this,
-            # _joint_anchor_matrix defaults to the mesh's CURRENT rotation
-            # at snap-fire time — and with rot_tol_deg=10 that can be up to
-            # 10° off the socket axis, leaving the bolt visibly tilted.
-            "connect_rot":      (0.6892, 0.6892, 0.0, 0.0),  # = target_rot
-            "search": {
-                "n":          6,
-                "extent_xy":  (0.006, 0.006),
-                "dwell_steps": 1,
-            },
-        },
-
+        "release_mode":   "open",
+        "use_param_config_height": True,
+        "init_height":    0.03,
+        # Transport aims at hover_place (= place + this). Must clear table;
+        # 0 collapsed transit onto the lowered release and scraped the board.
+        "hover_place_height": 0.05,
+        # Lower release EE ~20 mm (grade drop was ~20 mm with release at 1.264).
+        "place_z_offset": -0.005,
+        "final_height":   0.05,
     },
 
     "gear_20teeth": {
@@ -715,15 +723,20 @@ def get_part_config(name: str) -> dict:
 
 
 def part_grasp_close_rad(name: str) -> float:
-    """Design D close aperture (rad).
+    """Close aperture (rad) for scripted / teleop grasp.
 
-    Prefer geometric ``grasp_width_m`` from
-    ``config/part_local_aabb_extents.json``; fall back to PART_CONFIG.
+    If ``PART_CONFIG[name].use_param_config_aperture`` is True, return that
+    part's ``gripper_close`` directly. Otherwise Design D:
+    geometric ``grasp_width_m`` from ``config/part_local_aabb_extents.json``,
+    falling back to PART_CONFIG.
     """
     from teleop.grasp_aperture import resolve_grasp_close_rad
 
+    cfg = get_part_config(name)
+    if bool(cfg.get("use_param_config_aperture", False)):
+        return float(cfg["gripper_close"])
     return resolve_grasp_close_rad(
-        name, fallback_rad=float(get_part_config(name)["gripper_close"])
+        name, fallback_rad=float(cfg["gripper_close"])
     )
 
 
@@ -731,24 +744,43 @@ GRASP_OPEN_CLEARANCE_M = 0.010
 
 
 def part_grasp_open_rad(name: str) -> float:
-    """Pre-grasp opening wide enough for the configured object geometry.
+    """Pre-grasp opening (rad) for scripted / teleop approach.
 
-    Preserve a wider hand-tuned ``gripper_open`` value, but never approach an
-    object with less than 10 mm total jaw clearance. Parts absent from the
-    geometry file retain their hand-tuned fallback.
+    Resolution order:
+      1. ``use_param_config_aperture`` — return PART_CONFIG ``gripper_open``
+         as-is (must be wider than that part's ``gripper_close``).
+      2. Explicit ``PART_CONFIG[name]["gripper_open"]`` when present — honor
+         the hand-tune, but never open narrower than the Design D close
+         aperture (plus a tiny epsilon).
+      3. Else geometric object width + ``GRASP_OPEN_CLEARANCE_M`` (10 mm),
+         taking ``max`` with the PART_DEFAULTS fallback so a wider default
+         still wins.
+
+    Baseline and asset-centroid both call this helper.
     """
     from teleop.grasp_aperture import grasp_width_m, grasp_width_to_close_rad
 
-    fallback = float(get_part_config(name)["gripper_open"])
+    cfg = get_part_config(name)
+    if bool(cfg.get("use_param_config_aperture", False)):
+        return float(cfg["gripper_open"])
+
+    fallback = float(cfg["gripper_open"])
+    explicit = PART_CONFIG.get(name, {}).get("gripper_open")
+    q_close = part_grasp_close_rad(name)
+    min_open = float(q_close) + 1e-3
+
+    if explicit is not None:
+        return max(float(explicit), min_open)
+
     width = grasp_width_m(name)
     if width is None:
-        return fallback
+        return max(fallback, min_open)
     geometric = grasp_width_to_close_rad(
         width,
         margin_m=0.0,
         clearance_m=GRASP_OPEN_CLEARANCE_M,
     )
-    return max(fallback, geometric)
+    return max(fallback, geometric, min_open)
 
 
 def known_part_names() -> tuple:

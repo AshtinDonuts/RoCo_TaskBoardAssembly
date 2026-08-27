@@ -998,8 +998,16 @@ def main():
                 )
                 return
             rgb = np.asarray(rgba[..., :3])
+            gripper_q = None
+            try:
+                gripper_q, _ = R_controller._measured_gripper()
+            except Exception:
+                gripper_q = None
             overlay = r_wrist_laser.overlay_rgb(
-                rgb, R_wrist_camera, depth_m=depth_m
+                rgb,
+                R_wrist_camera,
+                depth_m=depth_m,
+                gripper_q_rad=gripper_q,
             )
             # Log after overlay so stop_uv matches this frame (Branch A/B).
             r_wrist_laser.maybe_log_distance(

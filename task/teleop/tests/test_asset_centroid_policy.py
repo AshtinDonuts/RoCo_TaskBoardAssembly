@@ -140,20 +140,58 @@ def test_missing_geometry_aborts_without_motion(monkeypatch):
     assert all(v is None for v in policy.act(obs).joint_positions)
 
 
-def test_no_feasible_yaw_aborts_without_motion(monkeypatch):
-    policy = _policy(_Controller(solve_ok=False))
-    monkeypatch.setattr(
-        policy,
-        "_live_asset_centroid",
-        lambda name: (np.array([0.0, 0.0, 1.0]), np.zeros(3)),
+def test_param_config_height_overrides_json_clearances():
+    import param_config as pc
+
+    policy = _policy()
+    policy._target = PartTarget(
+        "bolt_8mm", "open", place_pos=np.array([0.1, 0.0, 1.0])
     )
-    obs = _obs()
-    policy.reset(
-        obs,
-        PartTarget("gear_20teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])),
+    cfg = pc.get_part_config("bolt_8mm")
+    assert cfg.get("use_param_config_height") is True
+    init_h = float(cfg["init_height"])
+    place_h = float(cfg["hover_place_height"])
+    final_h = float(cfg["final_height"])
+    hover_pick, hover_place, retract = policy._path_heights_m()
+    np.testing.assert_allclose(hover_pick, init_h)
+    np.testing.assert_allclose(hover_place, place_h)
+    np.testing.assert_allclose(retract, final_h)
+    np.testing.assert_allclose(policy._place_z_offset_m(), float(cfg["place_z_offset"]))
+    # Must differ from JSON path clearances when PART_CONFIG values differ.
+    json_path = policy._cfg.path_clearances
+    assert (hover_pick, hover_place, retract) != (
+        float(json_path.hover_pick_m),
+        float(json_path.hover_place_m),
+        float(json_path.final_retract_m),
     )
-    assert policy.is_done(obs)
-    assert all(v is None for v in policy.act(obs).joint_positions)
+
+
+def test_hover_place_height_falls_back_to_init_height(monkeypatch):
+    import param_config as pc
+
+    policy = _policy()
+    policy._target = PartTarget(
+        "bolt_8mm", "open", place_pos=np.array([0.1, 0.0, 1.0])
+    )
+    base = pc.get_part_config("bolt_8mm")
+    patched = dict(base)
+    patched["hover_place_height"] = None
+    monkeypatch.setattr(pc, "get_part_config", lambda name: patched)
+    hover_pick, hover_place, retract = policy._path_heights_m()
+    np.testing.assert_allclose(hover_pick, float(base["init_height"]))
+    np.testing.assert_allclose(hover_place, float(base["init_height"]))
+    np.testing.assert_allclose(retract, float(base["final_height"]))
+
+
+def test_json_path_heights_used_when_flag_false():
+    policy = _policy()
+    policy._target = PartTarget(
+        "gear_20teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])
+    )
+    hover_pick, hover_place, retract = policy._path_heights_m()
+    np.testing.assert_allclose(hover_pick, policy._cfg.path_clearances.hover_pick_m)
+    np.testing.assert_allclose(hover_place, policy._cfg.path_clearances.hover_place_m)
+    np.testing.assert_allclose(retract, policy._cfg.path_clearances.final_retract_m)
 
 
 def test_endpoint_motion_larger_than_runtime_jump_gate_still_plans(monkeypatch):
@@ -209,6 +247,113 @@ def test_close_dwell_freezes_remaining_grasp_at_measured_aperture(monkeypatch):
     for name in ("close", "lift_pick", "hover_place", "descend_place", "settle_place"):
         assert by_name[name] == pytest.approx(0.088)
     assert by_name["open"] == pytest.approx(0.12)
+
+
+def test_descend_place_uses_cartesian_segment(monkeypatch):
+    """Short place descent should be Cartesian (task-space Z), not joint arc."""
+    policy = _policy(_Controller(solve_delta=0.01))
+    monkeypatch.setattr(
+        policy,
+        "_live_asset_centroid",
+        lambda name: (np.array([0.0, 0.0, 1.0]), np.zeros(3)),
+    )
+    obs = _obs()
+    policy.reset(
+        obs,
+        PartTarget("gear_20teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])),
+    )
+    assert not policy.is_done(obs)
+    phase_i = next(
+        i for i, phase in enumerate(policy._phases) if phase.name == "descend_place"
+    )
+    policy._phase_index = phase_i
+    policy._segment = ()
+    policy._segment_q = ()
+    policy._start_segment(obs, policy._phases[phase_i])
+    assert len(policy._segment) > 0
+    assert policy._segment_q == ()
+
+
+def test_bolt_skips_null_descend_and_latches_hold_q(monkeypatch):
+    """When hover≈place, skip descend_place; settle/open freeze joints."""
+    import param_config as pc
+
+    policy = _policy(_Controller(solve_delta=0.01))
+    monkeypatch.setattr(
+        policy,
+        "_live_asset_centroid",
+        lambda name: (np.array([-0.17, 0.0, 1.04]), np.zeros(3)),
+    )
+    base = dict(pc.get_part_config("bolt_8mm"))
+    base["hover_place_height"] = 0.0
+    monkeypatch.setattr(pc, "get_part_config", lambda name: base)
+    obs = _obs()
+    policy.reset(
+        obs,
+        PartTarget("bolt_8mm", "open", place_pos=np.array([-0.00174, 0.13135, 1.06])),
+    )
+    assert not policy.is_done(obs)
+    names = [p.name for p in policy._phases]
+    assert "descend_place" not in names
+    assert "settle_place" in names
+    # Simulate finishing hover_place → settle; hold_q must latch.
+    policy._phase_index = names.index("hover_place")
+    policy._advance_phase(obs)
+    assert policy._hold_q is not None
+    policy._phase_index = names.index("settle_place")
+    action = policy.act(obs)
+    assert action is not None
+
+
+def test_bolt_transport_hover_clears_release_height():
+    """hover_place must sit above place so transit does not scrape the table."""
+    import param_config as pc
+
+    policy = _policy()
+    policy._target = PartTarget(
+        "bolt_8mm", "open", place_pos=np.array([-0.00174, 0.13135, 1.06])
+    )
+    policy._part_spec = policy._part_spec_for_target(policy._target)
+    cfg = pc.get_part_config("bolt_8mm")
+    assert float(cfg["hover_place_height"]) > 0.0
+    poses = policy._pose_set(
+        np.array([-0.17, 0.0, 1.04]),
+        np.array([-0.00174, 0.13135, 1.06]),
+        np.array([0.0, 1.0, 0.0, 0.0]),
+    )
+    np.testing.assert_allclose(
+        poses["hover_place"][2] - poses["place"][2],
+        float(cfg["hover_place_height"]),
+    )
+
+
+def test_place_z_offset_lowers_release_pose(monkeypatch):
+    import param_config as pc
+
+    policy = _policy()
+    policy._target = PartTarget(
+        "bolt_8mm", "open", place_pos=np.array([-0.00174, 0.13135, 1.06])
+    )
+    policy._part_spec = policy._part_spec_for_target(policy._target)
+    grasp = np.array([-0.17, 0.0, 1.04])
+    place_c = np.array([-0.00174, 0.13135, 1.06])
+    orn = np.array([0.0, 1.0, 0.0, 0.0])
+    off = policy._place_z_offset_m()
+    assert off < 0.0
+    poses = policy._pose_set(grasp, place_c, orn)
+    base = dict(pc.get_part_config("bolt_8mm"))
+    base["place_z_offset"] = 0.0
+    monkeypatch.setattr(pc, "get_part_config", lambda name: base)
+    poses0 = policy._pose_set(grasp, place_c, orn)
+    np.testing.assert_allclose(poses["place"][2], poses0["place"][2] + off)
+    np.testing.assert_allclose(
+        poses["hover_place"][2] - poses["place"][2],
+        float(base["hover_place_height"]),
+    )
+    np.testing.assert_allclose(
+        poses["retract"][2] - poses["place"][2],
+        float(base["final_height"]),
+    )
 
 
 def test_repeated_runtime_ik_failure_aborts_at_guard(monkeypatch):

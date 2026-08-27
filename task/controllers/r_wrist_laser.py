@@ -3,8 +3,9 @@
 Aims along gripper local +Z from the EE tool center (jaw midline), not along
 the wrist-cam optical axis. Range prefers depth marched along that tool ray
 in the wrist image, with PhysX along tool +Z as fallback. Overlay projects
-TCP→stop into the wrist RGB (AimBot-style reticle). Live preview uses an
-``omni.ui`` window — OpenCV HighGUI fights Kit.
+TCP→stop into the wrist RGB and draws a distal-tip aperture ruler (mm) for
+grasp calibration. Live preview uses an ``omni.ui`` window — OpenCV HighGUI
+fights Kit.
 """
 
 from __future__ import annotations
@@ -16,13 +17,24 @@ import carb
 import numpy as np
 import omni.usd
 from omni.physx import get_physx_scene_query_interface
-from pxr import UsdGeom
+from pxr import Gf, Usd, UsdGeom
 
 from .ee_pose_controller import _approach_axis_world
 from .pick_place_task import ROBOT_PRIM_PATH
 
 _OVERLAY_WINDOW = "R Wrist Laser"
 _UI_MIN_PERIOD_S = 0.05  # ~20 Hz preview; avoids flooding ByteImageProvider
+
+# Distal inner-jaw tips (same frame/threshold as aperture_calibration).
+_R_GRIPPER_LINK = f"{ROBOT_PRIM_PATH}/R_ee_link/gripper_link"
+_R_ACTIVE_MESH = (
+    f"{ROBOT_PRIM_PATH}/R_ee_link/gripper_active_link/gripper_active_link"
+)
+_R_PASSIVE_MESH = (
+    f"{ROBOT_PRIM_PATH}/R_ee_link/gripper_passive_link/"
+    "left_gripper_passive_link"
+)
+_DISTAL_Z_MIN_M = 0.18
 
 
 @dataclass
@@ -479,34 +491,171 @@ def _draw_polyline_uv(
         cv2.line(img, clipped[0], clipped[1], color, thickness)
 
 
-def _draw_crosshair(
-    img: np.ndarray,
-    center: Tuple[int, int],
+def _mesh_points_local(stage: Usd.Stage, mesh_path: str) -> Optional[np.ndarray]:
+    prim = stage.GetPrimAtPath(mesh_path)
+    if not prim or not prim.IsValid():
+        return None
+    points = UsdGeom.Mesh(prim).GetPointsAttr().Get()
+    if not points:
+        return None
+    return np.asarray(
+        [[float(p[0]), float(p[1]), float(p[2])] for p in points],
+        dtype=np.float64,
+    )
+
+
+def _xform_points_to_frame(
+    stage: Usd.Stage,
+    mesh_path: str,
+    frame_path: str,
+    points_local: np.ndarray,
+) -> Optional[np.ndarray]:
+    mesh_prim = stage.GetPrimAtPath(mesh_path)
+    frame_prim = stage.GetPrimAtPath(frame_path)
+    if not mesh_prim or not mesh_prim.IsValid():
+        return None
+    if not frame_prim or not frame_prim.IsValid():
+        return None
+    cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+    mesh_to_world = np.asarray(
+        cache.GetLocalToWorldTransform(mesh_prim), dtype=np.float64
+    )
+    frame_to_world = np.asarray(
+        cache.GetLocalToWorldTransform(frame_prim), dtype=np.float64
+    )
+    world_to_frame = np.linalg.inv(frame_to_world)
+    hom = np.concatenate(
+        [points_local, np.ones((len(points_local), 1), dtype=np.float64)],
+        axis=1,
+    )
+    return (hom @ mesh_to_world @ world_to_frame)[:, :3]
+
+
+def _pick_distal_inner_tip_locals(
     *,
-    arm_len: int,
-    gap: int,
-    color: Tuple[int, int, int],
-    thickness: int,
+    distal_z_min_m: float = _DISTAL_Z_MIN_M,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Finger-mesh-local distal tip verts (active min-X, passive max-X)."""
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return None
+    active_local = _mesh_points_local(stage, _R_ACTIVE_MESH)
+    passive_local = _mesh_points_local(stage, _R_PASSIVE_MESH)
+    if active_local is None or passive_local is None:
+        return None
+    active_in_link = _xform_points_to_frame(
+        stage, _R_ACTIVE_MESH, _R_GRIPPER_LINK, active_local
+    )
+    passive_in_link = _xform_points_to_frame(
+        stage, _R_PASSIVE_MESH, _R_GRIPPER_LINK, passive_local
+    )
+    if active_in_link is None or passive_in_link is None:
+        return None
+    a_mask = active_in_link[:, 2] >= float(distal_z_min_m)
+    p_mask = passive_in_link[:, 2] >= float(distal_z_min_m)
+    if not np.any(a_mask) or not np.any(p_mask):
+        return None
+    a_idx = int(np.where(a_mask)[0][np.argmin(active_in_link[a_mask, 0])])
+    p_idx = int(np.where(p_mask)[0][np.argmax(passive_in_link[p_mask, 0])])
+    return active_local[a_idx].copy(), passive_local[p_idx].copy()
+
+
+def _tip_world_from_local(
+    mesh_path: str, point_local: np.ndarray
+) -> Optional[np.ndarray]:
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return None
+    prim = stage.GetPrimAtPath(mesh_path)
+    if not prim or not prim.IsValid():
+        return None
+    cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+    mat = cache.GetLocalToWorldTransform(prim)
+    p = mat.Transform(
+        Gf.Vec3d(
+            float(point_local[0]), float(point_local[1]), float(point_local[2])
+        )
+    )
+    return np.array([float(p[0]), float(p[1]), float(p[2])], dtype=np.float64)
+
+
+def measure_r_gripper_distal_tips_world(
+    tip_locals: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    *,
+    distal_z_min_m: float = _DISTAL_Z_MIN_M,
+) -> Optional[
+    Tuple[np.ndarray, np.ndarray, float, Tuple[np.ndarray, np.ndarray]]
+]:
+    """Return (tip_active_w, tip_passive_w, gap_m, tip_locals) or None."""
+    locals_pair = tip_locals
+    if locals_pair is None:
+        locals_pair = _pick_distal_inner_tip_locals(distal_z_min_m=distal_z_min_m)
+        if locals_pair is None:
+            return None
+    a_local, p_local = locals_pair
+    a_w = _tip_world_from_local(_R_ACTIVE_MESH, a_local)
+    p_w = _tip_world_from_local(_R_PASSIVE_MESH, p_local)
+    if a_w is None or p_w is None:
+        return None
+    gap = float(np.linalg.norm(a_w - p_w))
+    return a_w, p_w, gap, (a_local, p_local)
+
+
+def _draw_aperture_ruler(
+    img: np.ndarray,
+    uv_a: Tuple[float, float],
+    uv_b: Tuple[float, float],
+    width_m: float,
+    *,
+    color: Tuple[int, int, int] = (0, 255, 255),
+    thickness: int = 2,
+    tick_px: int = 10,
+    label: Optional[str] = None,
 ) -> None:
-    """AimBot-style scope reticle at the projected stop point."""
+    """Draw a tip-to-tip ruler with end ticks and a mm label."""
     try:
         import cv2
     except ImportError:
         return
-    u, v = int(center[0]), int(center[1])
     h, w = img.shape[:2]
-    g = max(1, int(gap))
-    L = max(g + 1, int(arm_len))
+    clipped = _clip_segment_to_image(uv_a, uv_b, w, h)
+    if clipped is None:
+        return
+    (x0, y0), (x1, y1) = clipped
+    cv2.line(img, (x0, y0), (x1, y1), color, thickness, cv2.LINE_AA)
 
-    def _seg(a: Tuple[int, int], b: Tuple[int, int]) -> None:
-        clipped = _clip_segment_to_image(a, b, w, h)
-        if clipped is not None:
-            cv2.line(img, clipped[0], clipped[1], color, thickness)
+    dx = float(x1 - x0)
+    dy = float(y1 - y0)
+    seg_len = float(np.hypot(dx, dy))
+    if seg_len < 1e-3:
+        return
+    nx, ny = -dy / seg_len, dx / seg_len
+    t = float(max(4, tick_px))
+    for x, y in ((x0, y0), (x1, y1)):
+        a = (int(round(x - nx * t)), int(round(y - ny * t)))
+        b = (int(round(x + nx * t)), int(round(y + ny * t)))
+        tick = _clip_segment_to_image(a, b, w, h)
+        if tick is not None:
+            cv2.line(img, tick[0], tick[1], color, thickness, cv2.LINE_AA)
+        cv2.circle(
+            img, (int(round(x)), int(round(y))), max(3, thickness + 1), color, -1
+        )
 
-    _seg((u + g, v), (u + L, v))
-    _seg((u - g, v), (u - L, v))
-    _seg((u, v + g), (u, v + L))
-    _seg((u, v - g), (u, v - L))
+    text = label if label is not None else f"{width_m * 1000.0:.1f} mm"
+    mx = int(round(0.5 * (x0 + x1)))
+    my = int(round(0.5 * (y0 + y1)))
+    lx = int(np.clip(mx + nx * 16.0, 4, w - 8))
+    ly = int(np.clip(my + ny * 16.0, 16, h - 8))
+    cv2.putText(
+        img,
+        text,
+        (lx, ly),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
 
 
 def _camera_look_world(R_wc: np.ndarray) -> np.ndarray:
@@ -643,6 +792,9 @@ class RWristLaser:
         self.last_stop_uv: Optional[Tuple[float, float, float]] = None
         self.last_direction: Optional[np.ndarray] = None
         self.last_depth_m: float = -1.0
+        self.last_aperture_m: float = -1.0
+        self.last_aperture_calib_m: float = -1.0
+        self._tip_locals: Optional[Tuple[np.ndarray, np.ndarray]] = None
         self._last_log_s: float = -1e9
         self._last_ui_s: float = -1e9
         self._window_created = False
@@ -886,13 +1038,14 @@ class RWristLaser:
         rgb,
         camera,
         depth_m: Optional[np.ndarray] = None,
+        gripper_q_rad: Optional[float] = None,
     ) -> Optional[np.ndarray]:
-        """Draw tool-forward beam: TCP emit → tool-ray stop + reticle.
+        """Draw tool-forward beam + distal-tip aperture ruler.
 
         Aim is the gripper +Z ray from the TCP (jaw midline), projected into
-        the wrist image — not the camera principal point. The wrist cam may
-        sit offset from the TCP; a bottom→image-center HUD is intentionally
-        not used (that pinned the crosshair under the visual tool center).
+        the wrist image. The stop-point crosshair is omitted; a tip-to-tip
+        ruler shows the live distal inner-jaw gap (mm) for grasp calibration.
+        Optional ``gripper_q_rad`` adds the Design D model gap (q→gap).
         """
         if (
             rgb is None
@@ -966,6 +1119,7 @@ class RWristLaser:
         line_rgb = (0, 220, 0)
         emit_rgb = (255, 48, 48)
         hit_rgb = (255, 255, 0) if self.last_hit else (80, 180, 255)
+        ruler_rgb = (0, 255, 255)
         dbg_cam_rgb = (80, 80, 255)
 
         stop_proj = _project_cv(stop_cv, K)
@@ -973,7 +1127,7 @@ class RWristLaser:
         if emit_proj is None:
             emit_proj = _project_cv(start_cv, K)
 
-        # Reticle always on the projected tool-ray stop (jaw-midline aim).
+        # Aim point = projected tool-ray stop (no crosshair).
         aim_uv: Optional[Tuple[float, float]] = None
         if stop_proj is not None:
             aim_uv = (float(stop_proj[0]), float(stop_proj[1]))
@@ -1027,22 +1181,6 @@ class RWristLaser:
         if aim_uv is not None:
             su, sv = int(round(aim_uv[0])), int(round(aim_uv[1]))
             if 0 <= su < w and 0 <= sv < h:
-                z_cue = float(self.last_length) if self.last_length > 1e-6 else 1.0
-                arm = int(
-                    np.clip(
-                        18.0 + 40.0 * (1.0 - min(z_cue, 1.2) / 1.2),
-                        14,
-                        56,
-                    )
-                )
-                _draw_crosshair(
-                    out,
-                    (su, sv),
-                    arm_len=arm,
-                    gap=max(3, self.line_thickness + 1),
-                    color=line_rgb,
-                    thickness=max(1, self.line_thickness),
-                )
                 cv2.circle(
                     out,
                     (su, sv),
@@ -1050,6 +1188,38 @@ class RWristLaser:
                     hit_rgb,
                     -1,
                 )
+
+        # Distal-tip aperture ruler (live mesh gap between inner jaw tips).
+        self.last_aperture_m = -1.0
+        tips = measure_r_gripper_distal_tips_world(self._tip_locals)
+        if tips is not None:
+            tip_a, tip_b, gap_m, self._tip_locals = tips
+            self.last_aperture_m = float(gap_m)
+            a_cv = _world_to_cv_camera(tip_a, R_wc, t_w)
+            b_cv = _world_to_cv_camera(tip_b, R_wc, t_w)
+            a_proj = _project_cv(a_cv, K)
+            b_proj = _project_cv(b_cv, K)
+            if a_proj is not None and b_proj is not None:
+                _draw_aperture_ruler(
+                    out,
+                    (float(a_proj[0]), float(a_proj[1])),
+                    (float(b_proj[0]), float(b_proj[1])),
+                    gap_m,
+                    color=ruler_rgb,
+                    thickness=max(2, self.line_thickness),
+                    label=f"{gap_m * 1000.0:.1f} mm",
+                )
+
+        self.last_aperture_calib_m = -1.0
+        if gripper_q_rad is not None:
+            try:
+                from teleop.grasp_aperture import close_rad_to_aperture_m
+
+                self.last_aperture_calib_m = float(
+                    close_rad_to_aperture_m(float(gripper_q_rad))
+                )
+            except Exception:
+                self.last_aperture_calib_m = -1.0
 
         # Optional: show camera principal point so cam vs tool offset is visible.
         if self.show_aim_debug:
@@ -1075,6 +1245,30 @@ class RWristLaser:
             2,
             cv2.LINE_AA,
         )
+        y_txt = 54
+        if self.last_aperture_m >= 0.0:
+            cv2.putText(
+                out,
+                f"aperture {self.last_aperture_m * 1000.0:.1f} mm",
+                (12, y_txt),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                ruler_rgb,
+                2,
+                cv2.LINE_AA,
+            )
+            y_txt += 24
+        if self.last_aperture_calib_m >= 0.0:
+            cv2.putText(
+                out,
+                f"q→gap {self.last_aperture_calib_m * 1000.0:.1f} mm",
+                (12, y_txt),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (200, 200, 80),
+                2,
+                cv2.LINE_AA,
+            )
         bar_x0, bar_y0 = 12, h - 22
         bar_w, bar_h = max(40, w - 24), 10
         frac = float(

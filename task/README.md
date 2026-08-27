@@ -23,7 +23,7 @@ hands each part to the participant's `Policy`, and grades the result
 | `validate_grasp_aperture_physics.py` | Headless PhysX check of an asset's mesh width against the drive-settled Vega gripper aperture calibration. |
 | `r_arm_calib_ui.py`        | omni.ui panel + Save writers for `INIT_JOINT_TARGETS` / Lula YAMLs. |
 | `controllers/`            | EEPoseController, EEPathFollower, LulaIKController, snap helpers, pick-place task, Lula descriptor yamls for both arms (L + R). |
-| `controllers/r_wrist_laser.py` | Right-wrist TCP approach laser: wrist-cam center depth (LOS) preferred, PhysX raycast fallback, AimBot-style RGB overlay via `omni.ui`. |
+| `controllers/r_wrist_laser.py` | Right-wrist TCP approach laser: wrist-cam tool-ray depth, PhysX fallback, distal-tip aperture ruler overlay via `omni.ui`. |
 | `controllers/vega_1u_L_arm_description*.yaml` | Lula descriptors for L arm — `default_q` mirrors the scene init pose (see *Gotchas* below). Three variants picked by `pc.OWNS_LIFT_L` / `OWNS_TORSO_L`. |
 | `controllers/vega_1u_R_arm_description*.yaml` | Same, R arm. Available so a policy can do bimanual IK; the default single-arm runner just holds R at `INIT_JOINT_TARGETS`. |
 | `scene_final.usd`, `demo.mp4` | Reference output of a passing baseline run. |
@@ -145,10 +145,10 @@ Beam length prefers the median finite depth in a small patch around the
 wrist-cam image center (true line of sight). PhysX casts along tool +Z
 and the camera look axis are fallback / cross-check only — table and
 board visuals often lack colliders (see gotcha #9). Distance is cued by
-on-image `HIT`/`MAX` text, a range bar, and reticle size; the crosshair
-`(u,v)` is nearly range-invariant because the cam is nearly coaxial with
-the tool axis. Live preview uses an `omni.ui` window (`R Wrist Laser`) —
-do not use OpenCV HighGUI inside Kit.
+on-image `HIT`/`MAX` text, a range bar, and a distal-tip aperture ruler
+(live inner-jaw gap in mm, plus optional Design D `q→gap` readout). Live
+preview uses an `omni.ui` window (`R Wrist Laser`) — do not use OpenCV
+HighGUI inside Kit.
 
 **IK descriptor mode** — three modes per arm via the (`OWNS_LIFT_*`,
 `OWNS_TORSO_*`) flag pair:

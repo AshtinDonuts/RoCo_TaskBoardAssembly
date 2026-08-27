@@ -3,8 +3,8 @@
     "completion_reason": "max_parts",
     "current_part": null,
     "completed_parts": 1,
-    "total_task_steps": 1067,
-    "sim_time_s": 106.91,
+    "total_task_steps": 1052,
+    "sim_time_s": 105.41,
     "max_steps": null,
     "max_sim_seconds": null,
     "max_parts": 1,
@@ -16,20 +16,20 @@
   "n_missing": 0,
   "per_part": [
     {
-      "name": "rod_16mm",
+      "name": "bolt_8mm",
       "release_mode": "open",
       "measure": "meshT",
-      "pos_err_m": 0.012683685925882551,
+      "pos_err_m": 0.022461330824090523,
       "tolerance_m": 0.01,
       "actual": [
-        0.0303664827368266,
-        0.1695581771470191,
-        1.044333527872765
+        -0.0015069174195003199,
+        0.13213531803167317,
+        1.0375536120836997
       ],
       "target": [
-        0.02976,
-        0.16982,
-        1.057
+        -0.00174,
+        0.13135,
+        1.06
       ],
       "pass": false
     }
