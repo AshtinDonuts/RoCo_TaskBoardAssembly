@@ -151,15 +151,17 @@ def test_approach_orientation_parsing_validation_and_disabled_compatibility(tmp_
     path.write_text(json.dumps(base), encoding="utf-8")
     cfg = load_asset_centroid_config(path)
     assert not cfg.approach_orientation.enabled
+    assert cfg.approach_orientation.enabled_parts == ()
     assert cfg.approach_orientation.max_tilt_rad == 0.0
 
     base["approach_orientation"] = {
         "enabled": True, "max_tilt_deg": 5.0, "sample_tilt_deg": 2.5,
-        "recover_at_hover": True,
+        "recover_at_hover": True, "enabled_parts": ["part"],
     }
     path.write_text(json.dumps(base), encoding="utf-8")
     cfg = load_asset_centroid_config(path)
     assert cfg.approach_orientation.enabled
+    assert cfg.approach_orientation.enabled_parts == ("part",)
     assert np.degrees(cfg.approach_orientation.max_tilt_rad) == pytest.approx(5.0)
     assert np.degrees(cfg.approach_orientation.sample_tilt_rad) == pytest.approx(2.5)
 

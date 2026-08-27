@@ -86,7 +86,7 @@ def test_param_config_fallback_flips_r_tcp_y():
     """Non-JSON parts inherit L-tuned ee_offset; R tool TCP must negate Y."""
     policy = _policy()
     target = PartTarget(
-        "gear_60teeth",
+        "pin",
         "open",
         place_pos=np.array([0.1, 0.0, 1.0]),
         gripper_open=0.2,
@@ -139,7 +139,7 @@ def test_pin_centroid_builds_finite_approach_with_configured_clearance(monkeypat
     assert not policy.is_done(_obs())
     phases = {phase.name: phase for phase in policy._phases}
     pick = phases["descend_pick"].pos
-    hover = phases["hover_pick_relaxed"].pos
+    hover = phases["hover_pick"].pos
     assert np.all(np.isfinite(pick))
     np.testing.assert_allclose(hover[:2], pick[:2], atol=1e-12)
     assert hover[2] - pick[2] == pytest.approx(policy._path_heights_m()[0])
@@ -153,7 +153,7 @@ def test_relaxed_hover_precedes_strict_alignment_and_disabled_keeps_legacy_seque
 
     relaxed = _policy()
     monkeypatch.setattr(relaxed, "_live_asset_centroid", centroid)
-    relaxed.reset(_obs(), PartTarget("gear_20teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])))
+    relaxed.reset(_obs(), PartTarget("gear_60teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])))
     phases = relaxed._phases
     names = [phase.name for phase in phases]
     assert names[:3] == ["hover_pick_relaxed", "align_hover_pick", "descend_pick"]
@@ -163,11 +163,7 @@ def test_relaxed_hover_precedes_strict_alignment_and_disabled_keeps_legacy_seque
     assert phases[1].orientation_cone_rad is None
     assert phases[2].orientation_cone_rad is None
 
-    cfg = replace(
-        relaxed._cfg,
-        approach_orientation=replace(relaxed._cfg.approach_orientation, enabled=False),
-    )
-    strict = _policy(config=cfg)
+    strict = _policy(config=relaxed._cfg)
     monkeypatch.setattr(strict, "_live_asset_centroid", centroid)
     strict.reset(_obs(), PartTarget("gear_20teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])))
     assert [phase.name for phase in strict._phases][:2] == ["hover_pick", "descend_pick"]
@@ -188,42 +184,39 @@ def test_tilt_candidates_cover_signed_tool_axes_without_free_yaw():
         assert abs(relative[3]) < 1e-12
 
 
-def test_pin_approach_exposes_interior_ik_failure_after_endpoint_preflight(
-    monkeypatch,
-):
-    """Characterize the suspected failure: endpoints solve, dense path stalls.
-
-    The fake solver accepts every preflight endpoint, while runtime IK rejects
-    an interior band of the initial approach. The policy must retry exactly
-    that waypoint and hit its bounded IK guard instead of advancing blindly.
-    The recorded target gives a concrete first-failure pose for diagnosis.
-    """
-    controller = _Controller(fail_forward=lambda pos: pos[2] < 1.295)
+def test_pin_hover_pick_joint_approach_bypasses_dense_cartesian_ik(monkeypatch):
+    """Joint hover_pick must not call pose IK each sample (pin mid-path abort)."""
+    controller = _Controller(fail_forward=lambda pos: True)
     policy = _policy(controller)
     centroid = np.array([-0.03105, -0.01476, 1.04437])
     monkeypatch.setattr(
         policy, "_live_asset_centroid", lambda _: (centroid.copy(), np.zeros(3))
     )
     obs = _obs()
+    # Seed EE at hover so arrival check can pass after the joint segment.
+    hover_pos = None
     policy.reset(obs, _configured_target("pin"))
-    assert not policy.is_done(obs), "endpoint preflight unexpectedly rejected pin"
+    assert not policy.is_done(obs)
+    assert policy._hover_pick_q is not None
+    hover_phase = next(
+        p for p in policy._phases if p.name in ("hover_pick", "hover_pick_relaxed")
+    )
+    hover_pos = hover_phase.pos.copy()
+    controller.seed_ee_pose = (hover_pos, hover_phase.orn.copy())
 
-    last_progress = -1
-    first_failed_target = None
-    for _ in range(2000):
-        before = policy._segment_index
+    for _ in range(len(policy._segment_q) + 5 if policy._segment_q else 200):
         policy.act(obs)
-        if policy._ik_failure_steps and first_failed_target is None:
-            first_failed_target = controller.forward_targets[-1].copy()
-            last_progress = before
-        if policy.is_done(obs):
+        if policy._phase_index > 0 or policy.is_done(obs):
             break
+        if not policy._segment:
+            # First act starts the segment.
+            continue
 
-    assert first_failed_target is not None, "synthetic interior IK band was not hit"
-    assert first_failed_target[2] < 1.295
-    assert policy._segment_index == last_progress
-    assert policy._aborted
-    assert policy._ik_failure_steps == policy._cfg.guards.max_ik_failure_steps
+    assert controller.forward_targets == [], "joint approach must not call forward()/IK"
+    assert not policy._aborted
+    assert policy._phases[policy._phase_index].name != hover_phase.name or (
+        policy._segment_index >= len(policy._segment)
+    )
 
 
 def test_policy_requires_right_controller_and_active_arms():
@@ -351,7 +344,7 @@ def test_endpoint_motion_larger_than_runtime_jump_gate_still_plans(monkeypatch):
     assert policy._cfg.gripper.mode == "compliant"
     by_name = {p.name: p.gripper for p in policy._phases}
     assert by_name["close"] == "close"
-    assert by_name["hover_pick_relaxed"] == pytest.approx(0.12)
+    assert by_name["hover_pick"] == pytest.approx(0.12)
     assert by_name["open"] == pytest.approx(0.12)
 
 
@@ -412,6 +405,34 @@ def test_descend_place_uses_cartesian_segment(monkeypatch):
     policy._start_segment(obs, policy._phases[phase_i])
     assert len(policy._segment) > 0
     assert policy._segment_q == ()
+
+
+def test_hover_pick_uses_joint_space_segment(monkeypatch):
+    """Approach to hover_pick must quintic-lerp joints (preflight q), not dense IK."""
+    policy = _policy(_Controller(solve_delta=0.01))
+    monkeypatch.setattr(
+        policy,
+        "_live_asset_centroid",
+        lambda name: (np.array([-0.031, -0.015, 1.04]), np.zeros(3)),
+    )
+    obs = _obs()
+    policy.reset(
+        obs,
+        PartTarget("pin", "open", place_pos=np.array([0.0324, 0.00616, 1.065])),
+    )
+    assert not policy.is_done(obs)
+    assert policy._hover_pick_q is not None
+    phase_i = next(
+        i
+        for i, phase in enumerate(policy._phases)
+        if phase.name in ("hover_pick", "hover_pick_relaxed")
+    )
+    policy._phase_index = phase_i
+    policy._segment = ()
+    policy._segment_q = ()
+    policy._start_segment(obs, policy._phases[phase_i])
+    assert len(policy._segment_q) > 0
+    np.testing.assert_allclose(policy._segment_q[-1], policy._hover_pick_q)
 
 
 def test_bolt_skips_null_descend_and_latches_hold_q(monkeypatch):
@@ -497,6 +518,7 @@ def test_place_z_offset_lowers_release_pose(monkeypatch):
 
 
 def test_repeated_runtime_ik_failure_aborts_at_guard(monkeypatch):
+    """Cartesian phases still honor the consecutive IK-failure guard."""
     controller = _Controller(ik_ok=False, solve_ok=True)
     policy = _policy(controller)
     monkeypatch.setattr(
@@ -510,6 +532,13 @@ def test_repeated_runtime_ik_failure_aborts_at_guard(monkeypatch):
         PartTarget("gear_20teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])),
     )
     assert not policy.is_done(obs)
+    # hover_pick is joint-space now; exercise the guard on descend_pick.
+    phase_i = next(
+        i for i, phase in enumerate(policy._phases) if phase.name == "descend_pick"
+    )
+    policy._phase_index = phase_i
+    policy._segment = ()
+    policy._segment_q = ()
     for _ in range(99):
         policy.act(obs)
         assert not policy.is_done(obs)

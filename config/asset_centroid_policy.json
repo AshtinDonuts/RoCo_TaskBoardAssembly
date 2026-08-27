@@ -26,6 +26,7 @@
   },
   "approach_orientation": {
     "enabled": true,
+    "enabled_parts": ["gear_60teeth"],
     "max_tilt_deg": 5.0,
     "sample_tilt_deg": 2.5,
     "recover_at_hover": true

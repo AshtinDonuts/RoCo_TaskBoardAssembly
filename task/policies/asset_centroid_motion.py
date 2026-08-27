@@ -58,6 +58,7 @@ class ApproachOrientationSpec:
     """Optional bounded orientation freedom while approaching pick hover."""
 
     enabled: bool
+    enabled_parts: tuple[str, ...]
     max_tilt_rad: float
     sample_tilt_rad: float
     recover_at_hover: bool
@@ -173,6 +174,14 @@ def load_asset_centroid_config(path: Path | str | None = None) -> AssetCentroidC
     )
     approach_raw = raw.get("approach_orientation") or {}
     enabled = bool(approach_raw.get("enabled", False))
+    enabled_parts_raw = approach_raw.get("enabled_parts", [])
+    if not isinstance(enabled_parts_raw, list) or not all(
+        isinstance(name, str) and name.strip() for name in enabled_parts_raw
+    ):
+        raise ValueError(
+            "approach_orientation.enabled_parts must be a list of non-empty part names"
+        )
+    enabled_parts = tuple(name.strip() for name in enabled_parts_raw)
     max_tilt_deg = float(approach_raw.get("max_tilt_deg", 0.0))
     sample_tilt_deg = float(approach_raw.get("sample_tilt_deg", 0.0))
     if not np.isfinite(max_tilt_deg) or max_tilt_deg < 0.0:
@@ -188,6 +197,7 @@ def load_asset_centroid_config(path: Path | str | None = None) -> AssetCentroidC
         enabled = False
     approach_orientation = ApproachOrientationSpec(
         enabled=enabled,
+        enabled_parts=enabled_parts,
         max_tilt_rad=float(np.deg2rad(max_tilt_deg)),
         sample_tilt_rad=float(np.deg2rad(sample_tilt_deg)),
         recover_at_hover=bool(approach_raw.get("recover_at_hover", True)),

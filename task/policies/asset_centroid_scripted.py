@@ -19,7 +19,7 @@ spec use the Design-D aperture resolver from ``param_config``.
 from __future__ import annotations
 
 import json
-import os.path
+import os
 import sys
 from dataclasses import dataclass
 from typing import Optional
@@ -109,6 +109,7 @@ class AssetCentroidScriptedPolicy(Policy):
         self._last_action = self._noop()
         self._part_spec = None
         self._target: Optional[PartTarget] = None
+        self._hover_pick_q: Optional[np.ndarray] = None
         self._hover_place_q: Optional[np.ndarray] = None
         self._place_q: Optional[np.ndarray] = None
         self._hold_q: Optional[np.ndarray] = None
@@ -149,6 +150,7 @@ class AssetCentroidScriptedPolicy(Policy):
         self._last_action = self._noop()
         self._part_spec = None
         self._target = target
+        self._hover_pick_q = None
         self._hover_place_q = None
         self._place_q = None
         self._hold_q = None
@@ -279,6 +281,12 @@ class AssetCentroidScriptedPolicy(Policy):
             f"open={open_cmd!r} close={close_cmd!r} "
             f"yaw-ready phases={len(self._phases)}",
             flush=True,
+        )
+        self._render_target_markers(
+            part_name=target.name,
+            centroid_world=centroid_world,
+            grasp_center=grasp_center,
+            poses=poses,
         )
 
     def _gripper_cmds(self) -> tuple[float | str, float | str]:
@@ -540,6 +548,101 @@ class AssetCentroidScriptedPolicy(Policy):
         offset_world = np.asarray(tuple(offset_gf), dtype=np.float64)
         return centroid_world, offset_world
 
+    @staticmethod
+    def _debug_markers_enabled() -> bool:
+        # Default on so a GUI run shows targets without extra env setup.
+        raw = os.environ.get("ROCO_ASSET_CENTROID_DEBUG_MARKERS", "1").strip().lower()
+        return raw not in {"0", "false", "off", "no"}
+
+    def _render_target_markers(
+        self,
+        *,
+        part_name: str,
+        centroid_world: np.ndarray,
+        grasp_center: np.ndarray,
+        poses: dict[str, np.ndarray],
+    ) -> None:
+        """Draw colored spheres for centroid / grasp / EE / baseline pick_pos.
+
+        Legend (also printed):
+          magenta — live AABB centroid (policy grasp source)
+          yellow  — grasp_center (= centroid + asset offset)
+          cyan    — hover_pick EE (joint/Cartesian approach endpoint)
+          green   — PART_CONFIG pick_pos (baseline object point)
+          orange  — baseline pick EE (= pick_pos + ee_offset, world add)
+        """
+        if not self._debug_markers_enabled():
+            return
+        try:
+            import omni.usd
+            from pxr import Gf, UsdGeom
+        except Exception as exc:
+            print(f"[asset_centroid] debug markers skipped (no USD): {exc}", flush=True)
+            return
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return
+
+        baseline_pick = None
+        baseline_ee = None
+        try:
+            import param_config as pc
+
+            cfg = pc.get_part_config(part_name)
+            if cfg.get("pick_pos") is not None:
+                baseline_pick = np.asarray(cfg["pick_pos"], dtype=np.float64).reshape(3)
+                ee_off = np.asarray(cfg.get("ee_offset", (0.0, 0.0, 0.0)), dtype=np.float64)
+                baseline_ee = baseline_pick + ee_off.reshape(3)
+        except Exception:
+            pass
+
+        root = "/World/RoCoDebug/asset_centroid"
+        if not stage.GetPrimAtPath(root).IsValid():
+            UsdGeom.Xform.Define(stage, "/World/RoCoDebug")
+            UsdGeom.Xform.Define(stage, root)
+
+        markers = [
+            ("centroid", centroid_world, 0.008, (1.0, 0.0, 1.0)),
+            ("grasp_center", grasp_center, 0.007, (1.0, 1.0, 0.0)),
+            ("hover_pick_ee", poses["hover_pick"], 0.010, (0.0, 1.0, 1.0)),
+            ("pick_ee", poses["pick"], 0.008, (0.2, 0.6, 1.0)),
+        ]
+        if baseline_pick is not None:
+            markers.append(("baseline_pick_pos", baseline_pick, 0.007, (0.0, 1.0, 0.0)))
+        if baseline_ee is not None:
+            markers.append(("baseline_pick_ee", baseline_ee, 0.008, (1.0, 0.5, 0.0)))
+
+        def _set_sphere(path: str, xyz: np.ndarray, radius: float, rgb: tuple[float, float, float]) -> None:
+            prim = stage.GetPrimAtPath(path)
+            if not prim.IsValid():
+                sphere = UsdGeom.Sphere.Define(stage, path)
+            else:
+                sphere = UsdGeom.Sphere(prim)
+            sphere.CreateRadiusAttr(float(radius))
+            xf = UsdGeom.Xformable(sphere.GetPrim())
+            xf.ClearXformOpOrder()
+            xf.AddTranslateOp().Set(Gf.Vec3d(float(xyz[0]), float(xyz[1]), float(xyz[2])))
+            sphere.CreateDisplayColorAttr().Set([Gf.Vec3f(*rgb)])
+            sphere.CreateDisplayOpacityAttr().Set([0.85])
+
+        print(
+            "[asset_centroid] debug markers (disable with "
+            "ROCO_ASSET_CENTROID_DEBUG_MARKERS=0):",
+            flush=True,
+        )
+        for name, xyz, radius, rgb in markers:
+            path = f"{root}/{name}"
+            _set_sphere(path, np.asarray(xyz, dtype=np.float64).reshape(3), radius, rgb)
+            print(
+                f"  {name:18s} rgb={rgb} pos={np.round(xyz, 5).tolist()}",
+                flush=True,
+            )
+        print(
+            "[asset_centroid] note: hover_pick uses joint-space approach — EE may "
+            "not travel in a straight line toward the cyan sphere.",
+            flush=True,
+        )
+
     def _path_heights_m(self) -> tuple[float, float, float]:
         """Return (hover_pick, hover_place, retract) clearances in meters.
 
@@ -641,7 +744,12 @@ class AssetCentroidScriptedPolicy(Policy):
 
     def _relaxed_approach_enabled(self) -> bool:
         spec = self._cfg.approach_orientation
-        return spec.enabled and spec.recover_at_hover
+        part_name = None if self._target is None else self._target.name
+        return (
+            spec.enabled
+            and spec.recover_at_hover
+            and part_name in spec.enabled_parts
+        )
 
     @staticmethod
     def _axis_angle_quat(axis: tuple[float, float, float], angle_rad: float) -> np.ndarray:
@@ -707,10 +815,10 @@ class AssetCentroidScriptedPolicy(Policy):
     ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
         """Pick/place yaw from keyframe endpoint IK only.
 
-        Dense Cartesian transfer is intentionally not required: like the
-        baseline transit, runtime hover_place uses a joint-space quintic
-        between preflight endpoints so Lula cannot flip wrist branches.
-        Short vertical descend_place stays Cartesian (task-space Z).
+        Dense Cartesian transfer is intentionally not required: runtime
+        hover_pick(/_relaxed) and hover_place use joint-space quintic lerps
+        between preflight endpoint solutions so Lula cannot flip wrist
+        branches at midpoints. Short vertical descend_place stays Cartesian.
         """
         seed0 = np.asarray(self._controller.current_cspace_q(), dtype=np.float64)
         best = None
@@ -740,6 +848,7 @@ class AssetCentroidScriptedPolicy(Policy):
             if not feasible:
                 failure_counts["hover_pick"] += 1
                 continue
+            hover_pick_q = None
             for key in pick_keys:
                 q, ok = self._controller.solve_q(poses[key], pick_orn, seed=seed)
                 if not ok or q is None:
@@ -747,6 +856,8 @@ class AssetCentroidScriptedPolicy(Policy):
                     feasible = False
                     break
                 q = np.asarray(q, dtype=np.float64).reshape(-1)
+                if key == "hover_pick":
+                    hover_pick_q = q.copy()
                 pick_score += self._joint_step_cost(seed, q)
                 seed = q
             if not feasible:
@@ -785,6 +896,7 @@ class AssetCentroidScriptedPolicy(Policy):
                         pick_orn.copy(),
                         place_orn.copy(),
                         pair_poses,
+                        hover_pick_q,
                         hover_place_q,
                         place_q,
                     )
@@ -809,6 +921,7 @@ class AssetCentroidScriptedPolicy(Policy):
                 if not feasible:
                     failure_counts["hover_pick"] += 1
                     continue
+                hover_pick_q = None
                 for key in pick_keys:
                     q, ok = self._controller.solve_q(poses[key], pick_orn, seed=seed)
                     if not ok or q is None:
@@ -816,6 +929,8 @@ class AssetCentroidScriptedPolicy(Policy):
                         feasible = False
                         break
                     q = np.asarray(q, dtype=np.float64).reshape(-1)
+                    if key == "hover_pick":
+                        hover_pick_q = q.copy()
                     pick_score += self._joint_step_cost(seed, q)
                     seed = q
                 if not feasible:
@@ -854,6 +969,7 @@ class AssetCentroidScriptedPolicy(Policy):
                             pick_orn.copy(),
                             place_orn.copy(),
                             pair_poses,
+                            hover_pick_q,
                             hover_place_q,
                             place_q,
                         )
@@ -875,8 +991,9 @@ class AssetCentroidScriptedPolicy(Policy):
         poses = best[3]
         if best_approach_diagnostics is not None:
             self._approach_diagnostics = best_approach_diagnostics
-        self._hover_place_q = best[4].copy()
-        self._place_q = best[5].copy()
+        self._hover_pick_q = best[4].copy()
+        self._hover_place_q = best[5].copy()
+        self._place_q = best[6].copy()
         hover_pick_m, hover_place_m, retract_m = self._path_heights_m()
         place_z_off = self._place_z_offset_m()
         xy_err_pick = float(
@@ -901,7 +1018,7 @@ class AssetCentroidScriptedPolicy(Policy):
             f"place={np.round(poses['place'], 5).tolist()}",
             flush=True,
         )
-        if self._cfg.approach_orientation.enabled:
+        if self._relaxed_approach_enabled():
             print(
                 f"[asset_centroid] relaxed-approach diagnostics="
                 f"{self._approach_diagnostics}",
@@ -947,16 +1064,22 @@ class AssetCentroidScriptedPolicy(Policy):
         )
         self._segment_index = 0
         self._segment_q = ()
-        # Large lift→hover transit: joint-space quintic (baseline lesson).
+        # Large transfers: joint-space quintic to a preflight endpoint so
+        # per-step Lula cannot branch-flip mid-Cartesian (pin hover abort).
         # Short vertical descend_place stays Cartesian so XY does not arc.
-        if phase.name == "hover_place":
-            if self._hover_place_q is None:
+        joint_target = None
+        if phase.name in ("hover_pick", "hover_pick_relaxed"):
+            joint_target = self._hover_pick_q
+        elif phase.name == "hover_place":
+            joint_target = self._hover_place_q
+        if phase.name in ("hover_pick", "hover_pick_relaxed", "hover_place"):
+            if joint_target is None:
                 self._abort(f"missing preflight joint target for {phase.name}")
                 return
             q0 = np.asarray(
                 self._controller.current_cspace_q(), dtype=np.float64
             )
-            q1 = np.asarray(self._hover_place_q, dtype=np.float64).reshape(-1).copy()
+            q1 = np.asarray(joint_target, dtype=np.float64).reshape(-1).copy()
             self._segment_q = sample_joint_segment(
                 q0,
                 q1,

@@ -608,7 +608,7 @@ PART_CONFIG = {
         "grade_pos":      np.array([ 0.0324,  0.006163426226573593, 1.0567751179777043]),
         "ee_offset":      np.array([0.0, 0.017, 0.185]),
         "release_mode":   "open",
-        "init_height":    0.05,
+        "init_height":    0.03,
         "final_height":   0.1,
     },
     "usb_a": {

@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "completion_reason": "max_parts",
+    "current_part": null,
+    "completed_parts": 1,
+    "total_task_steps": 398,
+    "sim_time_s": 40.01,
+    "max_steps": null,
+    "max_sim_seconds": null,
+    "max_parts": 1,
+    "snap_fired_parts": []
+  },
+  "pos_tol_m": 0.01,
+  "n_pass": 0,
+  "n_fail": 1,
+  "n_missing": 0,
+  "per_part": [
+    {
+      "name": "usb_a",
+      "release_mode": "snap",
+      "snap_fired": false,
+      "pass": false
+    }
+  ]
+}
