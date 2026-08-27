@@ -75,7 +75,7 @@ def _resolve_camera_viewports(
         return getattr(
             pc,
             "CAMERA_VIEWPORT_CHOICES",
-            ("head", "l_wrist", "r_wrist", "r_wrist_laser"),
+            ("head", "l_wrist", "r_wrist", "l_wrist_laser", "r_wrist_laser"),
         )
     return ()
 
@@ -84,7 +84,7 @@ def _open_selected_camera_viewports(selected, camera_paths: dict) -> None:
     """Create Kit viewport tiles for selected camera names (not specials).
 
     Layout: head on the top row (if selected); wrist cams on the next row
-    left→right in choice order. Special entries like ``r_wrist_laser`` are
+    left→right in choice order. Special entries like ``l_wrist_laser`` are
     ignored here — those windows are owned by their feature modules.
     """
     kit_selected = pc.kit_camera_viewports(selected)

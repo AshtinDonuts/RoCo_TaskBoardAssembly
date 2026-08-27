@@ -123,15 +123,19 @@ def _env_bool(name: str, default: bool) -> bool:
 
 # Kit UI viewport tiles (independent of Camera sensor binding) plus special
 # overlay windows. Use these in TASK_CAMERA_VIEWPORTS / --camera-viewports:
-#   head           → "Head Depth View" (headcam)
-#   l_wrist        → "L Wrist View"    (L_wristcam)
-#   r_wrist        → "R Wrist View"    (R_wristcam)
-#   r_wrist_laser  → "R Wrist Laser"   (omni.ui overlay; not a Kit camera tile)
+#   head            → "Head Depth View" (headcam)
+#   l_wrist         → "L Wrist View"    (L_wristcam, no laser)
+#   r_wrist         → "R Wrist View"    (R_wristcam, no laser)
+#   l_wrist_laser   → "L Wrist Laser"   (omni.ui overlay; not a Kit camera tile)
+#   r_wrist_laser   → "R Wrist Laser"   (omni.ui overlay; not a Kit camera tile)
 # Aliases: headcam/head_depth; l/left/l_wristcam; r/right/r_wristcam;
-#          laser/r_laser/right_laser; all/*; none/off/0 (empty).
+#          laser/l_laser/left_laser → l_wrist_laser;
+#          r_laser/right_laser → r_wrist_laser; all/*; none/off/0 (empty).
+# Default UI: head + L-wrist laser only (no plain wrist tiles, no R wrist).
 KIT_CAMERA_VIEWPORTS = ("head", "l_wrist", "r_wrist")
-SPECIAL_VIEWPORTS = ("r_wrist_laser",)
+SPECIAL_VIEWPORTS = ("l_wrist_laser", "r_wrist_laser")
 CAMERA_VIEWPORT_CHOICES = KIT_CAMERA_VIEWPORTS + SPECIAL_VIEWPORTS
+DEFAULT_CAMERA_VIEWPORTS = ("head", "l_wrist_laser")
 _CAMERA_VIEWPORT_ALIASES = {
     "head": "head",
     "headcam": "head",
@@ -144,8 +148,13 @@ _CAMERA_VIEWPORT_ALIASES = {
     "r_wristcam": "r_wrist",
     "r": "r_wrist",
     "right": "r_wrist",
+    "l_wrist_laser": "l_wrist_laser",
+    "laser": "l_wrist_laser",
+    "l_laser": "l_wrist_laser",
+    "lwrist_laser": "l_wrist_laser",
+    "left_laser": "l_wrist_laser",
+    "left_wrist_laser": "l_wrist_laser",
     "r_wrist_laser": "r_wrist_laser",
-    "laser": "r_wrist_laser",
     "r_laser": "r_wrist_laser",
     "rwrist_laser": "r_wrist_laser",
     "right_laser": "r_wrist_laser",
@@ -156,14 +165,15 @@ _CAMERA_VIEWPORT_ALIASES = {
 def parse_camera_viewports(raw, *, enabled: bool = True) -> tuple:
     """Parse a viewport selection into canonical names.
 
-    ``raw`` may be None (default = all when enabled), a comma/space-separated
-    string, or an iterable of names. Returns a stable tuple ordered like
-    ``CAMERA_VIEWPORT_CHOICES``. Raises ValueError on unknown names.
+    ``raw`` may be None (default = ``DEFAULT_CAMERA_VIEWPORTS`` when enabled),
+    a comma/space-separated string, or an iterable of names. Returns a stable
+    tuple ordered like ``CAMERA_VIEWPORT_CHOICES``. Raises ValueError on
+    unknown names.
     """
     if not enabled:
         return ()
     if raw is None:
-        return CAMERA_VIEWPORT_CHOICES
+        return DEFAULT_CAMERA_VIEWPORTS
     if isinstance(raw, str):
         text = raw.strip()
         if not text or text.lower() in {"none", "off", "0", "false", "no"}:
@@ -206,13 +216,24 @@ def kit_camera_viewports(selected) -> tuple:
     return tuple(name for name in selected if name in allowed)
 
 
+def wants_wrist_laser_viewport(selected, side: str = "L") -> bool:
+    """True when the wrist-laser overlay window for ``side`` should be shown."""
+    key = "l_wrist_laser" if str(side).upper() == "L" else "r_wrist_laser"
+    return key in (selected or ())
+
+
 def wants_r_wrist_laser_viewport(selected) -> bool:
-    """True when the R-wrist laser overlay window should be shown."""
-    return "r_wrist_laser" in (selected or ())
+    """Back-compat: True when the R-wrist laser overlay window should be shown."""
+    return wants_wrist_laser_viewport(selected, side="R")
+
+
+def wants_l_wrist_laser_viewport(selected) -> bool:
+    """True when the L-wrist laser overlay window should be shown."""
+    return wants_wrist_laser_viewport(selected, side="L")
 
 
 # Master switch still honored: TASK_ENABLE_CAMERA_VIEWPORTS=0 → no tiles.
-# Subset via TASK_CAMERA_VIEWPORTS=head,r_wrist,r_wrist_laser (default: all).
+# Subset via TASK_CAMERA_VIEWPORTS=head,l_wrist_laser (default: head + L laser).
 _viewports_enabled = _env_bool("TASK_ENABLE_CAMERA_VIEWPORTS", True)
 camera_viewports = parse_camera_viewports(
     os.getenv("TASK_CAMERA_VIEWPORTS"),
@@ -223,28 +244,57 @@ enable_camera_viewports = bool(kit_camera_viewports(camera_viewports))
 enable_camera_output    = _env_bool("TASK_ENABLE_CAMERA_OUTPUT", False)   # bind sensors so RGB/depth are readable from Python
 HEAD_DEPTH_CAMERA_FOCAL_LENGTH = float(os.getenv("TASK_HEAD_DEPTH_FOCAL_LENGTH", "10"))
 
-# Right-wrist TCP approach laser: tool +Z from EE (jaw midline), with depth
-# marched along that ray in the wrist image. Overlay draws a distal-tip
-# aperture ruler (live jaw gap in mm) instead of a stop-point crosshair.
-# Optional tip offset shifts emit in EE frame if the Lula/USD EE frame is
-# not on the grasp midline. TASK_R_WRIST_LASER_TIP_OFFSET_EE=x,y,z (meters).
-# Debug marker for cam principal point: TASK_R_WRIST_LASER_AIM_DEBUG=1.
-enable_r_wrist_laser = _env_bool("TASK_ENABLE_R_WRIST_LASER", True)
-R_WRIST_LASER_MAX_LENGTH = float(os.getenv("TASK_R_WRIST_LASER_MAX_LENGTH", "2.0"))
-R_WRIST_LASER_LOG_PERIOD_S = float(os.getenv("TASK_R_WRIST_LASER_LOG_PERIOD_S", "0.5"))
-R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET = float(
-    os.getenv("TASK_R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET", "0.0")
+# Wrist TCP approach laser (default: left arm). Tool +Z from EE (jaw midline),
+# with depth marched along that ray in the wrist image. Overlay draws a distal
+# tip aperture ruler (live jaw gap in mm). Optional tip offset:
+# TASK_WRIST_LASER_TIP_OFFSET_EE=x,y,z (meters). Aim debug:
+# TASK_WRIST_LASER_AIM_DEBUG=1. Side: TASK_WRIST_LASER_SIDE=L|R.
+# Legacy TASK_ENABLE_R_WRIST_LASER / TASK_R_WRIST_LASER_* still accepted.
+_wrist_laser_side = os.getenv("TASK_WRIST_LASER_SIDE", "L").strip().upper()
+if _wrist_laser_side not in ("L", "R"):
+    _wrist_laser_side = "L"
+WRIST_LASER_SIDE = _wrist_laser_side
+_enable_laser_env = os.getenv("TASK_ENABLE_WRIST_LASER")
+if _enable_laser_env is None:
+    # Prefer new switch; fall back to legacy R-named flag (default on).
+    enable_wrist_laser = _env_bool("TASK_ENABLE_R_WRIST_LASER", True)
+else:
+    enable_wrist_laser = _env_bool("TASK_ENABLE_WRIST_LASER", True)
+# Back-compat aliases used by older harness code.
+enable_r_wrist_laser = enable_wrist_laser and WRIST_LASER_SIDE == "R"
+enable_l_wrist_laser = enable_wrist_laser and WRIST_LASER_SIDE == "L"
+
+def _laser_env(name: str, default: str) -> str:
+    return os.getenv(name, os.getenv(name.replace("WRIST_LASER", "R_WRIST_LASER"), default))
+
+WRIST_LASER_MAX_LENGTH = float(_laser_env("TASK_WRIST_LASER_MAX_LENGTH", "2.0"))
+WRIST_LASER_LOG_PERIOD_S = float(_laser_env("TASK_WRIST_LASER_LOG_PERIOD_S", "0.5"))
+WRIST_LASER_RAYCAST_ORIGIN_OFFSET = float(
+    _laser_env("TASK_WRIST_LASER_RAYCAST_ORIGIN_OFFSET", "0.0")
 )
-R_WRIST_LASER_DEBUG_LOG = _env_bool("TASK_R_WRIST_LASER_DEBUG_LOG", True)
-R_WRIST_LASER_AIM_DEBUG = _env_bool("TASK_R_WRIST_LASER_AIM_DEBUG", True)
-_raw_tip = os.getenv("TASK_R_WRIST_LASER_TIP_OFFSET_EE", "0,0,0")
+WRIST_LASER_DEBUG_LOG = _env_bool(
+    "TASK_WRIST_LASER_DEBUG_LOG",
+    _env_bool("TASK_R_WRIST_LASER_DEBUG_LOG", True),
+)
+WRIST_LASER_AIM_DEBUG = _env_bool(
+    "TASK_WRIST_LASER_AIM_DEBUG",
+    _env_bool("TASK_R_WRIST_LASER_AIM_DEBUG", True),
+)
+_raw_tip = _laser_env("TASK_WRIST_LASER_TIP_OFFSET_EE", "0,0,0")
 try:
     _tip_parts = [float(x.strip()) for x in _raw_tip.replace(";", ",").split(",")]
-    R_WRIST_LASER_TIP_OFFSET_EE = (
+    WRIST_LASER_TIP_OFFSET_EE = (
         tuple(_tip_parts) if len(_tip_parts) == 3 else (0.0, 0.0, 0.0)
     )
 except ValueError:
-    R_WRIST_LASER_TIP_OFFSET_EE = (0.0, 0.0, 0.0)
+    WRIST_LASER_TIP_OFFSET_EE = (0.0, 0.0, 0.0)
+# Legacy names kept for imports / docs snippets.
+R_WRIST_LASER_MAX_LENGTH = WRIST_LASER_MAX_LENGTH
+R_WRIST_LASER_LOG_PERIOD_S = WRIST_LASER_LOG_PERIOD_S
+R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET = WRIST_LASER_RAYCAST_ORIGIN_OFFSET
+R_WRIST_LASER_DEBUG_LOG = WRIST_LASER_DEBUG_LOG
+R_WRIST_LASER_AIM_DEBUG = WRIST_LASER_AIM_DEBUG
+R_WRIST_LASER_TIP_OFFSET_EE = WRIST_LASER_TIP_OFFSET_EE
 
 # Soft parallel-gripper drives. Commanded close still targets a small
 # aperture; GRIPPER_DRIVE_* caps are a safety net. Primary anti-eject is
@@ -327,13 +377,13 @@ INIT_JOINT_TARGETS = {
     # (so the post-reset PD target matches what the scene drives toward,
     # eliminating the immediate snap-back to the scene pose that would
     # otherwise pull the arm out of the gripper USDA's neutral pose).
-    "L_arm_j1": -0.52359878,   #  -30 deg
-    "L_arm_j2":  1.04719755,   #  +60 deg
-    "L_arm_j3":  1.74532925,   # +100 deg
-    "L_arm_j4": -1.74532925,   # -100 deg
-    "L_arm_j5": -0.17453293,   #  -10 deg
-    "L_arm_j6": -0.17453293,   #  -10 deg
-    "L_arm_j7": -1.04719755,   #  -60 deg
+    "L_arm_j1": -0.61435591,   #  -35.20 deg
+    "L_arm_j2": 1.21823984,   #  +69.80 deg
+    "L_arm_j3": 1.78547185,   #  +102.30 deg
+    "L_arm_j4": -2.10486711,   #  -120.60 deg
+    "L_arm_j5": -0.07679449,   #  -4.40 deg
+    "L_arm_j6": -0.55850537,   #  -32 deg
+    "L_arm_j7": -1.37800000,   #  -78.95 deg
     "head_j1":   0.95993109,   #  +55 deg, selected head camera pitch
     "head_j2":   0.0,
     "head_j3":   0.0,
@@ -472,8 +522,8 @@ PART_CONFIG = {
     "rod_16mm": {
         # Open pick/drop like gear_20teeth: grasp → carry → release at
         # place_pos; graded by settled mesh vs grade_pos (no SnapAttacher).
-        "place_pos":      np.array([ 0.02976,  0.16982, 1.057]),
-        "grade_pos":      np.array([ 0.02976,  0.16982, 1.057]),
+        "place_pos":      np.array([ 0.24681,  0.16982, 1.057]),
+        "grade_pos":      np.array([ 0.24681,  0.16982, 1.057]),
         "ee_offset":      np.array([0.0, 0.016, 0.21]),
         "release_mode":   "open",
         "init_height":    0.05,
@@ -483,13 +533,13 @@ PART_CONFIG = {
         # pick_pos xy = actual mesh world pos from scene_init.usd (the part
         # prim spawns at JSON pos, but the mesh sits offset from the prim
         # origin); z = pick_z. Overrides the JSON-derived pick_pos.
-        "pick_pos":       np.array([ -0.18343,  0.15554, 1.047]),
+        "pick_pos":       np.array([ 0.03362,  0.15554, 1.047]),
         "gripper_open":  0.2,
-        "place_pos":      np.array([ -0.08205,  0.15639, 1.06423]),
+        "place_pos":      np.array([ 0.135,  0.15639, 1.06423]),
         # grade_pos is the AABB MIDPOINT (world-axis-aligned bounds of
         # the mesh) extracted from scene_final.usd. Rotation about the
         # battery's long axis doesn't move this value (axis-symmetric).
-        "grade_pos":      np.array([-0.08791, +0.15615, +1.04601]),
+        "grade_pos":      np.array([+0.12914, +0.15615, +1.04601]),
         "grade_use_aabb": True,
         "ee_offset":      np.array([0, 0.015,0.185]),
         #"transit_steps":  12,
@@ -497,11 +547,11 @@ PART_CONFIG = {
     },
     "battery_size5": {
         # pick_pos xy = mesh world pos from scene_init.usd; z = pick_z.
-        "pick_pos":       np.array([-0.22776,  0.16490, 1.04]),
+        "pick_pos":       np.array([-0.01071,  0.16490, 1.04]),
         "gripper_open":  0.11,
-        "place_pos":      np.array([ -0.12676,  0.168, 1.06]),
+        "place_pos":      np.array([ 0.09029,  0.168, 1.06]),
         # AABB midpoint from scene_final.usd.
-        "grade_pos":      np.array([-0.13004, +0.16742, +1.03578]),
+        "grade_pos":      np.array([+0.08701, +0.16742, +1.03578]),
         "grade_use_aabb": True,
         "ee_offset":      np.array([-0.001, 0.015,0.1875]),
     },
@@ -515,9 +565,9 @@ PART_CONFIG = {
         "use_param_config_aperture": True,
         "gripper_open":   0.075,
         "gripper_close":  0.055,
-        "pick_pos":       np.array([ -0.1729, 0.00093, 1.039]),
-        "place_pos":      np.array([ -0.00174,  0.13135, 1.06]),
-        "grade_pos":      np.array([ -0.00174,  0.13135, 1.06]),
+        "pick_pos":       np.array([ 0.04415, 0.00093, 1.039]),
+        "place_pos":      np.array([ 0.21531,  0.13135, 1.06]),
+        "grade_pos":      np.array([ 0.21531,  0.13135, 1.06]),
         "ee_offset":      np.array([0.0, 0.0147, 0.2045]),
         "release_mode":   "open",
         "use_param_config_height": True,
@@ -534,11 +584,11 @@ PART_CONFIG = {
         "gripper_open":   0.12,
         # Lands in the gear_60teeth slot (gear_60teeth was deleted from
         # scene_base.usd; gear_20teeth substitutes for it).
-        "pick_pos":       np.array([-0.07339, -0.043, 1.04]),
-        "place_pos":      np.array([ -0.01981, -0.09598882384960386, 1.05798]),
+        "pick_pos":       np.array([0.14366, -0.043, 1.04]),
+        "place_pos":      np.array([ 0.1972314984643313, -0.09598882384960386, 1.05798]),
         # Final settled pose for grading (gear sinks onto the rack post
         # after release; values measured from a known-good run).
-        "grade_pos":      np.array([ -0.01981,
+        "grade_pos":      np.array([ 0.1972314984643313,
                                     -0.09598882384960386,
                                      1.033770322353139]),
         "ee_offset":      np.array([0.0, 0.016, 0.197]),
@@ -560,10 +610,10 @@ PART_CONFIG = {
         "gripper_open":   0.18,
         "gripper_close": 0.146,
         "ee_offset":      np.array([0.0, 0.016, 0.2]),
-        "place_pos":      np.array([ -0.00883, -0.05629, 1.05293]),
+        "place_pos":      np.array([ 0.20822, -0.05629, 1.05293]),
         # Final settled pose for grading (gear sinks onto the rack post
         # after release; values measured from a known-good run).
-        "grade_pos":      np.array([ -0.00851,
+        "grade_pos":      np.array([ 0.20853747092278196,
                                     -0.056146127605838425,
                                      1.0315798358785877]),
         "init_height":    0.08,
@@ -572,20 +622,20 @@ PART_CONFIG = {
     },
     "hdmi": {
         # pick_pos xy = mesh world pos from scene_init.usd; z = pick_z.
-        "pick_pos":       np.array([ 0.0558, -0.01949, 1.03854]),
+        "pick_pos":       np.array([ 0.27285, -0.01949, 1.03854]),
         "gripper_open":   0.1,
-        "place_pos":      np.array([ 0.05764,  0.049, 1.055]),
+        "place_pos":      np.array([ 0.27469,  0.049, 1.055]),
         "release_mode":   "snap",
         "snap": {
             "movable_path":     "/World/parts/hdmi",
             "parent_body_path": "/World/task_board/task_board_color",
-            "target_pos":       (0.05764, 0.049, 1.055),   # = place_pos (mesh-frame)
+            "target_pos":       (0.27469, 0.049, 1.055),   # = place_pos (mesh-frame)
             "target_rot":       (0.5, 0.5, 0.5, 0.5),         # wxyz, from part_poses.json 'final'
             "pos_tol_axes":     (0.002, 0.002, 0.005),        # WORLD frame
             "rot_tol_deg":      10,
             "set_kinematic":    False,
             "timeout_steps":    300,
-            "connect_pos":      (0.05764, 0.049, 1.039),
+            "connect_pos":      (0.27469, 0.049, 1.039),
             # Force the joint to anchor at exactly target_rot. Without this,
             # _joint_anchor_matrix defaults to the mesh's CURRENT rotation
             # at snap-fire time — and with rot_tol_deg=10 that can be up to
@@ -603,9 +653,9 @@ PART_CONFIG = {
         # carry → release at place_pos; graded by settled mesh vs grade_pos
         # (no SnapAttacher). grade_pos = prior snap connect_pos (scene_final
         # mesh pose).
-        "pick_pos":       np.array([ -0.03105, -0.01476, 1.04437]),
-        "place_pos":      np.array([ 0.0324,  0.00616, 1.065]),
-        "grade_pos":      np.array([ 0.0324,  0.006163426226573593, 1.0567751179777043]),
+        "pick_pos":       np.array([ 0.18600, -0.01476, 1.04437]),
+        "place_pos":      np.array([ 0.24945,  0.00616, 1.065]),
+        "grade_pos":      np.array([ 0.24945,  0.006163426226573593, 1.0567751179777043]),
         "ee_offset":      np.array([0.0, 0.017, 0.185]),
         "release_mode":   "open",
         "init_height":    0.03,
@@ -613,20 +663,20 @@ PART_CONFIG = {
     },
     "usb_a": {
         # pick_pos xy = mesh world pos from scene_init.usd; z = pick_z.
-        "pick_pos":       np.array([ -0.19199, -0.07027, 1.04]),
-        "place_pos":      np.array([ 0.02063,  0.05143, 1.05]),
+        "pick_pos":       np.array([ 0.02506, -0.07027, 1.04]),
+        "place_pos":      np.array([ 0.23768,  0.05143, 1.05]),
         "init_height":    0.02,
         "release_mode":   "snap",
         "snap": {
             "movable_path":     "/World/parts/usb_a",
             "parent_body_path": "/World/task_board/task_board_color",
-            "target_pos":       (0.02063, 0.05143, 1.05),  # = place_pos
+            "target_pos":       (0.23768, 0.05143, 1.05),  # = place_pos
             "target_rot":       (-0.5, -0.5, 0.5, 0.5),       # wxyz, from part_poses.json 'final'
             "pos_tol_axes":     (0.003, 0.003, 0.005),        # WORLD frame
             "rot_tol_deg":      10,
             "set_kinematic":    False,
             "timeout_steps":    300,
-            "connect_pos":      (0.02063, 0.05143, 1.04),
+            "connect_pos":      (0.23768, 0.05143, 1.04),
             "connect_rot":      (-0.5, -0.5, 0.5, 0.5),  # = target_rot
             "search": {
                 "n":          5,

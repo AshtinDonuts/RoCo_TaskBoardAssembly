@@ -1,4 +1,4 @@
-"""Right-wrist TCP approach laser for visual guidance.
+"""Wrist TCP approach laser for visual guidance (L or R gripper).
 
 Aims along gripper local +Z from the EE tool center (jaw midline), not along
 the wrist-cam optical axis. Range prefers depth marched along that tool ray
@@ -22,19 +22,31 @@ from pxr import Gf, Usd, UsdGeom
 from .ee_pose_controller import _approach_axis_world
 from .pick_place_task import ROBOT_PRIM_PATH
 
-_OVERLAY_WINDOW = "R Wrist Laser"
 _UI_MIN_PERIOD_S = 0.05  # ~20 Hz preview; avoids flooding ByteImageProvider
 
-# Distal inner-jaw tips (same frame/threshold as aperture_calibration).
-_R_GRIPPER_LINK = f"{ROBOT_PRIM_PATH}/R_ee_link/gripper_link"
-_R_ACTIVE_MESH = (
-    f"{ROBOT_PRIM_PATH}/R_ee_link/gripper_active_link/gripper_active_link"
-)
-_R_PASSIVE_MESH = (
-    f"{ROBOT_PRIM_PATH}/R_ee_link/gripper_passive_link/"
-    "left_gripper_passive_link"
-)
 _DISTAL_Z_MIN_M = 0.18
+
+
+def _gripper_mesh_paths(side: str) -> Tuple[str, str, str]:
+    """Return (gripper_link, active_mesh, passive_mesh) for ``L`` or ``R``."""
+    s = str(side).strip().upper()
+    if s not in ("L", "R"):
+        raise ValueError(f"wrist laser side must be 'L' or 'R', got {side!r}")
+    ee = f"{ROBOT_PRIM_PATH}/{s}_ee_link"
+    return (
+        f"{ee}/gripper_link",
+        f"{ee}/gripper_active_link/gripper_active_link",
+        f"{ee}/gripper_passive_link/left_gripper_passive_link",
+    )
+
+
+def _overlay_window_title(side: str) -> str:
+    return f"{str(side).strip().upper()} Wrist Laser"
+
+
+# Back-compat aliases (R paths used by older imports / tests).
+_R_GRIPPER_LINK, _R_ACTIVE_MESH, _R_PASSIVE_MESH = _gripper_mesh_paths("R")
+_OVERLAY_WINDOW = _overlay_window_title("R")
 
 
 @dataclass
@@ -533,21 +545,23 @@ def _xform_points_to_frame(
 
 def _pick_distal_inner_tip_locals(
     *,
+    side: str = "R",
     distal_z_min_m: float = _DISTAL_Z_MIN_M,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """Finger-mesh-local distal tip verts (active min-X, passive max-X)."""
     stage = omni.usd.get_context().get_stage()
     if stage is None:
         return None
-    active_local = _mesh_points_local(stage, _R_ACTIVE_MESH)
-    passive_local = _mesh_points_local(stage, _R_PASSIVE_MESH)
+    gripper_link, active_mesh, passive_mesh = _gripper_mesh_paths(side)
+    active_local = _mesh_points_local(stage, active_mesh)
+    passive_local = _mesh_points_local(stage, passive_mesh)
     if active_local is None or passive_local is None:
         return None
     active_in_link = _xform_points_to_frame(
-        stage, _R_ACTIVE_MESH, _R_GRIPPER_LINK, active_local
+        stage, active_mesh, gripper_link, active_local
     )
     passive_in_link = _xform_points_to_frame(
-        stage, _R_PASSIVE_MESH, _R_GRIPPER_LINK, passive_local
+        stage, passive_mesh, gripper_link, passive_local
     )
     if active_in_link is None or passive_in_link is None:
         return None
@@ -579,6 +593,32 @@ def _tip_world_from_local(
     return np.array([float(p[0]), float(p[1]), float(p[2])], dtype=np.float64)
 
 
+def measure_gripper_distal_tips_world(
+    tip_locals: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    *,
+    side: str = "R",
+    distal_z_min_m: float = _DISTAL_Z_MIN_M,
+) -> Optional[
+    Tuple[np.ndarray, np.ndarray, float, Tuple[np.ndarray, np.ndarray]]
+]:
+    """Return (tip_active_w, tip_passive_w, gap_m, tip_locals) or None."""
+    _, active_mesh, passive_mesh = _gripper_mesh_paths(side)
+    locals_pair = tip_locals
+    if locals_pair is None:
+        locals_pair = _pick_distal_inner_tip_locals(
+            side=side, distal_z_min_m=distal_z_min_m
+        )
+        if locals_pair is None:
+            return None
+    a_local, p_local = locals_pair
+    a_w = _tip_world_from_local(active_mesh, a_local)
+    p_w = _tip_world_from_local(passive_mesh, p_local)
+    if a_w is None or p_w is None:
+        return None
+    gap = float(np.linalg.norm(a_w - p_w))
+    return a_w, p_w, gap, (a_local, p_local)
+
+
 def measure_r_gripper_distal_tips_world(
     tip_locals: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     *,
@@ -586,19 +626,10 @@ def measure_r_gripper_distal_tips_world(
 ) -> Optional[
     Tuple[np.ndarray, np.ndarray, float, Tuple[np.ndarray, np.ndarray]]
 ]:
-    """Return (tip_active_w, tip_passive_w, gap_m, tip_locals) or None."""
-    locals_pair = tip_locals
-    if locals_pair is None:
-        locals_pair = _pick_distal_inner_tip_locals(distal_z_min_m=distal_z_min_m)
-        if locals_pair is None:
-            return None
-    a_local, p_local = locals_pair
-    a_w = _tip_world_from_local(_R_ACTIVE_MESH, a_local)
-    p_w = _tip_world_from_local(_R_PASSIVE_MESH, p_local)
-    if a_w is None or p_w is None:
-        return None
-    gap = float(np.linalg.norm(a_w - p_w))
-    return a_w, p_w, gap, (a_local, p_local)
+    """Back-compat wrapper for ``measure_gripper_distal_tips_world(side="R")``."""
+    return measure_gripper_distal_tips_world(
+        tip_locals, side="R", distal_z_min_m=distal_z_min_m
+    )
 
 
 def _draw_aperture_ruler(
@@ -740,11 +771,15 @@ def _parse_vec3_env(raw: str) -> Optional[np.ndarray]:
 
 
 class RWristLaser:
-    """Per-frame right-wrist approach laser (raycast + RGB overlay)."""
+    """Per-frame wrist approach laser (raycast + RGB overlay).
+
+    ``side`` selects L or R gripper meshes and the overlay window title.
+    """
 
     def __init__(
         self,
         *,
+        side: str = "L",
         max_length: float = 2.0,
         origin_offset_m: float = 0.0,
         raycast_origin_offset_m: float = 0.0,
@@ -758,6 +793,11 @@ class RWristLaser:
         show_window: bool = True,
         debug_log: bool = False,
     ):
+        self.side = str(side).strip().upper()
+        if self.side not in ("L", "R"):
+            raise ValueError(f"side must be 'L' or 'R', got {side!r}")
+        self._overlay_window = _overlay_window_title(self.side)
+        self._log_prefix = f"[{self.side.lower()}_wrist_laser]"
         self.max_length = float(max_length)
         self.origin_offset_m = float(origin_offset_m)
         self.raycast_origin_offset_m = float(raycast_origin_offset_m)
@@ -1007,7 +1047,7 @@ class RWristLaser:
         if end is not None and emit is not None:
             end_err = float(np.linalg.norm(end - emit) - self.last_length)
         msg = (
-            f"[r_wrist_laser] dist={self.last_length:.4f} m ({tag}) "
+            f"{self._log_prefix} dist={self.last_length:.4f} m ({tag}) "
             f"frac={frac:.3f} src={self.last_cast_source or '?'} "
             f"depth={self.last_depth_m:.4f} "
             f"end_vs_len={end_err:+.4f}"
@@ -1191,7 +1231,7 @@ class RWristLaser:
 
         # Distal-tip aperture ruler (live mesh gap between inner jaw tips).
         self.last_aperture_m = -1.0
-        tips = measure_r_gripper_distal_tips_world(self._tip_locals)
+        tips = measure_gripper_distal_tips_world(self._tip_locals, side=self.side)
         if tips is not None:
             tip_a, tip_b, gap_m, self._tip_locals = tips
             self.last_aperture_m = float(gap_m)
@@ -1323,14 +1363,14 @@ class RWristLaser:
             import omni.ui as ui
         except Exception as exc:
             self._ui_failed = True
-            print(f"[r_wrist_laser] omni.ui unavailable; preview disabled: {exc}", flush=True)
+            print(f"{self._log_prefix} omni.ui unavailable; preview disabled: {exc}", flush=True)
             return
 
         try:
             if self._ui_provider is None or self._ui_window is None:
                 self._ui_provider = ui.ByteImageProvider()
                 self._ui_window = ui.Window(
-                    _OVERLAY_WINDOW,
+                    self._overlay_window,
                     width=max(320, w),
                     height=max(240, h),
                     visible=True,
@@ -1342,14 +1382,14 @@ class RWristLaser:
                     )
                 self._window_created = True
                 print(
-                    f"[r_wrist_laser] Kit preview window '{_OVERLAY_WINDOW}' "
+                    f"{self._log_prefix} Kit preview window '{self._overlay_window}' "
                     f"({w}x{h})",
                     flush=True,
                 )
             self._ui_provider.set_bytes_data(pixels, [w, h])
         except Exception as exc:
             self._ui_failed = True
-            print(f"[r_wrist_laser] preview failed; disabling: {exc}", flush=True)
+            print(f"{self._log_prefix} preview failed; disabling: {exc}", flush=True)
             self.close()
 
     def close(self) -> None:

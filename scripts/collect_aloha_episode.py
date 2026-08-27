@@ -181,7 +181,7 @@ def main() -> int:
         default=None,
         help=(
             "Viewport windows to open (comma-separated). "
-            "Choices: head, l_wrist, r_wrist, r_wrist_laser "
+            "Choices: head, l_wrist, r_wrist, l_wrist_laser, r_wrist_laser "
             "(or all / none). Passed through to run_pick_place.py."
         ),
     )

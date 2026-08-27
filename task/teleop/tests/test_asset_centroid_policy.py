@@ -58,8 +58,8 @@ class _Controller:
 def _policy(controller=None, *, config=None):
     controller = controller or _Controller()
     env = SimpleNamespace(
-        R_controller=controller,
-        L_controller=None,
+        L_controller=controller,
+        R_controller=None,
         dof_names=[f"q{i}" for i in range(8)],
         physics_dt=0.005,
     )
@@ -82,8 +82,8 @@ def _obs():
     )
 
 
-def test_param_config_fallback_flips_r_tcp_y():
-    """Non-JSON parts inherit L-tuned ee_offset; R tool TCP must negate Y."""
+def test_param_config_fallback_keeps_l_tcp_y():
+    """Non-JSON parts inherit L-tuned ee_offset; L tool TCP keeps +Y."""
     policy = _policy()
     target = PartTarget(
         "pin",
@@ -94,7 +94,7 @@ def test_param_config_fallback_flips_r_tcp_y():
         extra={"ee_offset": np.array([0.0, 0.016, 0.2])},
     )
     spec = policy._part_spec_for_target(target)
-    np.testing.assert_allclose(spec.tcp_to_grasp_tool, [0.0, -0.016, 0.2], atol=1e-9)
+    np.testing.assert_allclose(spec.tcp_to_grasp_tool, [0.0, 0.016, 0.2], atol=1e-9)
 
 
 def _configured_target(name: str) -> PartTarget:
@@ -112,15 +112,15 @@ def _configured_target(name: str) -> PartTarget:
     )
 
 
-def test_pin_fallback_spec_uses_r_tcp_and_geometry_apertures():
-    """Pin must not silently inherit the L-arm lateral TCP convention."""
+def test_pin_fallback_spec_uses_l_tcp_and_geometry_apertures():
+    """Pin param_config ee_offset maps to L tool TCP (+Y)."""
     import param_config as pc
 
     policy = _policy()
     target = _configured_target("pin")
     spec = policy._part_spec_for_target(target)
 
-    np.testing.assert_allclose(spec.tcp_to_grasp_tool, [0.0, -0.017, 0.185])
+    np.testing.assert_allclose(spec.tcp_to_grasp_tool, [0.0, 0.017, 0.185])
     assert spec.gripper_open_rad == pytest.approx(pc.part_grasp_open_rad("pin"))
     assert spec.gripper_close_rad == pytest.approx(pc.part_grasp_close_rad("pin"))
     assert spec.gripper_open_rad > spec.gripper_close_rad > 0.0
@@ -219,17 +219,18 @@ def test_pin_hover_pick_joint_approach_bypasses_dense_cartesian_ik(monkeypatch):
     )
 
 
-def test_policy_requires_right_controller_and_active_arms():
-    with pytest.raises(ValueError, match="R_controller"):
+def test_policy_requires_left_controller_and_active_arms():
+    with pytest.raises(ValueError, match="L_controller"):
         AssetCentroidScriptedPolicy(
             SimpleNamespace(
+                L_controller=None,
                 R_controller=None,
                 dof_names=["q0"],
                 physics_dt=0.005,
             )
         )
     policy = _policy()
-    assert policy.active_arms == ("R",)
+    assert policy.active_arms == ("L",)
 
 
 @pytest.mark.parametrize(

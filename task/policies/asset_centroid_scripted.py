@@ -1,6 +1,7 @@
 """Privileged asset-centroid scripted policy for configured task parts.
 
-V1 drives the **right** gripper (`env_info.R_controller`, `active_arms=("R",)`).
+Drives the arm selected by ``active_arm`` in ``config/asset_centroid_policy.json``
+(default **left**: ``env_info.L_controller``, ``active_arms=("L",)``).
 The policy reads live USD geometry at reset and plans a smooth top-down path.
 
 Gripper close/open mode is configured by ``gripper.mode`` in
@@ -73,8 +74,8 @@ class _Phase:
 class AssetCentroidScriptedPolicy(Policy):
     """Smooth privileged-centroid pick/drop policy for any configured part."""
 
-    # Harness default is left-only; V1 must command the right gripper.
-    active_arms = ("R",)
+    # Default matches config active_arm=L; overridden in __init__ from JSON.
+    active_arms = ("L",)
 
     def __init__(
         self,

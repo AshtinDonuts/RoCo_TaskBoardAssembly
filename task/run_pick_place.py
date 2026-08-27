@@ -702,8 +702,8 @@ def _parse_args():
         default=None,
         help=(
             "Comma-separated viewport windows to open. "
-            "Choices: head, l_wrist, r_wrist, r_wrist_laser "
-            "(aliases: headcam, l/left, r/right, laser; or all / none). "
+            "Choices: head, l_wrist, r_wrist, l_wrist_laser, r_wrist_laser "
+            "(aliases: headcam, l/left, r/right, laser→L; or all / none). "
             "Overrides TASK_CAMERA_VIEWPORTS / param_config.camera_viewports. "
             f"Current default: {','.join(pc.camera_viewports) or 'none'}."
         ),
@@ -792,11 +792,12 @@ def main():
     )
     record_period_s = 1.0 / float(max(1, args.record_video_fps))
     next_record_time_s = 0.0
-    r_wrist_laser_enabled = bool(getattr(pc, "enable_r_wrist_laser", False))
+    wrist_laser_enabled = bool(getattr(pc, "enable_wrist_laser", False))
+    wrist_laser_side = str(getattr(pc, "WRIST_LASER_SIDE", "L")).upper()
     camera_output_enabled = bool(
         pc.enable_camera_output
         or video_recorder.enabled
-        or r_wrist_laser_enabled
+        or wrist_laser_enabled
     )
     exit_on_complete = bool(_HEADLESS or video_recorder.enabled)
     run_complete = False
@@ -831,33 +832,37 @@ def main():
     R_controller = my_controller["R"]
     L_robot = my_robots["L"]
 
-    R_WRIST_CAMERA_PATH = f"{ROBOT_PRIM_PATH}/R_ee_link/gripper_link/R_wristcam"
-    r_wrist_laser = None
-    last_r_wrist_overlay = None
-    if r_wrist_laser_enabled:
-        _tip = getattr(pc, "R_WRIST_LASER_TIP_OFFSET_EE", (0.0, 0.0, 0.0))
+    wrist_laser = None
+    last_wrist_laser_overlay = None
+    if wrist_laser_enabled:
+        _tip = getattr(pc, "WRIST_LASER_TIP_OFFSET_EE", (0.0, 0.0, 0.0))
         show_laser_window = (
             not _HEADLESS
-            and pc.wants_r_wrist_laser_viewport(args.camera_viewports)
+            and pc.wants_wrist_laser_viewport(args.camera_viewports, wrist_laser_side)
         )
-        r_wrist_laser = RWristLaser(
-            max_length=float(getattr(pc, "R_WRIST_LASER_MAX_LENGTH", 2.0)),
+        wrist_cam_path = (
+            f"{ROBOT_PRIM_PATH}/{wrist_laser_side}_ee_link/gripper_link/"
+            f"{wrist_laser_side}_wristcam"
+        )
+        wrist_laser = RWristLaser(
+            side=wrist_laser_side,
+            max_length=float(getattr(pc, "WRIST_LASER_MAX_LENGTH", 2.0)),
             raycast_origin_offset_m=float(
-                getattr(pc, "R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET", 0.0)
+                getattr(pc, "WRIST_LASER_RAYCAST_ORIGIN_OFFSET", 0.0)
             ),
             tip_offset_ee=_tip if any(abs(float(v)) > 1e-9 for v in _tip) else None,
-            camera_prim_path=R_WRIST_CAMERA_PATH,
+            camera_prim_path=wrist_cam_path,
             show_window=show_laser_window,
-            debug_log=bool(getattr(pc, "R_WRIST_LASER_DEBUG_LOG", False)),
-            show_aim_debug=bool(getattr(pc, "R_WRIST_LASER_AIM_DEBUG", False)),
+            debug_log=bool(getattr(pc, "WRIST_LASER_DEBUG_LOG", False)),
+            show_aim_debug=bool(getattr(pc, "WRIST_LASER_AIM_DEBUG", False)),
         )
         print(
-            f"[setup] R-wrist laser enabled "
-            f"(max_length={r_wrist_laser.max_length:g} m; "
-            f"raycast_origin_offset={r_wrist_laser.raycast_origin_offset_m:g} m; "
+            f"[setup] {wrist_laser_side}-wrist laser enabled "
+            f"(max_length={wrist_laser.max_length:g} m; "
+            f"raycast_origin_offset={wrist_laser.raycast_origin_offset_m:g} m; "
             f"tip_offset_ee={_tip}; "
             f"preview_window={'on' if show_laser_window else 'off'}; "
-            f"log every {float(getattr(pc, 'R_WRIST_LASER_LOG_PERIOD_S', 0.5)):g} s)",
+            f"log every {float(getattr(pc, 'WRIST_LASER_LOG_PERIOD_S', 0.5)):g} s)",
             flush=True,
         )
 
@@ -965,61 +970,61 @@ def main():
             ArticulationAction(joint_positions=merged)
         )
 
-    def _update_r_wrist_laser(sim_time_s: float) -> None:
-        """Raycast + R-wrist RGB overlay + throttled distance print."""
-        nonlocal last_r_wrist_overlay
-        if r_wrist_laser is None or R_wrist_camera is None:
+    def _update_wrist_laser(sim_time_s: float) -> None:
+        """Raycast + active-wrist RGB overlay + throttled distance print."""
+        nonlocal last_wrist_laser_overlay
+        laser_cam = L_wrist_camera if wrist_laser_side == "L" else R_wrist_camera
+        laser_ctrl = L_controller if wrist_laser_side == "L" else R_controller
+        if wrist_laser is None or laser_cam is None or laser_ctrl is None:
             return
         try:
             try:
-                Rp, Rq = R_controller.end_effector.get_world_pose()
+                ep, eq = laser_ctrl.end_effector.get_world_pose()
             except Exception:
                 return
             depth_m = None
             try:
-                frame = R_wrist_camera.get_current_frame()
+                frame = laser_cam.get_current_frame()
                 if frame and frame.get("distance_to_image_plane") is not None:
                     depth_m = np.asarray(
                         frame["distance_to_image_plane"], dtype=np.float32
                     )
             except Exception:
                 depth_m = None
-            r_wrist_laser.update(
-                Rp, Rq, depth_m=depth_m, camera=R_wrist_camera
-            )
+            wrist_laser.update(ep, eq, depth_m=depth_m, camera=laser_cam)
             try:
-                rgba = R_wrist_camera.get_rgba()
+                rgba = laser_cam.get_rgba()
             except Exception:
                 rgba = None
             if rgba is None or getattr(rgba, "size", 0) == 0:
-                r_wrist_laser.maybe_log_distance(
+                wrist_laser.maybe_log_distance(
                     float(sim_time_s),
-                    float(getattr(pc, "R_WRIST_LASER_LOG_PERIOD_S", 0.5)),
+                    float(getattr(pc, "WRIST_LASER_LOG_PERIOD_S", 0.5)),
                 )
                 return
             rgb = np.asarray(rgba[..., :3])
             gripper_q = None
             try:
-                gripper_q, _ = R_controller._measured_gripper()
+                gripper_q, _ = laser_ctrl._measured_gripper()
             except Exception:
                 gripper_q = None
-            overlay = r_wrist_laser.overlay_rgb(
+            overlay = wrist_laser.overlay_rgb(
                 rgb,
-                R_wrist_camera,
+                laser_cam,
                 depth_m=depth_m,
                 gripper_q_rad=gripper_q,
             )
             # Log after overlay so stop_uv matches this frame (Branch A/B).
-            r_wrist_laser.maybe_log_distance(
+            wrist_laser.maybe_log_distance(
                 float(sim_time_s),
-                float(getattr(pc, "R_WRIST_LASER_LOG_PERIOD_S", 0.5)),
+                float(getattr(pc, "WRIST_LASER_LOG_PERIOD_S", 0.5)),
             )
             if overlay is not None:
-                last_r_wrist_overlay = overlay
-                r_wrist_laser.show_overlay(overlay, now_s=float(sim_time_s))
+                last_wrist_laser_overlay = overlay
+                wrist_laser.show_overlay(overlay, now_s=float(sim_time_s))
         except Exception as exc:
             # Never let overlay/UI faults tear down Kit mid-episode.
-            print(f"[r_wrist_laser] update failed: {exc}", flush=True)
+            print(f"[{wrist_laser_side.lower()}_wrist_laser] update failed: {exc}", flush=True)
 
     # Snapshot the L arm's c-space joint vector at startup. The baseline
     # policy uses this as the return-home target between parts; other
@@ -1041,7 +1046,7 @@ def main():
         enable_camera_output=camera_output_enabled,
         L_controller=L_controller,
         R_controller=R_controller,
-        r_wrist_laser=r_wrist_laser,
+        r_wrist_laser=wrist_laser,  # EnvInfo name kept; object may be L or R
     )
 
     policy_class = _load_policy_class(args.policy)
@@ -1336,10 +1341,10 @@ def main():
             else:
                 my_world.step(render=True)
 
-            if r_wrist_laser is not None and (
+            if wrist_laser is not None and (
                 my_world.is_playing() or sim_hold
             ):
-                _update_r_wrist_laser(
+                _update_wrist_laser(
                     my_world.current_time_step_index * env_info.physics_dt
                 )
 
@@ -1431,11 +1436,14 @@ def main():
             if video_recorder.enabled:
                 if sim_time_s + 1e-9 >= next_record_time_s:
                     frame = obs.rgb.get(video_recorder.camera)
+                    laser_record_cam = (
+                        "L_wrist" if wrist_laser_side == "L" else "R_wrist"
+                    )
                     if (
-                        video_recorder.camera == "R_wrist"
-                        and last_r_wrist_overlay is not None
+                        video_recorder.camera == laser_record_cam
+                        and last_wrist_laser_overlay is not None
                     ):
-                        frame = last_r_wrist_overlay
+                        frame = last_wrist_laser_overlay
                     video_recorder.write(frame)
                     next_record_time_s += record_period_s
 
@@ -1500,9 +1508,9 @@ def main():
             except Exception as exc:
                 print(f"[setup] policy.finalize failed: {exc}", flush=True)
         video_recorder.close()
-        if r_wrist_laser is not None:
+        if wrist_laser is not None:
             try:
-                r_wrist_laser.close()
+                wrist_laser.close()
             except Exception:
                 pass
         simulation_app.close()

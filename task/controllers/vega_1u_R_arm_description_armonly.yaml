@@ -35,13 +35,13 @@ cspace_to_urdf_rules:
     - {name: head_j2,            rule: fixed, value: 0.0}
     - {name: head_j3,            rule: fixed, value: 0.0}
     # L arm fixed at init pose (same as INIT_JOINT_TARGETS / scene L).
-    - {name: L_arm_j1,           rule: fixed, value: -0.52359878}
-    - {name: L_arm_j2,           rule: fixed, value: 1.04719755}
-    - {name: L_arm_j3,           rule: fixed, value: 1.74532925}
-    - {name: L_arm_j4,           rule: fixed, value: -1.74532925}
-    - {name: L_arm_j5,           rule: fixed, value: -0.17453293}
-    - {name: L_arm_j6,           rule: fixed, value: -0.17453293}
-    - {name: L_arm_j7,           rule: fixed, value: -1.04719755}
+    - {name: L_arm_j1,           rule: fixed, value: -0.61435591}
+    - {name: L_arm_j2,           rule: fixed, value: 1.21823984}
+    - {name: L_arm_j3,           rule: fixed, value: 1.78547185}
+    - {name: L_arm_j4,           rule: fixed, value: -2.10486711}
+    - {name: L_arm_j5,           rule: fixed, value: -0.07679449}
+    - {name: L_arm_j6,           rule: fixed, value: -0.55850537}
+    - {name: L_arm_j7,           rule: fixed, value: -1.37800000}
     - {name: L_gripper_joint,    rule: fixed, value: 0.0}
     - {name: L_gripper_joint_01, rule: fixed, value: 0.0}
     - {name: R_gripper_joint,    rule: fixed, value: 0.0}

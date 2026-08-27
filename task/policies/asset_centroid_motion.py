@@ -235,7 +235,7 @@ def load_asset_centroid_config(path: Path | str | None = None) -> AssetCentroidC
             gripper_close_rad=float(entry["gripper_close_rad"]),
         )
 
-    active_arm = str(raw.get("active_arm", "R")).upper()
+    active_arm = str(raw.get("active_arm", "L")).upper()
     if active_arm not in ("L", "R"):
         raise ValueError(f"active_arm must be 'L' or 'R', got {active_arm!r}")
 

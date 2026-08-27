@@ -68,9 +68,10 @@ class EnvInfo:
     state vectors can use this to recover the right end-effector pose."""
 
     r_wrist_laser: Optional[Any] = None
-    """Optional right-wrist approach laser (`RWristLaser`). Teleop uses
-    ``last_length`` for proximity rate-limit slowdown near contact.
-    Participant policies may ignore this."""
+    """Optional wrist approach laser (`RWristLaser`, L or R per
+    ``param_config.WRIST_LASER_SIDE``). Teleop uses ``last_length`` for
+    proximity rate-limit slowdown near contact. Participant policies may
+    ignore this."""
 
 
 @dataclass

@@ -20,10 +20,12 @@ hands each part to the participant's `Policy`, and grades the result
 | `extract_part_poses.py`   | Scrapes per-part mesh / rigid-body world poses from the loaded scene; writes `part_init_poses.json` (merging existing `pick_z`). |
 | `find_reachable_above_boards.py`   | L-arm IK-feasibility sweep above the board AABBs. Writes reachable / unreachable PLYs for visualization. Must run with Isaac Sim's python. |
 | `calibrate_r_arm_joints.py` | Robot+floor R-arm init calibrator (omni.ui sliders). Launch via `../scripts/calibrate_r_arm.sh`. |
+| `calibrate_l_arm_joints.py` | Robot+floor L-arm init calibrator (omni.ui sliders). Launch via `../scripts/calibrate_l_arm.sh`. |
 | `validate_grasp_aperture_physics.py` | Headless PhysX check of an asset's mesh width against the drive-settled Vega gripper aperture calibration. |
-| `r_arm_calib_ui.py`        | omni.ui panel + Save writers for `INIT_JOINT_TARGETS` / Lula YAMLs. |
+| `r_arm_calib_ui.py`        | omni.ui panel + Save writers for R `INIT_JOINT_TARGETS` / Lula YAMLs. |
+| `l_arm_calib_ui.py`        | omni.ui panel + Save writers for L `INIT_JOINT_TARGETS` / Lula YAMLs. |
 | `controllers/`            | EEPoseController, EEPathFollower, LulaIKController, snap helpers, pick-place task, Lula descriptor yamls for both arms (L + R). |
-| `controllers/r_wrist_laser.py` | Right-wrist TCP approach laser: wrist-cam tool-ray depth, PhysX fallback, distal-tip aperture ruler overlay via `omni.ui`. |
+| `controllers/r_wrist_laser.py` | Wrist TCP approach laser (L or R via `side=`): wrist-cam tool-ray depth, PhysX fallback, distal-tip aperture ruler overlay via `omni.ui`. |
 | `controllers/vega_1u_L_arm_description*.yaml` | Lula descriptors for L arm — `default_q` mirrors the scene init pose (see *Gotchas* below). Three variants picked by `pc.OWNS_LIFT_L` / `OWNS_TORSO_L`. |
 | `controllers/vega_1u_R_arm_description*.yaml` | Same, R arm. Available so a policy can do bimanual IK; the default single-arm runner just holds R at `INIT_JOINT_TARGETS`. |
 | `scene_final.usd`, `demo.mp4` | Reference output of a passing baseline run. |
@@ -117,10 +119,11 @@ executed unless the runner's R-action merge path is extended.
 spawns nothing.
 
 **Cameras** — three cameras are baked into the robot USD (head + L/R
-wrist). Two flags here just toggle viewports and sensor binding:
+wrist). Viewport selection is in `param_config` / `TASK_CAMERA_VIEWPORTS`
+(default: **head + L-wrist laser** only — no plain L/R wrist tiles):
 
 ```python
-enable_camera_viewports = True   # show the 3-tile viewport layout in Kit UI
+DEFAULT_CAMERA_VIEWPORTS = ("head", "l_wrist_laser")
 enable_camera_output    = False  # bind sensors so RGB/depth are readable from Python
 ```
 
@@ -129,17 +132,22 @@ and surfaces frames via `Observation.rgb` / `depth` / `intrinsics` to
 the policy. `--record-video` also enables camera binding for the selected
 stream even when `enable_camera_output` is `False`.
 
-**R-wrist approach laser** — optional TCP +Z range cue overlaid on the
-R-wrist RGB preview (`controllers/r_wrist_laser.py`). Enabling it forces
-camera sensor output so depth/RGBA exist:
+**Wrist approach laser** — TCP +Z range cue overlaid on the active wrist
+RGB (`controllers/r_wrist_laser.py`, `side=L` by default). Enabling it
+forces camera sensor output so depth/RGBA exist:
 
 ```python
-enable_r_wrist_laser = True                 # TASK_ENABLE_R_WRIST_LASER
-R_WRIST_LASER_MAX_LENGTH = 2.0              # TASK_R_WRIST_LASER_MAX_LENGTH
-R_WRIST_LASER_LOG_PERIOD_S = 0.5            # TASK_R_WRIST_LASER_LOG_PERIOD_S
-R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET = 0.0   # TASK_R_WRIST_LASER_RAYCAST_ORIGIN_OFFSET
-R_WRIST_LASER_DEBUG_LOG = True              # TASK_R_WRIST_LASER_DEBUG_LOG
+WRIST_LASER_SIDE = "L"                      # TASK_WRIST_LASER_SIDE=L|R
+enable_wrist_laser = True                   # TASK_ENABLE_WRIST_LASER
+WRIST_LASER_MAX_LENGTH = 2.0                # TASK_WRIST_LASER_MAX_LENGTH
+WRIST_LASER_LOG_PERIOD_S = 0.5              # TASK_WRIST_LASER_LOG_PERIOD_S
+WRIST_LASER_RAYCAST_ORIGIN_OFFSET = 0.0     # TASK_WRIST_LASER_RAYCAST_ORIGIN_OFFSET
+WRIST_LASER_DEBUG_LOG = True                # TASK_WRIST_LASER_DEBUG_LOG
 ```
+
+Example viewport override:
+`TASK_CAMERA_VIEWPORTS=head,l_wrist_laser` (default) or `head,l_wrist`
+for the plain L-wrist Kit tile without laser.
 
 Beam length prefers the median finite depth in a small patch around the
 wrist-cam image center (true line of sight). PhysX casts along tool +Z
@@ -179,6 +187,16 @@ console; **Save** sets `R_ARM_TUCKED = False`, writes the seven R values
 into `param_config.INIT_JOINT_TARGETS`, and syncs the matching
 `default_q` / fixed `R_arm_j*` entries in
 `controllers/vega_1u_{L,R}_arm_description*.yaml`.
+
+**L-arm init calibration** — same workflow for `L_arm_j1..j7`:
+
+```bash
+./scripts/calibrate_l_arm.sh
+```
+
+**Save** writes the seven L values into `param_config.INIT_JOINT_TARGETS`
+and syncs L `default_q` plus fixed `L_arm_j*` entries in the R-side Lula
+descriptors.
 
 **Startup pose** — `INIT_JOINT_TARGETS` is applied at sim start and on
 every Stop+Play via `set_joint_positions`. Currently mirrors
