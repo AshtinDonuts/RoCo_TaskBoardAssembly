@@ -106,6 +106,7 @@ def test_policy_requires_right_controller_and_active_arms():
         ("gear_60teeth", "open"),
         ("battery_size1", "open"),
         ("rod_16mm", "open"),
+        ("pin", "open"),
     ],
 )
 def test_configured_targets_are_planned_not_skipped(monkeypatch, name, release_mode):

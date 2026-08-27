@@ -595,44 +595,17 @@ PART_CONFIG = {
         },
     },
     "pin": {
-        # pick_pos xy = mesh world pos from scene_init.usd; z = pick_z.
+        # Open pick/drop like rod_16mm / bolt_8mm / gear_20teeth: grasp →
+        # carry → release at place_pos; graded by settled mesh vs grade_pos
+        # (no SnapAttacher). grade_pos = prior snap connect_pos (scene_final
+        # mesh pose).
         "pick_pos":       np.array([ -0.03105, -0.01476, 1.04437]),
         "place_pos":      np.array([ 0.0324,  0.00616, 1.065]),
+        "grade_pos":      np.array([ 0.0324,  0.006163426226573593, 1.0567751179777043]),
         "ee_offset":      np.array([0.0, 0.017, 0.185]),
-        # TODO(sync): the snap dict below is the dev-loop copy. Once these
-        # values stabilize, mirror them into author_snap_targets.SNAP_CONFIGS
-        # ["pin"] and re-run author_snap_targets.py so the USD-authored
-        # `snap:*` attrs match what runtime uses.
-        "release_mode":   "snap",
-        "snap": {
-            "movable_path":     "/World/parts/pin",
-            "parent_body_path": "/World/task_board/task_board_color/_188_001",
-            "target_pos":       (0.0324,  0.00616, 1.065),#(+0.066, +0.00616, +1.05000),
-            "target_rot":       (+0.7071, +0.7071, +0.0000, +0.0000),  # wxyz
-            "pos_tol_axes":     (0.002, 0.002, 0.01),  # WORLD frame
-            "rot_tol_deg":      -1.0,                   # axis-symmetric, skip rot gate
-            "set_kinematic":    False,
-            "timeout_steps":    300,
-            # Exact world pose the MESH should end up at after the snap fires.
-            # snap_attach pulls the rigid body to whatever pose makes the mesh
-            # land here (using the cached mesh-to-body local offset). MESH
-            # frame, consistent with target_pos. Value = pin mesh world pose
-            # in scene_final.usd (extract_part_poses.py 'pos' field).
-            # connect_rot omitted → defaults to target_rot.
-            "connect_pos":      (0.0324,
-                                 0.006163426226573593,
-                                 1.0567751179777043),
-            # Fine XY grid sweep at the place pose: replace the single
-            # snap_wait with n*n cells spanning [-extent, +extent] each
-            # axis, ordered center-out. dwell_steps=1 → 1 follower step
-            # per cell (fast scan); raise if the part needs more settle
-            # time to land inside the tolerance box per cell.
-            "search": {
-                "n":          5,               # 5x5 = 25 cells
-                "extent_xy":  (0.002, 0.002),  # match pos_tol_axes[0:2]
-                "dwell_steps": 1,
-            },
-        },
+        "release_mode":   "open",
+        "init_height":    0.05,
+        "final_height":   0.1,
     },
     "usb_a": {
         # pick_pos xy = mesh world pos from scene_init.usd; z = pick_z.
