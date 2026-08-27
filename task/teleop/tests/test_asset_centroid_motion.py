@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import numpy as np
+import json
+import pytest
 
 from policies.asset_centroid_motion import (
     GEAR_20TEETH_SPEC,
@@ -139,3 +141,29 @@ def test_json_config_exposes_speed_and_gear_grasp():
         gear.tcp_to_grasp_tool, [0.0, -0.0150, 0.1972], atol=1e-9
     )
     assert GEAR_20TEETH_SPEC.gripper_close_rad == gear.gripper_close_rad
+
+
+def test_approach_orientation_parsing_validation_and_disabled_compatibility(tmp_path):
+    base = {
+        "parts": {"part": {"gripper_open_rad": 0.1, "gripper_close_rad": 0.0}},
+    }
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(base), encoding="utf-8")
+    cfg = load_asset_centroid_config(path)
+    assert not cfg.approach_orientation.enabled
+    assert cfg.approach_orientation.max_tilt_rad == 0.0
+
+    base["approach_orientation"] = {
+        "enabled": True, "max_tilt_deg": 5.0, "sample_tilt_deg": 2.5,
+        "recover_at_hover": True,
+    }
+    path.write_text(json.dumps(base), encoding="utf-8")
+    cfg = load_asset_centroid_config(path)
+    assert cfg.approach_orientation.enabled
+    assert np.degrees(cfg.approach_orientation.max_tilt_rad) == pytest.approx(5.0)
+    assert np.degrees(cfg.approach_orientation.sample_tilt_rad) == pytest.approx(2.5)
+
+    base["approach_orientation"]["sample_tilt_deg"] = 6.0
+    path.write_text(json.dumps(base), encoding="utf-8")
+    with pytest.raises(ValueError, match="must not exceed"):
+        load_asset_centroid_config(path)

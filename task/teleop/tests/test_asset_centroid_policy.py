@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,14 +14,19 @@ from controllers.gripper_compliance import (
     GripperPhase,
 )
 from policies.asset_centroid_scripted import AssetCentroidScriptedPolicy
+from policies.asset_centroid_motion import quat_angle, quat_mul_wxyz
 from policy_api import Observation, PartTarget
 
 
 class _Controller:
-    def __init__(self, *, ik_ok=True, solve_ok=True, solve_delta=0.0):
+    def __init__(
+        self, *, ik_ok=True, solve_ok=True, solve_delta=0.0, fail_forward=None
+    ):
         self.ik = SimpleNamespace(ik_ok=ik_ok)
         self.solve_ok = solve_ok
         self.solve_delta = solve_delta
+        self.fail_forward = fail_forward
+        self.forward_targets = []
         self.seed_ee_pose = (
             np.array([0.0, 0.0, 1.3]),
             np.array([0.0, 1.0, 0.0, 0.0]),
@@ -39,13 +45,17 @@ class _Controller:
         )
 
     def forward(self, pos, orn, gripper):
+        pos = np.asarray(pos, dtype=np.float64).copy()
+        self.forward_targets.append(pos)
+        if self.fail_forward is not None:
+            self.ik.ik_ok = not bool(self.fail_forward(pos))
         return SimpleNamespace(joint_positions=[0.0] * 8)
 
     def forward_raw_q(self, q_cspace, gripper):
         return SimpleNamespace(joint_positions=[0.0] * 8)
 
 
-def _policy(controller=None):
+def _policy(controller=None, *, config=None):
     controller = controller or _Controller()
     env = SimpleNamespace(
         R_controller=controller,
@@ -53,7 +63,7 @@ def _policy(controller=None):
         dof_names=[f"q{i}" for i in range(8)],
         physics_dt=0.005,
     )
-    return AssetCentroidScriptedPolicy(env)
+    return AssetCentroidScriptedPolicy(env, config=config)
 
 
 def _obs():
@@ -85,6 +95,135 @@ def test_param_config_fallback_flips_r_tcp_y():
     )
     spec = policy._part_spec_for_target(target)
     np.testing.assert_allclose(spec.tcp_to_grasp_tool, [0.0, -0.016, 0.2], atol=1e-9)
+
+
+def _configured_target(name: str) -> PartTarget:
+    import param_config as pc
+
+    cfg = pc.get_part_config(name)
+    return PartTarget(
+        name,
+        cfg["release_mode"],
+        pick_pos=np.asarray(cfg["pick_pos"], dtype=np.float64),
+        place_pos=np.asarray(cfg["place_pos"], dtype=np.float64),
+        gripper_open=float(cfg["gripper_open"]),
+        gripper_close=float(cfg["gripper_close"]),
+        extra=dict(cfg),
+    )
+
+
+def test_pin_fallback_spec_uses_r_tcp_and_geometry_apertures():
+    """Pin must not silently inherit the L-arm lateral TCP convention."""
+    import param_config as pc
+
+    policy = _policy()
+    target = _configured_target("pin")
+    spec = policy._part_spec_for_target(target)
+
+    np.testing.assert_allclose(spec.tcp_to_grasp_tool, [0.0, -0.017, 0.185])
+    assert spec.gripper_open_rad == pytest.approx(pc.part_grasp_open_rad("pin"))
+    assert spec.gripper_close_rad == pytest.approx(pc.part_grasp_close_rad("pin"))
+    assert spec.gripper_open_rad > spec.gripper_close_rad > 0.0
+
+
+def test_pin_centroid_builds_finite_approach_with_configured_clearance(monkeypatch):
+    """Separate bad centroid/TCP construction from an IK continuity failure."""
+    policy = _policy()
+    centroid = np.array([-0.03105, -0.01476, 1.04437])
+    monkeypatch.setattr(
+        policy, "_live_asset_centroid", lambda _: (centroid.copy(), np.zeros(3))
+    )
+
+    policy.reset(_obs(), _configured_target("pin"))
+
+    assert not policy.is_done(_obs())
+    phases = {phase.name: phase for phase in policy._phases}
+    pick = phases["descend_pick"].pos
+    hover = phases["hover_pick_relaxed"].pos
+    assert np.all(np.isfinite(pick))
+    np.testing.assert_allclose(hover[:2], pick[:2], atol=1e-12)
+    assert hover[2] - pick[2] == pytest.approx(policy._path_heights_m()[0])
+
+
+def test_relaxed_hover_precedes_strict_alignment_and_disabled_keeps_legacy_sequence(
+    monkeypatch,
+):
+    def centroid(_):
+        return np.array([0.0, 0.0, 1.0]), np.zeros(3)
+
+    relaxed = _policy()
+    monkeypatch.setattr(relaxed, "_live_asset_centroid", centroid)
+    relaxed.reset(_obs(), PartTarget("gear_20teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])))
+    phases = relaxed._phases
+    names = [phase.name for phase in phases]
+    assert names[:3] == ["hover_pick_relaxed", "align_hover_pick", "descend_pick"]
+    assert phases[0].orientation_cone_rad == pytest.approx(
+        relaxed._cfg.approach_orientation.max_tilt_rad
+    )
+    assert phases[1].orientation_cone_rad is None
+    assert phases[2].orientation_cone_rad is None
+
+    cfg = replace(
+        relaxed._cfg,
+        approach_orientation=replace(relaxed._cfg.approach_orientation, enabled=False),
+    )
+    strict = _policy(config=cfg)
+    monkeypatch.setattr(strict, "_live_asset_centroid", centroid)
+    strict.reset(_obs(), PartTarget("gear_20teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])))
+    assert [phase.name for phase in strict._phases][:2] == ["hover_pick", "descend_pick"]
+
+
+def test_tilt_candidates_cover_signed_tool_axes_without_free_yaw():
+    policy = _policy()
+    base = np.array([0.0, 1.0, 0.0, 0.0])
+    candidates = policy._approach_tilt_candidates(base)
+    assert len(candidates) == 4
+    for candidate in candidates:
+        assert quat_angle(candidate, base) == pytest.approx(
+            policy._cfg.approach_orientation.sample_tilt_rad
+        )
+        # A roll/pitch perturbation is composed on the right (tool frame),
+        # so it contains no independent world-Z/yaw rotation.
+        relative = quat_mul_wxyz(np.array([0.0, -1.0, 0.0, 0.0]), candidate)
+        assert abs(relative[3]) < 1e-12
+
+
+def test_pin_approach_exposes_interior_ik_failure_after_endpoint_preflight(
+    monkeypatch,
+):
+    """Characterize the suspected failure: endpoints solve, dense path stalls.
+
+    The fake solver accepts every preflight endpoint, while runtime IK rejects
+    an interior band of the initial approach. The policy must retry exactly
+    that waypoint and hit its bounded IK guard instead of advancing blindly.
+    The recorded target gives a concrete first-failure pose for diagnosis.
+    """
+    controller = _Controller(fail_forward=lambda pos: pos[2] < 1.295)
+    policy = _policy(controller)
+    centroid = np.array([-0.03105, -0.01476, 1.04437])
+    monkeypatch.setattr(
+        policy, "_live_asset_centroid", lambda _: (centroid.copy(), np.zeros(3))
+    )
+    obs = _obs()
+    policy.reset(obs, _configured_target("pin"))
+    assert not policy.is_done(obs), "endpoint preflight unexpectedly rejected pin"
+
+    last_progress = -1
+    first_failed_target = None
+    for _ in range(2000):
+        before = policy._segment_index
+        policy.act(obs)
+        if policy._ik_failure_steps and first_failed_target is None:
+            first_failed_target = controller.forward_targets[-1].copy()
+            last_progress = before
+        if policy.is_done(obs):
+            break
+
+    assert first_failed_target is not None, "synthetic interior IK band was not hit"
+    assert first_failed_target[2] < 1.295
+    assert policy._segment_index == last_progress
+    assert policy._aborted
+    assert policy._ik_failure_steps == policy._cfg.guards.max_ik_failure_steps
 
 
 def test_policy_requires_right_controller_and_active_arms():
@@ -212,7 +351,7 @@ def test_endpoint_motion_larger_than_runtime_jump_gate_still_plans(monkeypatch):
     assert policy._cfg.gripper.mode == "compliant"
     by_name = {p.name: p.gripper for p in policy._phases}
     assert by_name["close"] == "close"
-    assert by_name["hover_pick"] == pytest.approx(0.12)
+    assert by_name["hover_pick_relaxed"] == pytest.approx(0.12)
     assert by_name["open"] == pytest.approx(0.12)
 
 

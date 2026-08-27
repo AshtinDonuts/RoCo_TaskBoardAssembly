@@ -554,7 +554,11 @@ PART_CONFIG = {
 
     },
     "gear_60teeth": {
-        "gripper_open":   0.2,
+        # Freeze the current geometry-resolved apertures as part-specific
+        # commands so subsequent mesh/AABB updates cannot alter this grasp.
+        "use_param_config_aperture": True,
+        "gripper_open":   0.18,
+        "gripper_close": 0.146,
         "ee_offset":      np.array([0.0, 0.016, 0.2]),
         "place_pos":      np.array([ -0.00883, -0.05629, 1.05293]),
         # Final settled pose for grading (gear sinks onto the rack post

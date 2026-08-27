@@ -3,8 +3,8 @@
     "completion_reason": "max_parts",
     "current_part": null,
     "completed_parts": 1,
-    "total_task_steps": 271,
-    "sim_time_s": 27.310000000000002,
+    "total_task_steps": 327,
+    "sim_time_s": 32.910000000000004,
     "max_steps": null,
     "max_sim_seconds": null,
     "max_parts": 1,
@@ -19,12 +19,12 @@
       "name": "pin",
       "release_mode": "open",
       "measure": "meshT",
-      "pos_err_m": 0.06923596117432695,
+      "pos_err_m": 0.06923596636903072,
       "tolerance_m": 0.01,
       "actual": [
-        -0.031043383665535662,
-        -0.014760927552087202,
-        1.0385892221310324
+        -0.031043381550984683,
+        -0.014760926860943005,
+        1.0385891941821237
       ],
       "target": [
         0.0324,

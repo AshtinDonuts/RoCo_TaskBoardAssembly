@@ -54,6 +54,16 @@ class GuardSpec:
 
 
 @dataclass(frozen=True)
+class ApproachOrientationSpec:
+    """Optional bounded orientation freedom while approaching pick hover."""
+
+    enabled: bool
+    max_tilt_rad: float
+    sample_tilt_rad: float
+    recover_at_hover: bool
+
+
+@dataclass(frozen=True)
 class AssetMotionSpec:
     """Hand-tuned grasp data; deliberately independent of AABB width config."""
 
@@ -85,6 +95,7 @@ class AssetCentroidConfig:
     path_clearances: PathClearances
     timing: TimingSpec
     guards: GuardSpec
+    approach_orientation: ApproachOrientationSpec
     gripper: GripperSpec
     parts: dict[str, AssetMotionSpec]
 
@@ -160,6 +171,27 @@ def load_asset_centroid_config(path: Path | str | None = None) -> AssetCentroidC
         max_final_hold_steps=int(guards_raw.get("max_final_hold_steps", 500)),
         max_ik_failure_steps=int(guards_raw.get("max_ik_failure_steps", 100)),
     )
+    approach_raw = raw.get("approach_orientation") or {}
+    enabled = bool(approach_raw.get("enabled", False))
+    max_tilt_deg = float(approach_raw.get("max_tilt_deg", 0.0))
+    sample_tilt_deg = float(approach_raw.get("sample_tilt_deg", 0.0))
+    if not np.isfinite(max_tilt_deg) or max_tilt_deg < 0.0:
+        raise ValueError("approach_orientation.max_tilt_deg must be finite and non-negative")
+    if not np.isfinite(sample_tilt_deg) or sample_tilt_deg < 0.0:
+        raise ValueError("approach_orientation.sample_tilt_deg must be finite and non-negative")
+    if sample_tilt_deg > max_tilt_deg:
+        raise ValueError(
+            "approach_orientation.sample_tilt_deg must not exceed max_tilt_deg"
+        )
+    # A zero cone cannot relax IK, regardless of the enabled spelling.
+    if max_tilt_deg == 0.0:
+        enabled = False
+    approach_orientation = ApproachOrientationSpec(
+        enabled=enabled,
+        max_tilt_rad=float(np.deg2rad(max_tilt_deg)),
+        sample_tilt_rad=float(np.deg2rad(sample_tilt_deg)),
+        recover_at_hover=bool(approach_raw.get("recover_at_hover", True)),
+    )
     gripper_mode = str(gripper_raw.get("mode", "compliant")).lower()
     if gripper_mode not in ("compliant", "aperture"):
         raise ValueError(
@@ -204,6 +236,7 @@ def load_asset_centroid_config(path: Path | str | None = None) -> AssetCentroidC
         path_clearances=path_clearances,
         timing=timing,
         guards=guards,
+        approach_orientation=approach_orientation,
         gripper=gripper,
         parts=parts,
     )

@@ -49,6 +49,7 @@ from policies.asset_centroid_motion import (  # noqa: E402
     load_asset_centroid_config,
     local_aabb_midpoint,
     quat_angle,
+    quat_mul_wxyz,
     rotate_vector,
     sample_joint_segment,
     sample_pose_segment,
@@ -66,6 +67,7 @@ class _Phase:
     orn: np.ndarray
     gripper: float | str
     dwell_steps: int = 0
+    orientation_cone_rad: float | None = None
 
 
 class AssetCentroidScriptedPolicy(Policy):
@@ -111,6 +113,7 @@ class AssetCentroidScriptedPolicy(Policy):
         self._place_q: Optional[np.ndarray] = None
         self._hold_q: Optional[np.ndarray] = None
         self._compliance_log_accum_s = 0.0
+        self._approach_diagnostics: dict[str, object] = {}
         self._configure_compliance()
         print(
             f"[asset_centroid] config={self._cfg.path} "
@@ -150,6 +153,7 @@ class AssetCentroidScriptedPolicy(Policy):
         self._place_q = None
         self._hold_q = None
         self._compliance_log_accum_s = 0.0
+        self._approach_diagnostics = {}
 
         if target.place_pos is None:
             self._abort(f"{target.name}: missing scripted place_pos")
@@ -191,17 +195,27 @@ class AssetCentroidScriptedPolicy(Policy):
         settle_steps = max(1, int(np.ceil(timing.settle_place_s / self._dt)))
         open_steps = max(1, int(np.ceil(timing.open_dwell_s / self._dt)))
         open_cmd, close_cmd = self._gripper_cmds()
+        relaxed = self._relaxed_approach_enabled()
         phases = [
             _Phase(
-                "hover_pick",
+                "hover_pick_relaxed" if relaxed else "hover_pick",
                 "move",
                 poses["hover_pick"],
                 pick_orn,
                 open_cmd,
+                orientation_cone_rad=(
+                    self._cfg.approach_orientation.max_tilt_rad if relaxed else None
+                ),
             ),
-            _Phase(
-                "descend_pick", "move", poses["pick"], pick_orn, open_cmd
-            ),
+        ]
+        if relaxed:
+            # Relaxation is strictly approach-only: recover the chosen
+            # top-down orientation at fixed hover XYZ before descending.
+            phases.append(
+                _Phase("align_hover_pick", "move", poses["hover_pick"], pick_orn, open_cmd)
+            )
+        phases.extend([
+            _Phase("descend_pick", "move", poses["pick"], pick_orn, open_cmd),
             _Phase(
                 "close",
                 "dwell",
@@ -213,14 +227,8 @@ class AssetCentroidScriptedPolicy(Policy):
             _Phase(
                 "lift_pick", "move", poses["lift_pick"], pick_orn, close_cmd
             ),
-            _Phase(
-                "hover_place",
-                "move",
-                poses["hover_place"],
-                place_orn,
-                close_cmd,
-            ),
-        ]
+            _Phase("hover_place", "move", poses["hover_place"], place_orn, close_cmd),
+        ])
         # Null/near-null place descent (e.g. hover_place_height≈0) still used
         # to run a long joint segment and caused sideways EE wander; skip it.
         descend_delta = float(np.linalg.norm(poses["place"] - poses["hover_place"]))
@@ -464,6 +472,7 @@ class AssetCentroidScriptedPolicy(Policy):
                         phase.orn,
                         float(freeze),
                         phase.dwell_steps,
+                        phase.orientation_cone_rad,
                     )
                 )
                 replaced += 1
@@ -630,6 +639,67 @@ class AssetCentroidScriptedPolicy(Policy):
         )
         return float(np.dot(delta, delta))
 
+    def _relaxed_approach_enabled(self) -> bool:
+        spec = self._cfg.approach_orientation
+        return spec.enabled and spec.recover_at_hover
+
+    @staticmethod
+    def _axis_angle_quat(axis: tuple[float, float, float], angle_rad: float) -> np.ndarray:
+        axis_arr = np.asarray(axis, dtype=np.float64)
+        axis_arr /= np.linalg.norm(axis_arr)
+        half = float(angle_rad) / 2.0
+        return np.array([np.cos(half), *(axis_arr * np.sin(half))], dtype=np.float64)
+
+    def _approach_tilt_candidates(self, top_down_orn: np.ndarray) -> tuple[np.ndarray, ...]:
+        """Small tool-frame pitch/roll candidates; never add a Z/yaw turn."""
+        spec = self._cfg.approach_orientation
+        if not spec.enabled or spec.sample_tilt_rad <= 0.0:
+            return (top_down_orn.copy(),)
+        angle = spec.sample_tilt_rad
+        return tuple(
+            quat_mul_wxyz(top_down_orn, self._axis_angle_quat(axis, signed_angle))
+            for axis, signed_angle in (
+                ((1.0, 0.0, 0.0), angle),
+                ((1.0, 0.0, 0.0), -angle),
+                ((0.0, 1.0, 0.0), angle),
+                ((0.0, 1.0, 0.0), -angle),
+            )
+        )
+
+    def _preflight_relaxed_approach(
+        self, seed: np.ndarray, hover_pos: np.ndarray, top_down_orn: np.ndarray
+    ) -> tuple[np.ndarray, bool]:
+        """Probe the incoming hover path with sequential seeds and bounded tilts."""
+        if not self._relaxed_approach_enabled():
+            return seed, True
+        start_pos, _ = self._actual_ee_pose(None)  # observation is not needed here
+        candidates = self._approach_tilt_candidates(top_down_orn)
+        chosen: list[float] = []
+        # Two interior samples plus hover catch the common wrist-wrap failure
+        # without turning endpoint preflight into an expensive dense trajectory.
+        for waypoint_i, fraction in enumerate((1.0 / 3.0, 2.0 / 3.0, 1.0)):
+            pos = start_pos + fraction * (hover_pos - start_pos)
+            options = []
+            for tilt_i, orn in enumerate(candidates):
+                q, ok = self._controller.solve_q(pos, orn, seed=seed)
+                if ok and q is not None:
+                    q = np.asarray(q, dtype=np.float64).reshape(-1)
+                    options.append((self._joint_step_cost(seed, q), tilt_i, q))
+            if not options:
+                self._approach_diagnostics = {
+                    "first_failing_waypoint": waypoint_i,
+                    "position": pos.copy(),
+                    "chosen_tilt_index": chosen[-1] if chosen else None,
+                }
+                return seed, False
+            _, tilt_i, seed = min(options, key=lambda item: item[0])
+            chosen.append(int(tilt_i))
+        self._approach_diagnostics = {
+            "chosen_tilt_indices": tuple(chosen),
+            "first_failing_waypoint": None,
+        }
+        return seed, True
+
     def _choose_yaw_and_poses(
         self,
         grasp_center: np.ndarray,
@@ -644,6 +714,7 @@ class AssetCentroidScriptedPolicy(Policy):
         """
         seed0 = np.asarray(self._controller.current_cspace_q(), dtype=np.float64)
         best = None
+        best_approach_diagnostics = None
         pick_keys = ("hover_pick", "pick", "lift_pick")
         # Do not require retract in preflight: yaw=0 place can be fine while
         # retract IK fails, which previously aborted the whole plan.
@@ -663,6 +734,12 @@ class AssetCentroidScriptedPolicy(Policy):
             seed = seed0.copy()
             pick_score = pick_rank * 1e-6
             feasible = True
+            seed, feasible = self._preflight_relaxed_approach(
+                seed, poses["hover_pick"], pick_orn
+            )
+            if not feasible:
+                failure_counts["hover_pick"] += 1
+                continue
             for key in pick_keys:
                 q, ok = self._controller.solve_q(poses[key], pick_orn, seed=seed)
                 if not ok or q is None:
@@ -711,6 +788,7 @@ class AssetCentroidScriptedPolicy(Policy):
                         hover_place_q,
                         place_q,
                     )
+                    best_approach_diagnostics = dict(self._approach_diagnostics)
         if best is None and clear.force_yaw_deg is not None:
             fallback = top_down_yaw_candidates(clear.yaw_step_deg)
             print(
@@ -725,6 +803,12 @@ class AssetCentroidScriptedPolicy(Policy):
                 seed = seed0.copy()
                 pick_score = pick_rank * 1e-6
                 feasible = True
+                seed, feasible = self._preflight_relaxed_approach(
+                    seed, poses["hover_pick"], pick_orn
+                )
+                if not feasible:
+                    failure_counts["hover_pick"] += 1
+                    continue
                 for key in pick_keys:
                     q, ok = self._controller.solve_q(poses[key], pick_orn, seed=seed)
                     if not ok or q is None:
@@ -773,6 +857,7 @@ class AssetCentroidScriptedPolicy(Policy):
                             hover_place_q,
                             place_q,
                         )
+                        best_approach_diagnostics = dict(self._approach_diagnostics)
         if best is None:
             preferred_poses = self._pose_set(
                 grasp_center, place_center, candidates[0]
@@ -788,6 +873,8 @@ class AssetCentroidScriptedPolicy(Policy):
         pick_yaw = self._nominal_yaw_degrees(best[1])
         place_yaw = self._nominal_yaw_degrees(best[2])
         poses = best[3]
+        if best_approach_diagnostics is not None:
+            self._approach_diagnostics = best_approach_diagnostics
         self._hover_place_q = best[4].copy()
         self._place_q = best[5].copy()
         hover_pick_m, hover_place_m, retract_m = self._path_heights_m()
@@ -814,6 +901,12 @@ class AssetCentroidScriptedPolicy(Policy):
             f"place={np.round(poses['place'], 5).tolist()}",
             flush=True,
         )
+        if self._cfg.approach_orientation.enabled:
+            print(
+                f"[asset_centroid] relaxed-approach diagnostics="
+                f"{self._approach_diagnostics}",
+                flush=True,
+            )
         return best[1], best[2], best[3]
 
     @staticmethod
@@ -886,8 +979,17 @@ class AssetCentroidScriptedPolicy(Policy):
             flush=True,
         )
 
-    def _command(self, pos, orn, gripper) -> ArticulationAction:
-        action = self._controller.forward(pos, orn, gripper)
+    def _command(self, pos, orn, gripper, *, orientation_cone_rad=None) -> ArticulationAction:
+        """Command IK, passing a cone only for the relaxed pick approach."""
+        try:
+            action = self._controller.forward(
+                pos, orn, gripper, orientation_cone_rad=orientation_cone_rad
+            )
+        except TypeError as exc:
+            # Keep minimal offline controller doubles from older tests usable.
+            if "orientation_cone_rad" not in str(exc):
+                raise
+            action = self._controller.forward(pos, orn, gripper)
         ik_ok = bool(getattr(getattr(self._controller, "ik", None), "ik_ok", True))
         if ik_ok:
             self._ik_failure_steps = 0
@@ -991,7 +1093,10 @@ class AssetCentroidScriptedPolicy(Policy):
                 self._last_action = action
                 self._ik_failure_steps = 0
             else:
-                action = self._command(pos, orn, phase.gripper)
+                action = self._command(
+                    pos, orn, phase.gripper,
+                    orientation_cone_rad=phase.orientation_cone_rad,
+                )
             if self._done:
                 return self._noop()
             if self._ik_failure_steps == 0:
@@ -1009,15 +1114,18 @@ class AssetCentroidScriptedPolicy(Policy):
             self._last_action = action
             self._ik_failure_steps = 0
         else:
-            action = self._command(phase.pos, phase.orn, phase.gripper)
+            action = self._command(
+                phase.pos, phase.orn, phase.gripper,
+                orientation_cone_rad=phase.orientation_cone_rad,
+            )
             if self._done:
                 return self._noop()
         actual_pos, actual_orn = self._actual_ee_pose(obs)
         guards = self._cfg.guards
-        reached = (
-            np.linalg.norm(np.asarray(actual_pos) - phase.pos) <= guards.pos_tol_m
-            and quat_angle(actual_orn, phase.orn) <= guards.orn_tol_rad
-        )
+        orn_limit = (phase.orientation_cone_rad if phase.orientation_cone_rad is not None
+                     else guards.orn_tol_rad)
+        reached = (np.linalg.norm(np.asarray(actual_pos) - phase.pos) <= guards.pos_tol_m
+                   and quat_angle(actual_orn, phase.orn) <= orn_limit)
         if reached:
             self._advance_phase(obs)
         else:
