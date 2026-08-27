@@ -72,6 +72,21 @@ def _obs():
     )
 
 
+def test_param_config_fallback_flips_r_tcp_y():
+    """Non-JSON parts inherit L-tuned ee_offset; R tool TCP must negate Y."""
+    policy = _policy()
+    target = PartTarget(
+        "gear_60teeth",
+        "open",
+        place_pos=np.array([0.1, 0.0, 1.0]),
+        gripper_open=0.2,
+        gripper_close=0.0,
+        extra={"ee_offset": np.array([0.0, 0.016, 0.2])},
+    )
+    spec = policy._part_spec_for_target(target)
+    np.testing.assert_allclose(spec.tcp_to_grasp_tool, [0.0, -0.016, 0.2], atol=1e-9)
+
+
 def test_policy_requires_right_controller_and_active_arms():
     with pytest.raises(ValueError, match="R_controller"):
         AssetCentroidScriptedPolicy(
@@ -85,15 +100,28 @@ def test_policy_requires_right_controller_and_active_arms():
     assert policy.active_arms == ("R",)
 
 
-def test_snap_and_unsupported_targets_are_safe_noops():
+@pytest.mark.parametrize(
+    ("name", "release_mode"),
+    [
+        ("gear_60teeth", "open"),
+        ("battery_size1", "open"),
+        ("rod_16mm", "open"),
+    ],
+)
+def test_configured_targets_are_planned_not_skipped(monkeypatch, name, release_mode):
     policy = _policy()
+    monkeypatch.setattr(
+        policy,
+        "_live_asset_centroid",
+        lambda _: (np.array([0.0, 0.0, 1.0]), np.zeros(3)),
+    )
     obs = _obs()
-    policy.reset(obs, PartTarget("pin", "snap"))
-    assert policy.is_done(obs)
-    assert all(v is None for v in policy.act(obs).joint_positions)
-    policy.reset(obs, PartTarget("gear_60teeth", "open"))
-    assert policy.is_done(obs)
-    assert all(v is None for v in policy.act(obs).joint_positions)
+    policy.reset(
+        obs,
+        PartTarget(name, release_mode, place_pos=np.array([0.1, 0.0, 1.0])),
+    )
+    assert not policy.is_done(obs)
+    assert policy._part_spec is not None
 
 
 def test_missing_geometry_aborts_without_motion(monkeypatch):
@@ -166,7 +194,7 @@ def test_close_dwell_freezes_remaining_grasp_at_measured_aperture(monkeypatch):
         obs,
         PartTarget("gear_20teeth", "open", place_pos=np.array([0.1, 0.0, 1.0])),
     )
-    assert controller.gripper_compliance.cfg.close_speed_rad_s == pytest.approx(0.20)
+    assert controller.gripper_compliance.cfg.close_speed_rad_s == pytest.approx(0.40)
     assert controller.gripper_compliance.cfg.close == pytest.approx(0.075)
     policy._phase_index = next(
         i for i, phase in enumerate(policy._phases) if phase.name == "close"

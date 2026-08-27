@@ -3,8 +3,8 @@
     "completion_reason": "max_parts",
     "current_part": null,
     "completed_parts": 1,
-    "total_task_steps": 1,
-    "sim_time_s": 0.31,
+    "total_task_steps": 1067,
+    "sim_time_s": 106.91,
     "max_steps": null,
     "max_sim_seconds": null,
     "max_parts": 1,
@@ -16,20 +16,20 @@
   "n_missing": 0,
   "per_part": [
     {
-      "name": "gear_60teeth",
+      "name": "rod_16mm",
       "release_mode": "open",
       "measure": "meshT",
-      "pos_err_m": 0.09142648365050565,
+      "pos_err_m": 0.012683685925882551,
       "tolerance_m": 0.01,
       "actual": [
-        -0.0942383976145949,
-        -0.08787350038432877,
-        1.033258398270876
+        0.0303664827368266,
+        0.1695581771470191,
+        1.044333527872765
       ],
       "target": [
-        -0.00851,
-        -0.056146127605838425,
-        1.0315798358785877
+        0.02976,
+        0.16982,
+        1.057
       ],
       "pass": false
     }

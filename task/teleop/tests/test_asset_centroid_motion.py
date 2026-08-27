@@ -50,7 +50,7 @@ def test_manual_gear_apertures_and_tcp_transform():
     assert GEAR_20TEETH_SPEC.gripper_close_rad == 0.075
     # Mesh-derived R tip midpoint in gripper_link: Y is negative (not +0.016).
     np.testing.assert_allclose(
-        GEAR_20TEETH_SPEC.tcp_to_grasp_tool, [0.0, -0.0144, 0.1972], atol=1e-9
+        GEAR_20TEETH_SPEC.tcp_to_grasp_tool, [0.0, -0.0150, 0.1972], atol=1e-9
     )
     ee_tool = ee_position_for_grasp_center(
         [1.0, 2.0, 3.0],
@@ -65,8 +65,8 @@ def test_manual_gear_apertures_and_tcp_transform():
         offset_frame="world",
     )
     # Top-down (0,1,0,0) = 180° about X: R*(x,y,z)=(x,-y,-z) → EE_tool = grasp - R*tcp.
-    np.testing.assert_allclose(ee_tool, [1.0, 1.9856, 3.1972], atol=1e-9)
-    np.testing.assert_allclose(ee_world, [1.0, 1.9856, 3.1972], atol=1e-9)
+    np.testing.assert_allclose(ee_tool, [1.0, 1.9850, 3.1972], atol=1e-9)
+    np.testing.assert_allclose(ee_world, [1.0, 1.9850, 3.1972], atol=1e-9)
 
 
 def test_quintic_has_zero_endpoint_velocity():
@@ -125,7 +125,7 @@ def test_json_config_exposes_speed_and_gear_grasp():
     cfg = load_asset_centroid_config()
     assert cfg.active_arm == "R"
     assert cfg.gripper.mode == "compliant"
-    assert cfg.gripper.close_speed_rad_s == 0.20
+    assert cfg.gripper.close_speed_rad_s == 0.40
     assert cfg.path_clearances.tcp_offset_frame == "tool"
     assert cfg.path_clearances.force_yaw_deg is None
     assert cfg.motion.max_linear_speed_m_s > 0.0
@@ -136,6 +136,6 @@ def test_json_config_exposes_speed_and_gear_grasp():
     assert gear.gripper_open_rad == 0.12
     assert gear.gripper_close_rad == 0.075
     np.testing.assert_allclose(
-        gear.tcp_to_grasp_tool, [0.0, -0.0144, 0.1972], atol=1e-9
+        gear.tcp_to_grasp_tool, [0.0, -0.0150, 0.1972], atol=1e-9
     )
     assert GEAR_20TEETH_SPEC.gripper_close_rad == gear.gripper_close_rad

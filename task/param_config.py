@@ -453,33 +453,14 @@ PART_CONFIG = {
     # part. gripper_close is the Design D close target (scripted + teleop
     # --part); leave at default 0 for full close when untuned.
     "rod_16mm": {
+        # Open pick/drop like gear_20teeth: grasp → carry → release at
+        # place_pos; graded by settled mesh vs grade_pos (no SnapAttacher).
         "place_pos":      np.array([ 0.02976,  0.16982, 1.057]),
+        "grade_pos":      np.array([ 0.02976,  0.16982, 1.057]),
         "ee_offset":      np.array([0.0, 0.016, 0.21]),
-        "release_mode":   "snap",
-        "snap": {
-            "movable_path":     "/World/parts/rod_16mm",
-            "debug":            False,  # log snap gate pos/rot err each ~30 ticks
-            "parent_body_path": "/World/task_board/task_board_color/root_001/_188_028",
-            "target_pos":       (0.02976, 0.16982, 1.057),    # = place_pos (mesh-frame)
-            "target_rot":       (0.7071, 0.7071, 0.0, 0.0),  # wxyz, from extract 'final' orn
-            "pos_tol_axes":     (0.0055, 0.0055, 0.005),        # WORLD frame
-            "rot_tol_deg":      -1,                        # skip rot gate (axis-symmetric)
-            "set_kinematic":    False,
-            "timeout_steps":    300,
-            # Joint anchor = same as proximity target (= place_pos), per
-            # user request. snap_attach converts mesh-frame target →
-            # body-frame anchor internally via mesh_local_in_body.
-            "connect_pos":      (0.02976, 0.16982, 1.045),
-            "connect_rot":      (0.7071, 0.7071, 0.0, 0.0),  # wxyz, from extract 'final' orn
-            # connect_rot omitted → defaults to target_rot above.
-            # Fine XY grid sweep at the place pose. dwell_steps=1 →
-            # 1 follower step per cell (fast scan).
-            "search": {
-                "n":          5,               # 5x5 = 25 cells
-                "extent_xy":  (0.002, 0.002),  # match pos_tol_axes[0:2]
-                "dwell_steps": 1,
-            },
-        },
+        "release_mode":   "open",
+        "init_height":    0.05,
+        "final_height":   0.1,
     },
     "battery_size1": {
         # pick_pos xy = actual mesh world pos from scene_init.usd (the part

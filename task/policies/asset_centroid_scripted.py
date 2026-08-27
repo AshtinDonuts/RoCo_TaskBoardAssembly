@@ -1,4 +1,4 @@
-"""Privileged asset-centroid scripted policy (V1: gear_20teeth only).
+"""Privileged asset-centroid scripted policy for configured task parts.
 
 V1 drives the **right** gripper (`env_info.R_controller`, `active_arms=("R",)`).
 The policy reads live USD geometry at reset and plans a smooth top-down path.
@@ -12,7 +12,8 @@ Gripper close/open mode is configured by ``gripper.mode`` in
   stall from driving all the way toward 0.
 - ``aperture``: numeric ``parts.*.gripper_*_rad`` for both open and close.
 
-Neither mode calls the Design-D geometric aperture resolver.
+Explicit centroid specs use their JSON apertures. Parts without an explicit
+spec use the Design-D aperture resolver from ``param_config``.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only outside Isaac
 from policy_api import EnvInfo, Observation, PartTarget, Policy  # noqa: E402
 from policies.asset_centroid_motion import (  # noqa: E402
     AssetCentroidConfig,
+    AssetMotionSpec,
     ee_position_for_grasp_center,
     load_asset_centroid_config,
     local_aabb_midpoint,
@@ -56,13 +58,6 @@ from policies.asset_centroid_motion import (  # noqa: E402
 )
 
 
-SUPPORTED_PART = "gear_20teeth"
-PICK_DROP_PARTS = frozenset(
-    {"gear_20teeth", "gear_60teeth", "battery_size1", "battery_size5"}
-)
-SNAP_PARTS = frozenset({"rod_16mm", "bolt_8mm", "usb_a", "hdmi", "pin"})
-
-
 @dataclass(frozen=True)
 class _Phase:
     name: str
@@ -74,7 +69,7 @@ class _Phase:
 
 
 class AssetCentroidScriptedPolicy(Policy):
-    """Smooth privileged-centroid pick/drop policy for gear_20teeth (right arm)."""
+    """Smooth privileged-centroid pick/drop policy for any configured part."""
 
     # Harness default is left-only; V1 must command the right gripper.
     active_arms = ("R",)
@@ -111,6 +106,7 @@ class AssetCentroidScriptedPolicy(Policy):
         self._aborted = False
         self._last_action = self._noop()
         self._part_spec = None
+        self._hover_place_q: Optional[np.ndarray] = None
         self._compliance_log_accum_s = 0.0
         self._configure_compliance()
         print(
@@ -146,23 +142,15 @@ class AssetCentroidScriptedPolicy(Policy):
         self._aborted = False
         self._last_action = self._noop()
         self._part_spec = None
+        self._hover_place_q = None
         self._compliance_log_accum_s = 0.0
 
-        if target.release_mode == "snap":
-            print(f"[asset_centroid] skip snap target {target.name!r}", flush=True)
-            return
-        if target.name != SUPPORTED_PART:
-            print(
-                f"[asset_centroid] skip unsupported V1 target {target.name!r}",
-                flush=True,
-            )
-            return
         if target.place_pos is None:
             self._abort(f"{target.name}: missing scripted place_pos")
             return
 
         try:
-            self._part_spec = self._cfg.part(target.name)
+            self._part_spec = self._part_spec_for_target(target)
             self._configure_compliance()
             # Fresh compliance state so approach→close can latch HOLDING.
             comp = self._compliance()
@@ -267,6 +255,69 @@ class AssetCentroidScriptedPolicy(Policy):
             # Baseline-style approach aperture + soft stall close (→ 0 rad).
             return open_rad, "close"
         return open_rad, float(self._part_spec.gripper_close_rad)
+
+    def _part_spec_for_target(self, target: PartTarget) -> AssetMotionSpec:
+        """Resolve a motion spec without duplicating every param-config entry.
+
+        Explicit JSON entries remain available for measured, part-specific
+        offsets. All other configured parts derive their tool offset and
+        aperture from the resolved target that the runner provides.
+        """
+        try:
+            return self._cfg.part(target.name)
+        except KeyError:
+            pass
+
+        extra = target.extra or {}
+        ee_offset = np.asarray(
+            extra.get("ee_offset", (0.0, 0.016, 0.196)), dtype=np.float64
+        ).reshape(-1)
+        if ee_offset.shape != (3,):
+            raise ValueError(f"{target.name}: ee_offset must be a length-3 vector")
+
+        # param_config ee_offset is left-arm / world-frame tuned (Y ≈ +0.016):
+        # baseline does EE = grasp + ee_offset. This policy uses tool-frame
+        # EE = grasp - R(q)·tcp with top-down q = 180° about X.
+        #
+        # Matching L world offset would keep tcp.y = +ee_offset.y, but the R
+        # fingertip in R_ee_link_gripper_link is at Y ≈ -0.0144 (mesh+URDF).
+        # Keeping +Y here reproduces the pre-fix gear_20 lateral miss on R.
+        ex, ey, ez = (float(ee_offset[0]), float(ee_offset[1]), float(ee_offset[2]))
+        if self._cfg.active_arm == "R":
+            tcp = (-ex, -abs(ey), ez)
+        else:
+            tcp = (-ex, ey, ez)
+        open_rad = float(target.gripper_open)
+        close_rad = float(target.gripper_close)
+        try:
+            from param_config import part_grasp_close_rad, part_grasp_open_rad
+
+            open_rad = float(part_grasp_open_rad(target.name))
+            close_rad = float(part_grasp_close_rad(target.name))
+        except Exception as exc:
+            # Custom parts can omit optional AABB geometry and still use
+            # their resolved param_config aperture values.
+            print(
+                f"[asset_centroid] {target.name}: using param_config aperture "
+                f"fallback ({exc})",
+                flush=True,
+            )
+        if open_rad <= 0.0:
+            raise ValueError(f"{target.name}: no positive gripper_open configured")
+        if close_rad < 0.0:
+            raise ValueError(f"{target.name}: gripper_close must be non-negative")
+        print(
+            f"[asset_centroid] {target.name}: no explicit centroid spec; "
+            f"ee_offset={np.round(ee_offset, 5).tolist()} → "
+            f"tcp_to_grasp_tool={list(tcp)} (arm={self._cfg.active_arm})",
+            flush=True,
+        )
+        return AssetMotionSpec(
+            centroid_grasp_offset_asset=(0.0, 0.0, 0.0),
+            tcp_to_grasp_tool=tuple(float(v) for v in tcp),
+            gripper_open_rad=open_rad,
+            gripper_close_rad=close_rad,
+        )
 
     def _compliance(self):
         return getattr(self._controller, "gripper_compliance", None)
@@ -446,7 +497,9 @@ class AssetCentroidScriptedPolicy(Policy):
         centroid_gf = root_world.Transform(Gf.Vec3d(*centroid_local.tolist()))
         centroid_world = np.asarray(tuple(centroid_gf), dtype=np.float64)
 
-        offset = self._cfg.part(name).centroid_grasp_offset_asset
+        if self._part_spec is None:
+            raise RuntimeError(f"{name}: part motion spec was not resolved")
+        offset = self._part_spec.centroid_grasp_offset_asset
         offset_gf = root_world.TransformDir(Gf.Vec3d(*offset))
         offset_world = np.asarray(tuple(offset_gf), dtype=np.float64)
         return centroid_world, offset_world
@@ -548,6 +601,7 @@ class AssetCentroidScriptedPolicy(Policy):
                 seed = lift_seed.copy()
                 place_score = place_rank * 1e-6
                 place_ok = True
+                hover_place_q = None
                 for key in place_keys:
                     q, ok = self._controller.solve_q(
                         pair_poses[key], place_orn, seed=seed
@@ -557,6 +611,8 @@ class AssetCentroidScriptedPolicy(Policy):
                         place_ok = False
                         break
                     q = np.asarray(q, dtype=np.float64).reshape(-1)
+                    if key == "hover_place":
+                        hover_place_q = q.copy()
                     place_score += self._joint_step_cost(seed, q)
                     seed = q
                 if not place_ok:
@@ -568,6 +624,7 @@ class AssetCentroidScriptedPolicy(Policy):
                         pick_orn.copy(),
                         place_orn.copy(),
                         pair_poses,
+                        hover_place_q,
                     )
         if best is None and clear.force_yaw_deg is not None:
             fallback = top_down_yaw_candidates(clear.yaw_step_deg)
@@ -602,6 +659,7 @@ class AssetCentroidScriptedPolicy(Policy):
                     seed = lift_seed.copy()
                     place_score = place_rank * 1e-6
                     place_ok = True
+                    hover_place_q = None
                     for key in place_keys:
                         q, ok = self._controller.solve_q(
                             pair_poses[key], place_orn, seed=seed
@@ -611,6 +669,8 @@ class AssetCentroidScriptedPolicy(Policy):
                             place_ok = False
                             break
                         q = np.asarray(q, dtype=np.float64).reshape(-1)
+                        if key == "hover_place":
+                            hover_place_q = q.copy()
                         place_score += self._joint_step_cost(seed, q)
                         seed = q
                     if not place_ok:
@@ -622,6 +682,7 @@ class AssetCentroidScriptedPolicy(Policy):
                             pick_orn.copy(),
                             place_orn.copy(),
                             pair_poses,
+                            hover_place_q,
                         )
         if best is None:
             preferred_poses = self._pose_set(
@@ -638,6 +699,7 @@ class AssetCentroidScriptedPolicy(Policy):
         pick_yaw = self._nominal_yaw_degrees(best[1])
         place_yaw = self._nominal_yaw_degrees(best[2])
         poses = best[3]
+        self._hover_place_q = best[4].copy()
         xy_err_pick = float(
             np.linalg.norm(poses["hover_pick"][:2] - grasp_center[:2])
         )
@@ -695,13 +757,10 @@ class AssetCentroidScriptedPolicy(Policy):
             q0 = np.asarray(
                 self._controller.current_cspace_q(), dtype=np.float64
             )
-            q1, ok = self._controller.solve_q(phase.pos, phase.orn, seed=q0)
-            if not ok or q1 is None:
-                self._abort(
-                    "could not solve joint-space transfer endpoint at hover_place"
-                )
+            if self._hover_place_q is None:
+                self._abort("missing preflight joint target for hover_place")
                 return
-            q1 = np.asarray(q1, dtype=np.float64).reshape(-1)
+            q1 = self._hover_place_q.copy()
             self._segment_q = sample_joint_segment(
                 q0,
                 q1,
@@ -806,9 +865,20 @@ class AssetCentroidScriptedPolicy(Policy):
                 self._segment_index += 1
             return action
 
-        action = self._command(phase.pos, phase.orn, phase.gripper)
-        if self._done:
-            return self._noop()
+        if self._segment_q:
+            # Keep holding the exact endpoint selected for the joint-space
+            # transfer. Re-running pose IK here can jump to a different
+            # revolute wrap branch (observed on gear_60 hover_place), causing
+            # a false 100-step IK abort after the transfer already succeeded.
+            action = self._controller.forward_raw_q(
+                self._segment_q[-1], phase.gripper
+            )
+            self._last_action = action
+            self._ik_failure_steps = 0
+        else:
+            action = self._command(phase.pos, phase.orn, phase.gripper)
+            if self._done:
+                return self._noop()
         actual_pos, actual_orn = self._actual_ee_pose(obs)
         guards = self._cfg.guards
         reached = (
