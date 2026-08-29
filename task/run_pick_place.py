@@ -67,7 +67,7 @@ from isaacsim.core.utils.prims import is_prim_path_valid
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.utils.types import ArticulationAction
 from policy_api import EnvInfo, Observation, PartTarget
-from eval_randomization import XYRandomization
+from eval_randomization import XYRandomization, resolve_policy_config
 
 # Physics material prim authored in the scene USD; bound to every spawned
 # DynamicPart so newly imported parts share the same friction/restitution
@@ -730,6 +730,14 @@ def _parse_args():
         help="Enable fairness XY randomization with this deterministic trial "
              "seed. Omit for the nominal scene.",
     )
+    parser.add_argument(
+        "--blind-to-xy-randomization",
+        action="store_true",
+        help="With --random-seed: still randomize board/part poses and keep "
+             "snap/grade on the shifted world, but hand the policy nominal "
+             "(unshifted) PartTarget waypoints. Useful to demonstrate that "
+             "open-loop experts need privileged XY offsets.",
+    )
     # SimulationApp consumes argv too; tolerate unknown args so the runner
     # can be launched as ${ISAAC_SIM}/python.sh run_pick_place.py --policy ...
     args = parser.parse_known_args()[0]
@@ -785,6 +793,16 @@ def main():
                 f"[setup] {name} offset=({offset[0]:+.5f}, "
                 f"{offset[1]:+.5f})"
             )
+        if args.blind_to_xy_randomization:
+            print(
+                "[setup] blind-to-xy-randomization: policy PartTarget stays "
+                "nominal; snap/grade follow the shifted scene"
+            )
+    elif args.blind_to_xy_randomization:
+        print(
+            "[setup] WARNING: --blind-to-xy-randomization has no effect "
+            "without --random-seed"
+        )
     video_recorder = FfmpegVideoRecorder(
         args.record_video,
         fps=args.record_video_fps,
@@ -828,10 +846,20 @@ def main():
     )
 
     def _runtime_config(name):
+        """Config for snap/grade/scoring — always matches the true scene."""
         cfg = pc.get_part_config(name)
         if randomized_trial is None:
             return cfg
         return randomized_trial.shifted_config(name, cfg)
+
+    def _policy_config(name):
+        """Config for PartTarget waypoints handed to the policy."""
+        return resolve_policy_config(
+            name,
+            pc.get_part_config(name),
+            trial=randomized_trial,
+            blind=bool(args.blind_to_xy_randomization),
+        )
 
     L_controller = my_controller["L"]
     R_controller = my_controller["R"]
@@ -982,7 +1010,7 @@ def main():
         )
 
     def _build_part_target(name):
-        cfg = _runtime_config(name)
+        cfg = _policy_config(name)
         snap = cfg.get("snap") or {}
         def _arr(v):
             return None if v is None else np.asarray(v, dtype=np.float64).copy()
@@ -1025,6 +1053,9 @@ def main():
         }
         if randomized_trial is not None:
             metadata["xy_randomization"] = randomized_trial.as_dict()
+            metadata["blind_to_xy_randomization"] = bool(
+                args.blind_to_xy_randomization
+            )
         _grade_task(stage, snap_fired_parts,
                     results_json_path=args.results_json,
                     metadata=metadata,

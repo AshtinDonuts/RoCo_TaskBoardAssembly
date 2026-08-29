@@ -4,9 +4,15 @@ Wraps the original `EEPathFollower`-driven pick-and-place: per part, build
 a 9-phase EE-pose path from `PART_CONFIG`, drive Lula IK to follow it,
 gate the snap_wait waypoint on `obs.snap_fired`.
 
-Output should be byte-identical to the pre-refactor `run_pick_place.py` when
-the harness selects this policy. Participants should not modify this file;
-copy `template.py` instead.
+This is the normal (unthrottled) scripted baseline. Participants should not
+modify this file; copy `template.py` instead.
+
+Privileged BC expert under fairness XY randomization: when the harness runs
+with `--random-seed`, `PartTarget.pick_pos` / `place_pos` (and `target.extra`)
+already include the trial's XY offsets. This policy must consume those fields
+and must not re-read unshifted `pc.get_part_config` pick/place when a
+`PartTarget` is supplied. Use `--blind-to-xy-randomization` on the harness to
+hand nominal waypoints instead (open-loop miss demo).
 """
 from __future__ import annotations
 
@@ -51,9 +57,9 @@ def make_l_path_for_part(part_name, target=None, snap_advance_when=None,
     `gripper_open` value during the return so it's at the right opening
     by the time the new pick begins.
     """
-    # The harness supplies a runtime PartTarget whose positions may include
-    # evaluation-time XY offsets. Fall back to the nominal config for callers
-    # using this helper directly outside the harness.
+    # Privileged path: harness PartTarget may already include fairness XY
+    # offsets in pick_pos / place_pos / extra. Prefer those over unshifted
+    # pc.get_part_config whenever target is provided.
     cfg = (dict(target.extra) if target is not None and target.extra
            else pc.get_part_config(part_name))
     ee_off = np.asarray(cfg["ee_offset"], dtype=np.float64)
@@ -141,7 +147,6 @@ class BaselinePolicy(Policy):
             L_controller,
             position_tolerance=getattr(pc, "POS_TOL", 0.005),
             orientation_tolerance=getattr(pc, "ORN_TOL", 0.05),
-            default_timeout_steps=getattr(pc, "WAYPOINT_TIMEOUT_STEPS", None),
         )
         self._is_first_part = True
         # _last_obs is read by the snap_advance_when closure, which is

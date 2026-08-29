@@ -626,6 +626,14 @@ SETTLE_DESCEND_PLACE = 15
 # first IK call. 10 ≈ 1 s at the rig's default physics rate.
 RETURN_HOME_SETTLE_STEPS = 10
 
+# Maximum rate of change for the scripted baseline's seven L-arm joint
+# position targets. The policy applies this after generating its ordinary
+# EEPathFollower action, so the existing waypoints and IK solutions are
+# unchanged. At 200 Hz, 1 rad/s permits at most 0.005 rad per action step.
+# Gripper commands are deliberately not rate-limited: their waypoint gates
+# remain tied to the actual EE pose and snap state.
+BASELINE_MAX_ARM_JOINT_SPEED_RAD_S = 1.0
+
 # Joint-space-interpolated transit between lift_pick and hover_place.
 # Inserts this many waypoints lerped in c-space (see PICK_PLACE_PHASES_
 # CHEATSHEET.md for why this bypasses IK at the midpoints). 0 disables.

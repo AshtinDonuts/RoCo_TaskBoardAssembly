@@ -7,6 +7,7 @@ from task.eval_randomization import (
     SUPPORT_COUPLED_PARTS,
     XY_LIMIT_M,
     XYRandomization,
+    resolve_policy_config,
 )
 
 
@@ -62,6 +63,32 @@ class XYRandomizationTests(unittest.TestCase):
         np.testing.assert_array_equal(config["pick_pos"], original["pick_pos"])
         np.testing.assert_array_equal(config["place_pos"], original["place_pos"])
         self.assertEqual(config["snap"], original["snap"])
+
+    def test_resolve_policy_config_privileged_vs_blind(self):
+        config = {
+            "pick_pos": np.array([1.0, 2.0, 3.0]),
+            "place_pos": np.array([4.0, 5.0, 6.0]),
+            "grade_pos": np.array([7.0, 8.0, 9.0]),
+        }
+        trial = XYRandomization(
+            seed=0,
+            board_offset=np.array([0.1, 0.2, 0.0]),
+            part_offsets={"usb_a": np.array([0.3, 0.4, 0.0])},
+        )
+        privileged = resolve_policy_config(
+            "usb_a", config, trial=trial, blind=False
+        )
+        blind = resolve_policy_config(
+            "usb_a", config, trial=trial, blind=True
+        )
+        scene = trial.shifted_config("usb_a", config)
+
+        np.testing.assert_array_equal(privileged["pick_pos"], scene["pick_pos"])
+        np.testing.assert_array_equal(privileged["place_pos"], scene["place_pos"])
+        np.testing.assert_array_equal(blind["pick_pos"], config["pick_pos"])
+        np.testing.assert_array_equal(blind["place_pos"], config["place_pos"])
+        self.assertFalse(np.array_equal(blind["pick_pos"], scene["pick_pos"]))
+        self.assertFalse(np.array_equal(blind["place_pos"], scene["place_pos"]))
 
 
 if __name__ == "__main__":

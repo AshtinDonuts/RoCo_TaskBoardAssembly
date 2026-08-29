@@ -99,3 +99,15 @@ class XYRandomization:
                 for name, offset in sorted(self.part_offsets.items())
             },
         }
+
+
+def resolve_policy_config(part_name, config, trial=None, blind=False):
+    """Return the part config that should be handed to the policy as PartTarget.
+
+    Scene/snap/grade always use ``trial.shifted_config`` when a trial exists.
+    Policies either receive that same shifted config (privileged BC expert)
+    or the nominal ``config`` when ``blind`` is True.
+    """
+    if trial is None or blind:
+        return dict(config)
+    return trial.shifted_config(part_name, config)
