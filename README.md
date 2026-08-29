@@ -312,6 +312,7 @@ uv run python task/run_pick_place.py                                  # baseline
 uv run python task/run_pick_place.py --policy policies.my_team.MyPolicy
 uv run python task/run_pick_place.py --results-json out/results.json  # dump per-part pass/fail
 uv run python task/run_pick_place.py --record-video artifacts/head.mp4 # record a rollout
+uv run python task/run_pick_place.py --random-seed 0                   # fairness XY trial
 ```
 
 If you instead have a standalone Omniverse-launcher Isaac Sim, its
@@ -334,6 +335,8 @@ CLI flags:
 - `--max-steps <n>`, `--max-sim-seconds <seconds>`, `--max-parts <n>` —
   bounded eval/smoke-test exits. The runner still writes results JSON
   and closes any video recorder before exiting.
+- `--random-seed <n>` — enables deterministic fairness XY randomization
+  (uniform ±1 cm); omit it for the nominal scene.
 
 Edit `task/param_config.py::part_order` to run a subset for debugging.
 See `task/README.md` for the per-runner gotchas (scene drive targets,

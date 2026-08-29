@@ -244,6 +244,68 @@ def _verify_and_autofix_scene_part_poses():
               f"check scene vs part_init_poses.json.")
 
 
+def _translate_prim_xy(stage, prim_path: str, offset, name: str) -> bool:
+    """Translate a prim's outer transform in XY while preserving Z/pose."""
+    prim = stage.GetPrimAtPath(prim_path) if stage is not None else None
+    if not prim or not prim.IsValid():
+        print(f"[setup] {name}: prim {prim_path} not in stage; no XY shift")
+        return False
+    delta = np.asarray(offset, dtype=np.float64).reshape(-1)
+    if delta.size < 2:
+        raise ValueError(f"{name} offset must contain X/Y, got {offset!r}")
+
+    xform = UsdGeom.Xformable(prim)
+    translate_op = None
+    transform_op = None
+    for op in xform.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate and translate_op is None:
+            translate_op = op
+        elif op.GetOpType() == UsdGeom.XformOp.TypeTransform and transform_op is None:
+            transform_op = op
+
+    if translate_op is not None:
+        cur = translate_op.Get()
+        if cur is None:
+            cur = Gf.Vec3d(0.0, 0.0, 0.0)
+        translate_op.Set(Gf.Vec3d(
+            float(cur[0]) + float(delta[0]),
+            float(cur[1]) + float(delta[1]),
+            float(cur[2]),
+        ))
+        return True
+    if transform_op is not None:
+        matrix = transform_op.Get()
+        if matrix is not None:
+            cur = matrix.ExtractTranslation()
+            shifted = Gf.Matrix4d(matrix)
+            shifted.SetTranslateOnly(Gf.Vec3d(
+                float(cur[0]) + float(delta[0]),
+                float(cur[1]) + float(delta[1]),
+                float(cur[2]),
+            ))
+            transform_op.Set(shifted)
+            return True
+    print(f"[setup] {name}: no translate/transform op on {prim_path}; no XY shift")
+    return False
+
+
+def apply_xy_randomization(board_offset=None, part_offsets=None):
+    """Apply trial XY offsets before World snapshots are created."""
+    if board_offset is None and not part_offsets:
+        return
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return
+    if board_offset is not None:
+        _translate_prim_xy(
+            stage, "/World/task_board", board_offset, "task board"
+        )
+    for name, offset in (part_offsets or {}).items():
+        _translate_prim_xy(
+            stage, f"/World/parts/{name}", offset, f"part {name}"
+        )
+
+
 # Snapshot of every scene-resident part's xformOp values, captured ONCE
 # before the first physics step. Used by restore_scene_part_xforms() to
 # undo the moved-by-PhysX poses on each iteration restart — without this,
@@ -298,7 +360,7 @@ def restore_scene_part_xforms():
         n_restored += 1
 
 
-def open_scene_and_world():
+def open_scene_and_world(board_offset=None, part_offsets=None):
     """Open scene_base.usd into a fresh stage and create the World."""
     scene_path = _resolve_scene_path()
     if not os.path.isfile(scene_path):
@@ -316,6 +378,9 @@ def open_scene_and_world():
     # different from the JSON spawn pose and skipped. Everything else
     # gets a warning on mismatch but is not modified.
     _verify_and_autofix_scene_part_poses()
+    # Apply evaluation-time offsets after nominal pose verification but before
+    # any World/task wrapper snapshots the initial transforms.
+    apply_xy_randomization(board_offset, part_offsets)
     # Snapshot scene-resident part xforms NOW, before physics starts.
     # restore_scene_part_xforms() uses this snapshot on each stop+play
     # so parts don't carry over their last-known PhysX-overwritten pose.
@@ -541,8 +606,13 @@ def setup_pick_place_sim(
     enable_camera_viewports: bool = True,
     enable_camera_output: bool = True,
     base_translation_offset=None,
+    board_offset=None,
+    part_offsets=None,
 ):
     """Build the 2-part bimanual pick-and-place world from the pre-built scene.
+
+    ``board_offset`` and ``part_offsets`` are optional trial-level XY shifts;
+    when provided they are applied before World snapshots the initial poses.
 
     Returns
     -------
@@ -556,7 +626,9 @@ def setup_pick_place_sim(
     task_params : dict from PickPlaceTask_scene_bimanual.get_params()
     reset_needed : bool, always False on first call.
     """
-    my_world = open_scene_and_world()
+    my_world = open_scene_and_world(
+        board_offset=board_offset, part_offsets=part_offsets
+    )
 
     my_task = PickPlaceTask_scene_bimanual(
         name=TASK_NAME,

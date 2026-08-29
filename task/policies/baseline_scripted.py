@@ -30,7 +30,7 @@ from controllers.ee_pose_controller import (  # noqa: E402
 from policy_api import EnvInfo, Observation, PartTarget, Policy  # noqa: E402
 
 
-def make_l_path_for_part(part_name, snap_advance_when=None,
+def make_l_path_for_part(part_name, target=None, snap_advance_when=None,
                          snap_timeout_steps=None, return_home_q=None):
     """Build the 9-phase L path for one part using its PART_CONFIG entry.
 
@@ -51,16 +51,25 @@ def make_l_path_for_part(part_name, snap_advance_when=None,
     `gripper_open` value during the return so it's at the right opening
     by the time the new pick begins.
     """
-    cfg = pc.get_part_config(part_name)
+    # The harness supplies a runtime PartTarget whose positions may include
+    # evaluation-time XY offsets. Fall back to the nominal config for callers
+    # using this helper directly outside the harness.
+    cfg = (dict(target.extra) if target is not None and target.extra
+           else pc.get_part_config(part_name))
     ee_off = np.asarray(cfg["ee_offset"], dtype=np.float64)
-    orn = np.asarray(cfg["ee_orientation"], dtype=np.float64)
+    orn_value = (target.ee_orientation if target is not None
+                 and target.ee_orientation is not None
+                 else cfg.get("ee_orientation"))
+    orn = np.asarray(orn_value, dtype=np.float64)
+    pick_pos = (target.pick_pos if target is not None else cfg.get("pick_pos"))
+    place_pos = (target.place_pos if target is not None else cfg.get("place_pos"))
     pick_pos_ee = (
-        None if cfg.get("pick_pos") is None
-        else np.asarray(cfg["pick_pos"], dtype=np.float64) + ee_off
+        None if pick_pos is None
+        else np.asarray(pick_pos, dtype=np.float64) + ee_off
     )
     place_pos_ee = (
-        None if cfg.get("place_pos") is None
-        else np.asarray(cfg["place_pos"], dtype=np.float64) + ee_off
+        None if place_pos is None
+        else np.asarray(place_pos, dtype=np.float64) + ee_off
     )
     init_height = (cfg.get("init_height")
                    if cfg.get("init_height") is not None
@@ -89,7 +98,8 @@ def make_l_path_for_part(part_name, snap_advance_when=None,
         descend_place_steps=pc.DESCEND_PLACE_STEPS,
         gripper_open_value=cfg.get("gripper_open"),
         gripper_close_value=cfg.get("gripper_close"),
-        release_mode=cfg.get("release_mode", "open"),
+        release_mode=(target.release_mode if target is not None
+                      else cfg.get("release_mode", "open")),
         snap_advance_when=snap_advance_when,
         snap_timeout_steps=snap_timeout_steps,
         snap_search_n=int(((cfg.get("snap") or {}).get("search") or {})
@@ -156,6 +166,7 @@ class BaselinePolicy(Policy):
 
         path = make_l_path_for_part(
             target.name,
+            target=target,
             snap_advance_when=snap_advance_when,
             snap_timeout_steps=snap_timeout_steps,
             return_home_q=return_home_q,

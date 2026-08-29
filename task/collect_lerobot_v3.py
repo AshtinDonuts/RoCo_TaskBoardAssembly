@@ -456,7 +456,10 @@ def main():
     record_sub = None
     recorded_parts = []
     part_completion_reasons = []
-    per_part_timeout_steps = int(getattr(rp.pc, "PER_PART_TIMEOUT_STEPS", 3000))
+    per_part_timeout_steps = int(
+        getattr(policy, "PER_PART_TIMEOUT_STEPS",
+                getattr(rp.pc, "PER_PART_TIMEOUT_STEPS", 3000))
+    )
     warmup_steps = int(getattr(rp.pc, "WARMUP_STEPS", 0))
     effective_max_sim_steps = (
         None if args.max_sim_steps == 0 else int(args.max_sim_steps)

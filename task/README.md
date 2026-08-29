@@ -11,7 +11,7 @@ hands each part to the participant's `Policy`, and grades the result
 |------|------|
 | `run_pick_place.py`       | Eval harness. Sets up sim, spawns missing parts, walks `part_order`, instantiates the selected `Policy`, drives it through each part, then grades. Has the stuck detector (`_diagnose_stuck`) and the `_grade_task` summary. |
 | `policy_api.py`           | Participant-facing contract: `Policy` ABC + `EnvInfo` / `PartTarget` / `Observation` dataclasses. |
-| `policies/baseline_scripted.py` | Reference scripted policy (`BaselinePolicy`). Original EEPathFollower-driven pick-and-place — byte-identical to the pre-Policy-API runner output. |
+| `policies/baseline_scripted.py` | Reference scripted policy (`BaselinePolicy`). EEPathFollower-driven pick-and-place using the jerk-limited RmpFlowSmoothed backend. |
 | `policies/diffusion_lerobot.py`, `dp_server.py` | LeRobot Diffusion Policy sidecar example. The adapter runs in Isaac; the server runs in the model environment. |
 | `policies/pi05_lerobot.py`, `pi05_server.py` | LeRobot pi0.5 sidecar adapter and model-env inference server. |
 | `policies/template.py`    | Participant stub. Copy to `policies/<your_team>.py`, fill in `reset` / `act` / `is_done`, run with `--policy policies.<your_team>.MyPolicy`. |
@@ -34,10 +34,15 @@ uv run python task/run_pick_place.py                                  # baseline
 uv run python task/run_pick_place.py --policy policies.my_team.MyPolicy
 uv run python task/run_pick_place.py --results-json out/results.json  # dump per-part pass/fail
 uv run python task/run_pick_place.py --record-video artifacts/head.mp4 # record an MP4 rollout
+uv run python task/run_pick_place.py --random-seed 0              # fairness XY trial
 ```
 
 A standalone Omniverse-launcher Isaac Sim still works:
 `${ISAAC_SIM}/python.sh task/run_pick_place.py`.
+
+Passing `--random-seed N` enables the fairness evaluation-time XY
+randomization (uniform ±1 cm, deterministic for that trial). Omitting the
+option keeps the nominal scene and targets unchanged.
 
 `--policy` defaults to `policies.baseline_scripted.BaselinePolicy`.
 `--results-json` overrides `pc.RESULTS_JSON_PATH`.

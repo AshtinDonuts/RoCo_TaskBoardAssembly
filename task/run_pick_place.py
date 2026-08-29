@@ -67,6 +67,7 @@ from isaacsim.core.utils.prims import is_prim_path_valid
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.utils.types import ArticulationAction
 from policy_api import EnvInfo, Observation, PartTarget
+from eval_randomization import XYRandomization
 
 # Physics material prim authored in the scene USD; bound to every spawned
 # DynamicPart so newly imported parts share the same friction/restitution
@@ -312,7 +313,7 @@ def _apply_mesh_colliders(stage, prim_path, approximation):
     return n
 
 
-def import_missing_parts():
+def import_missing_parts(part_offsets=None):
     """Populate the stage with every part recorded in part_init_poses.json
     that isn't already present, then handle any remaining pc.part_order
     parts not covered by the JSON.
@@ -323,7 +324,9 @@ def import_missing_parts():
          for orientation (fallback for pc.part_order parts not in
          part_init_poses.json).
 
-    Parts already present in the loaded scene USD are left alone.
+    Parts already present in the loaded scene USD are left alone here; their
+    transforms are shifted before World creation. Missing parts receive the
+    supplied XY offset exactly once at spawn time.
     """
     identity_q = np.array([1.0, 0.0, 0.0, 0.0])
     stage = omni.usd.get_context().get_stage()
@@ -337,6 +340,8 @@ def import_missing_parts():
     else:
         print(f"[setup] WARNING: {_PHYSICS_MATERIAL_PATH} not in scene — "
               f"spawned parts will get DynamicPart's default material.")
+
+    offsets = part_offsets or {}
 
     def _spawn(name, pos, orn, source):
         prim_path = f"/World/parts/{name}"
@@ -358,10 +363,15 @@ def import_missing_parts():
             "collision_approximation", _DEFAULT_COLLISION_APPROXIMATION
         )
         _apply_mesh_colliders(stage, prim_path, approximation)
+        spawn_pos = np.asarray(pos, dtype=np.float64).copy()
+        spawn_pos[:2] += np.asarray(
+            offsets.get(name, np.zeros(3, dtype=np.float64)),
+            dtype=np.float64,
+        )[:2]
         DynamicPart(
             prim_path=prim_path,
             name=name,
-            position=np.asarray(pos, dtype=np.float64),
+            position=spawn_pos,
             orientation=np.asarray(orn, dtype=np.float64),
             physics_material=shared_phys_mat,
         )
@@ -490,7 +500,8 @@ def _override_scene_part_xy(stage, prim_path, target_xy, name):
           f"{body_prim.GetPath()} (found: {op_names}) — can't override XY.")
 
 
-def _grade_task(stage, snap_fired_parts, results_json_path=None, metadata=None):
+def _grade_task(stage, snap_fired_parts, results_json_path=None, metadata=None,
+                config_resolver=None):
     """End-of-iteration summary: pass/fail for every name in pc.part_order.
 
     Grading rule per part:
@@ -514,7 +525,8 @@ def _grade_task(stage, snap_fired_parts, results_json_path=None, metadata=None):
     for part in pc.part_order:
         if isinstance(part, str) and part.startswith("<"):
             continue
-        cfg = pc.get_part_config(part)
+        cfg = (config_resolver(part) if config_resolver is not None
+               else pc.get_part_config(part))
         release_mode = cfg.get("release_mode", "open")
         if release_mode == "snap":
             fired = part in snap_fired_parts
@@ -657,7 +669,7 @@ def _grade_task(stage, snap_fired_parts, results_json_path=None, metadata=None):
 
 
 def _parse_args():
-    """CLI: --policy and --results-json overrides."""
+    """CLI: policy/results overrides and optional eval randomization seed."""
     parser = argparse.ArgumentParser(
         description="vega_1u assembly challenge eval harness."
     )
@@ -711,6 +723,13 @@ def _parse_args():
         help="Stop after this many parts have ended by policy done, snap, "
              "or timeout.",
     )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=None,
+        help="Enable fairness XY randomization with this deterministic trial "
+             "seed. Omit for the nominal scene.",
+    )
     # SimulationApp consumes argv too; tolerate unknown args so the runner
     # can be launched as ${ISAAC_SIM}/python.sh run_pick_place.py --policy ...
     args = parser.parse_known_args()[0]
@@ -747,6 +766,25 @@ def _load_policy_class(dotted_path: str):
 
 def main():
     args = _parse_args()
+    randomized_trial = None
+    if args.random_seed is not None:
+        evaluated_parts = tuple(
+            name for name in pc.part_order
+            if isinstance(name, str) and not name.startswith("<")
+        )
+        randomized_trial = XYRandomization.sample(
+            args.random_seed, evaluated_parts
+        )
+        print(
+            f"[setup] fairness XY randomization seed={randomized_trial.seed} "
+            f"board_offset=({randomized_trial.board_offset[0]:+.5f}, "
+            f"{randomized_trial.board_offset[1]:+.5f})"
+        )
+        for name, offset in sorted(randomized_trial.part_offsets.items()):
+            print(
+                f"[setup] {name} offset=({offset[0]:+.5f}, "
+                f"{offset[1]:+.5f})"
+            )
     video_recorder = FfmpegVideoRecorder(
         args.record_video,
         fps=args.record_video_fps,
@@ -778,10 +816,22 @@ def main():
         joint_closed_position=np.array([pc.PART_DEFAULTS["gripper_close"]]),
         enable_camera_viewports=pc.enable_camera_viewports,
         enable_camera_output=camera_output_enabled,
+        board_offset=(None if randomized_trial is None
+                      else randomized_trial.board_offset),
+        part_offsets=(None if randomized_trial is None
+                      else randomized_trial.part_offsets),
     )
 
     # Spawn any pc.part_order entries that aren't already in the loaded scene.
-    import_missing_parts()
+    import_missing_parts(
+        None if randomized_trial is None else randomized_trial.part_offsets
+    )
+
+    def _runtime_config(name):
+        cfg = pc.get_part_config(name)
+        if randomized_trial is None:
+            return cfg
+        return randomized_trial.shifted_config(name, cfg)
 
     L_controller = my_controller["L"]
     R_controller = my_controller["R"]
@@ -932,7 +982,7 @@ def main():
         )
 
     def _build_part_target(name):
-        cfg = pc.get_part_config(name)
+        cfg = _runtime_config(name)
         snap = cfg.get("snap") or {}
         def _arr(v):
             return None if v is None else np.asarray(v, dtype=np.float64).copy()
@@ -973,9 +1023,12 @@ def main():
             "max_parts": args.max_parts,
             "snap_fired_parts": sorted(snap_fired_parts),
         }
+        if randomized_trial is not None:
+            metadata["xy_randomization"] = randomized_trial.as_dict()
         _grade_task(stage, snap_fired_parts,
                     results_json_path=args.results_json,
-                    metadata=metadata)
+                    metadata=metadata,
+                    config_resolver=_runtime_config)
         save_path = getattr(pc, "SAVE_FINAL_STAGE_PATH", None)
         if save_path:
             _save_stage_snapshot(save_path)
@@ -1010,7 +1063,7 @@ def main():
             _finalize_iteration("complete")
             return None
 
-        cfg = pc.get_part_config(current_part)
+        cfg = _runtime_config(current_part)
         release_mode = cfg.get("release_mode", "open")
         snap_cfg = cfg.get("snap")
         if release_mode == "snap":
@@ -1153,7 +1206,7 @@ def main():
                     and current_snap_attacher.attached):
                 snap_fired_parts.add(current_part)
 
-            cfg = pc.get_part_config(current_part)
+            cfg = _runtime_config(current_part)
             is_snap_done = (cfg.get("release_mode") == "snap"
                             and current_snap_attacher is not None
                             and current_snap_attacher.attached)
