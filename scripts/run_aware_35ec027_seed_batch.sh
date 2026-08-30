@@ -10,6 +10,7 @@ seed_count=30
 output_dir=""
 sample_fps=10
 repo_id="taskboard/aware_35ec027_full_assembly"
+pruning_strategy="home"
 force=0
 
 while (($#)); do
@@ -19,6 +20,7 @@ while (($#)); do
     --output-dir) output_dir="$2"; shift 2 ;;
     --fps) sample_fps="$2"; shift 2 ;;
     --repo-id) repo_id="$2"; shift 2 ;;
+    --pruning-strategy) pruning_strategy="$2"; shift 2 ;;
     --force) force=1; shift ;;
     -h|--help)
       cat <<'EOF'
@@ -31,12 +33,20 @@ Usage: scripts/run_aware_35ec027_seed_batch.sh [options]
   --output-dir DIR Output root; defaults to an artifacts/lerobot seed range
   --fps N          LeRobot recording FPS (default: 10)
   --repo-id ID     Local LeRobot repository ID
+  --pruning-strategy MODE
+                     Derived prefix pruning: none, home, velocity, or waypoint
+                     (default: home)
   --force          Delete and rebuild the entire output root
 EOF
       exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+case "${pruning_strategy}" in
+  none|home|velocity|waypoint) ;;
+  *) echo "pruning strategy must be one of: none, home, velocity, waypoint" >&2; exit 2 ;;
+esac
 
 if ! [[ "${start_seed}" =~ ^[0-9]+$ && "${seed_count}" =~ ^[1-9][0-9]*$ && "${sample_fps}" =~ ^[1-9][0-9]*$ ]]; then
   echo "start seed must be nonnegative; count and fps must be positive integers" >&2
@@ -82,7 +92,7 @@ export TASK_BASELINE_MOTION_PROFILE="settings35ec027_timeout120"
 {
   echo "===== BATCH START $(date -Is) ====="
   echo "start_seed=${start_seed} count=${seed_count} output_dir=${output_dir} fps=${sample_fps}"
-  echo "profile=${TASK_BASELINE_MOTION_PROFILE} repo_id=${repo_id}"
+  echo "profile=${TASK_BASELINE_MOTION_PROFILE} repo_id=${repo_id} pruning=${pruning_strategy}"
 } | tee -a "${batch_log}"
 
 for ((i = 0; i < seed_count; i++)); do
@@ -165,7 +175,8 @@ echo "[batch] splitting successful parts $(date -Is)" | tee -a "${batch_log}"
 uv run --group collection python split_lerobot_subtasks.py \
   "${source_dir}" "${derived_dir}" \
   --rollout-manifest "${source_dir}/meta/roco_rollouts.jsonl" \
-  --successful-parts-only --replace | tee "${output_dir}/split_summary.json"
+  --successful-parts-only --pruning-strategy "${pruning_strategy}" \
+  --replace | tee "${output_dir}/split_summary.json"
 
 python3 - "${summary_json}" "${output_dir}/split_summary.json" <<'PY'
 import json, os, pathlib, sys

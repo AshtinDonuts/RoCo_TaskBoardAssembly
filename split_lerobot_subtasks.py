@@ -38,6 +38,15 @@ PARTS = (
     ("battery_size5", (-0.01071, 0.16490), "pick up the large battery and place it into its holder"),
 )
 PART_BY_NAME = {name: (xy, task) for name, xy, task in PARTS}
+PRUNING_STRATEGIES = ("none", "home", "velocity", "waypoint")
+TRANSITION_WAYPOINTS = {"safe_retract", "return_home"}
+DEFAULT_LEFT_HOME_Q = np.array(
+    [-0.52359878, 1.04719755, 1.74532925, -1.74532925,
+     -0.17453293, -0.17453293, -1.04719755],
+    dtype=np.float64,
+)
+LEFT_JOINT_SLICE = slice(14, 21)
+LEFT_VELOCITY_SLICE = slice(28, 35)
 
 
 def _replace(table: pa.Table, name: str, values: np.ndarray) -> pa.Table:
@@ -176,7 +185,63 @@ def _manifest_segments(row: dict, episode_length: int) -> list[dict]:
             )
         if "pass" not in segment:
             raise ValueError(f"segment {name!r} has no grading outcome")
-        normalized.append({**segment, "name": name, "begin": begin, "end": end, "pass": bool(segment["pass"])})
+        phases = segment.get("phases")
+        normalized_phases = None
+        annotations_complete = bool(row.get("waypoint_annotations_complete", False))
+        if phases is not None:
+            if not isinstance(phases, list) or not phases:
+                raise ValueError(f"segment {name!r} has invalid waypoint phases")
+            phase_end = begin
+            normalized_phases = []
+            for phase in phases:
+                phase_begin, next_end = int(phase["begin"]), int(phase["end"])
+                if phase_begin != phase_end or next_end <= phase_begin or next_end > end:
+                    raise ValueError(
+                        f"invalid waypoint phase in segment {name!r}: "
+                        f"[{phase_begin}, {next_end}) after {phase_end}, part end={end}"
+                    )
+                normalized_phases.append({
+                    **phase,
+                    "name": None if phase.get("name") is None else str(phase["name"]),
+                    "waypoint_index": (
+                        None if phase.get("waypoint_index") is None
+                        else int(phase["waypoint_index"])
+                    ),
+                    "begin": phase_begin,
+                    "end": next_end,
+                })
+                if annotations_complete and (
+                    normalized_phases[-1]["name"] is None
+                    or normalized_phases[-1]["waypoint_index"] is None
+                ):
+                    raise ValueError(
+                        f"segment {name!r} declares complete waypoint annotations "
+                        "but contains a missing name or index"
+                    )
+                if len(normalized_phases) > 1 and all(
+                    normalized_phases[-1][key] == normalized_phases[-2][key]
+                    for key in ("name", "waypoint_index")
+                ):
+                    raise ValueError(
+                        f"segment {name!r} contains adjacent duplicate waypoint phases"
+                    )
+                phase_end = next_end
+            if phase_end != end:
+                raise ValueError(
+                    f"waypoint phases for segment {name!r} end at {phase_end}, expected {end}"
+                )
+        elif annotations_complete:
+            raise ValueError(
+                f"segment {name!r} declares complete waypoint annotations but has no phases"
+            )
+        normalized.append({
+            **segment,
+            "name": name,
+            "begin": begin,
+            "end": end,
+            "pass": bool(segment["pass"]),
+            **({} if normalized_phases is None else {"phases": normalized_phases}),
+        })
         seen.add(name)
         previous_end = end
     if previous_end != episode_length:
@@ -186,6 +251,175 @@ def _manifest_segments(row: dict, episode_length: int) -> list[dict]:
     if seen != set(PART_BY_NAME):
         raise ValueError(f"episode {row.get('episode_index')} does not contain all nine parts")
     return normalized
+
+
+def _first_stable_window(mask: np.ndarray, settle_frames: int) -> int | None:
+    if settle_frames <= 0:
+        raise ValueError("settle_frames must be positive")
+    mask = np.asarray(mask, dtype=bool).reshape(-1)
+    if len(mask) < settle_frames:
+        return None
+    hits = np.convolve(mask.astype(np.int64), np.ones(settle_frames, dtype=np.int64), mode="valid")
+    found = np.flatnonzero(hits == settle_frames)
+    return None if not len(found) else int(found[0])
+
+
+def _refine_segment(
+    segment: dict,
+    manifest_row: dict | None,
+    states: np.ndarray,
+    strategy: str,
+    min_segment: int,
+    home_tolerance_rad: float,
+    settle_frames: int,
+    velocity_threshold_rad_s: float,
+    fps: int = 10,
+    freeze_velocity_threshold_rad_s: float = 0.02,
+    freeze_duration_s: float = 1.0,
+) -> dict:
+    """Return a copy with a refined contiguous start and pruning evidence."""
+    if strategy not in PRUNING_STRATEGIES:
+        raise ValueError(f"unknown pruning strategy {strategy!r}")
+    if (
+        home_tolerance_rad <= 0
+        or velocity_threshold_rad_s <= 0
+        or freeze_velocity_threshold_rad_s <= 0
+        or freeze_duration_s <= 0
+        or fps <= 0
+    ):
+        raise ValueError("home, velocity, freeze-duration, and fps values must be positive")
+    if freeze_velocity_threshold_rad_s >= velocity_threshold_rad_s:
+        raise ValueError("freeze velocity threshold must be below the reset velocity threshold")
+
+    original_begin, original_end = int(segment["begin"]), int(segment["end"])
+    begin = original_begin
+    evidence: dict = {"kind": strategy}
+    local = np.asarray(states[original_begin:original_end], dtype=np.float64)
+    if local.ndim != 2 or local.shape[1] < LEFT_VELOCITY_SLICE.stop:
+        raise ValueError("observation.state does not contain the documented 44-D contract")
+
+    if strategy == "home":
+        home = DEFAULT_LEFT_HOME_Q
+        home_source = "default_35ec027"
+        if manifest_row is not None and manifest_row.get("left_arm_home_q") is not None:
+            home = np.asarray(manifest_row["left_arm_home_q"], dtype=np.float64).reshape(-1)
+            home_source = "rollout_manifest"
+        if home.shape != (7,) or not np.all(np.isfinite(home)):
+            raise ValueError("left_arm_home_q must contain seven finite joint values")
+        error = np.max(np.abs(local[:, LEFT_JOINT_SLICE] - home), axis=1)
+        offset = _first_stable_window(error <= home_tolerance_rad, settle_frames)
+        if offset is None:
+            raise ValueError(
+                f"segment {segment['name']!r} never reaches a stable home pose "
+                f"within {home_tolerance_rad} rad"
+            )
+        begin += offset
+        evidence.update(
+            home_source=home_source,
+            home_tolerance_rad=home_tolerance_rad,
+            settle_frames=settle_frames,
+            stable_window_begin=begin,
+            max_joint_error_rad=float(error[offset:offset + settle_frames].max()),
+        )
+    elif strategy == "velocity":
+        max_velocity = np.max(np.abs(local[:, LEFT_VELOCITY_SLICE]), axis=1)
+        measured_q = local[:, LEFT_JOINT_SLICE]
+        measured_velocity = np.full(len(measured_q), np.inf, dtype=np.float64)
+        if len(measured_q) > 1:
+            measured_velocity[1:] = np.max(
+                np.abs(np.diff(measured_q, axis=0)) * fps,
+                axis=1,
+            )
+        freeze_frames = max(1, int(np.ceil(freeze_duration_s * fps)))
+        # A reset is expected to be underway immediately. Requiring an early
+        # spike prevents ordinary low-speed task motion later in the segment
+        # from being mistaken for a reset/freeze boundary.
+        reset_probe_frames = min(3, len(max_velocity))
+        early_reset = np.flatnonzero(
+            max_velocity[:reset_probe_frames] > velocity_threshold_rad_s
+        )
+        if not len(early_reset):
+            offset = 0
+            reset_end = None
+            freeze_begin = None
+            freeze_end = None
+        else:
+            reset_end = int(early_reset[0])
+            while (
+                reset_end < len(max_velocity)
+                and max_velocity[reset_end] > velocity_threshold_rad_s
+            ):
+                reset_end += 1
+            search_begin = reset_end
+            relative_freeze = _first_stable_window(
+                measured_velocity[search_begin:] <= freeze_velocity_threshold_rad_s,
+                freeze_frames,
+            )
+            if relative_freeze is None:
+                raise ValueError(
+                    f"segment {segment['name']!r} has reset motion but no "
+                    f"{freeze_duration_s:g}s freeze below "
+                    f"{freeze_velocity_threshold_rad_s} rad/s"
+                )
+            freeze_begin = search_begin + relative_freeze
+            freeze_end = freeze_begin + freeze_frames
+            while (
+                freeze_end < len(measured_velocity)
+                and measured_velocity[freeze_end] <= freeze_velocity_threshold_rad_s
+            ):
+                freeze_end += 1
+            if freeze_end >= len(max_velocity):
+                raise ValueError(
+                    f"segment {segment['name']!r} freezes after reset but never resumes motion"
+                )
+            offset = freeze_end
+        if offset >= len(max_velocity):
+            raise ValueError(
+                f"velocity pruning removes all frames from segment {segment['name']!r}"
+            )
+        begin += offset
+        evidence.update(
+            reset_velocity_threshold_rad_s=velocity_threshold_rad_s,
+            freeze_velocity_threshold_rad_s=freeze_velocity_threshold_rad_s,
+            freeze_duration_s=freeze_duration_s,
+            freeze_frames=freeze_frames,
+            reset_detected=bool(len(early_reset)),
+            reset_end=(None if reset_end is None else original_begin + reset_end),
+            freeze_begin=(None if freeze_begin is None else original_begin + freeze_begin),
+            freeze_end=(None if freeze_end is None else original_begin + freeze_end),
+            retained_motion_begin=begin,
+        )
+    elif strategy == "waypoint":
+        if manifest_row is None or not manifest_row.get("waypoint_annotations_complete", False):
+            raise ValueError(
+                "waypoint pruning requires complete waypoint annotations in the rollout manifest"
+            )
+        phases = segment.get("phases")
+        if not phases:
+            raise ValueError(f"segment {segment['name']!r} has no waypoint phases")
+        trimmed_phases = []
+        for phase in phases:
+            if phase["begin"] != begin or phase["name"] not in TRANSITION_WAYPOINTS:
+                break
+            begin = int(phase["end"])
+            trimmed_phases.append(str(phase["name"]))
+        evidence.update(trimmed_phases=trimmed_phases, retained_phase_begin=begin)
+
+    if original_end - begin < min_segment:
+        raise ValueError(
+            f"pruning {segment['name']!r} with strategy {strategy!r} leaves "
+            f"{original_end - begin} frames, below minimum {min_segment}"
+        )
+    return {
+        **segment,
+        "begin": begin,
+        "end": original_end,
+        "original_begin": original_begin,
+        "original_end": original_end,
+        "frames_removed": begin - original_begin,
+        "pruning_strategy": strategy,
+        "pruning_evidence": evidence,
+    }
 
 
 def _video_path(info: dict, root: Path, key: str, chunk_index: int, file_index: int) -> Path:
@@ -294,6 +528,12 @@ def split_dataset(
     rollout_manifest: Path | None = None,
     successful_parts_only: bool = False,
     replace: bool = False,
+    pruning_strategy: str = "none",
+    home_tolerance_rad: float = 0.03,
+    settle_frames: int = 5,
+    velocity_threshold_rad_s: float = 0.5,
+    freeze_velocity_threshold_rad_s: float = 0.02,
+    freeze_duration_s: float = 1.0,
 ) -> dict:
     source = source.resolve()
     destination = destination.resolve()
@@ -323,6 +563,10 @@ def split_dataset(
     )
     if successful_parts_only and manifest is None:
         raise ValueError("--successful-parts-only requires a rollout manifest with grading outcomes")
+    if pruning_strategy == "waypoint" and manifest is None:
+        raise ValueError("--pruning-strategy waypoint requires a rollout manifest")
+    if pruning_strategy not in PRUNING_STRATEGIES:
+        raise ValueError(f"unknown pruning strategy {pruning_strategy!r}")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp = Path(tempfile.mkdtemp(prefix=f".{destination.name}.tmp-", dir=destination.parent))
@@ -336,6 +580,7 @@ def split_dataset(
     max_errors: list[float] = []
     next_episode_index = 0
     next_dataset_index = 0
+    total_frames_removed = 0
 
     try:
         for data_path in sorted((source / "data").rglob("*.parquet")):
@@ -345,6 +590,7 @@ def split_dataset(
                 np.asarray(table["action"].to_pylist(), dtype=np.float64)
                 if "action" in table.column_names else None
             )
+            states = np.asarray(table["observation.state"].to_pylist(), dtype=np.float64)
             output_tables: list[pa.Table] = []
 
             for parent_idx in np.unique(old_episode):
@@ -377,13 +623,27 @@ def split_dataset(
                         )
                     ]
 
-                selected = [
-                    dict(segment, episode_index=next_episode_index + selected_idx)
-                    for selected_idx, segment in enumerate(
-                        segment for segment in segments
-                        if not successful_parts_only or segment["pass"]
+                manifest_row = None if manifest is None else manifest[int(parent_idx)]
+                selected = []
+                for segment in segments:
+                    if successful_parts_only and not segment["pass"]:
+                        continue
+                    refined = _refine_segment(
+                        segment,
+                        manifest_row,
+                        states[rows],
+                        pruning_strategy,
+                        min_segment,
+                        home_tolerance_rad,
+                        settle_frames,
+                        velocity_threshold_rad_s,
+                        fps,
+                        freeze_velocity_threshold_rad_s,
+                        freeze_duration_s,
                     )
-                ]
+                    refined["episode_index"] = next_episode_index + len(selected)
+                    total_frames_removed += int(refined["frames_removed"])
+                    selected.append(refined)
                 parent = parent_meta[int(parent_idx)]
 
                 if selected:
@@ -452,6 +712,11 @@ def split_dataset(
                         "part": name,
                         "source_begin": begin,
                         "source_end": end,
+                        "original_source_begin": int(segment["original_begin"]),
+                        "original_source_end": int(segment["original_end"]),
+                        "frames_removed": int(segment["frames_removed"]),
+                        "pruning_strategy": segment["pruning_strategy"],
+                        "pruning_evidence": segment["pruning_evidence"],
                         "pass": bool(segment["pass"]),
                         "completion_reason": segment.get("completion_reason"),
                     })
@@ -542,6 +807,13 @@ def split_dataset(
             "tasks": len(PARTS),
             "max_pick_anchor_error_m": max(max_errors, default=0.0),
             "successful_parts_only": successful_parts_only,
+            "pruning_strategy": pruning_strategy,
+            "frames_removed": total_frames_removed,
+            "home_tolerance_rad": home_tolerance_rad,
+            "settle_frames": settle_frames,
+            "velocity_threshold_rad_s": velocity_threshold_rad_s,
+            "freeze_velocity_threshold_rad_s": freeze_velocity_threshold_rad_s,
+            "freeze_duration_s": freeze_duration_s,
             "manifest": None if rollout_manifest is None else str(rollout_manifest),
             "destination": str(destination),
         }
@@ -569,6 +841,17 @@ def main() -> None:
         help="Keep only segments whose manifest grading outcome passed",
     )
     parser.add_argument(
+        "--pruning-strategy",
+        choices=PRUNING_STRATEGIES,
+        default="none",
+        help="Mutually exclusive post-filter prefix-pruning strategy (default: none)",
+    )
+    parser.add_argument("--home-tolerance-rad", type=float, default=0.03)
+    parser.add_argument("--settle-frames", type=int, default=5)
+    parser.add_argument("--velocity-threshold-rad-s", type=float, default=0.5)
+    parser.add_argument("--freeze-velocity-threshold-rad-s", type=float, default=0.02)
+    parser.add_argument("--freeze-duration-s", type=float, default=1.0)
+    parser.add_argument(
         "--replace",
         action="store_true",
         help="Atomically replace an existing destination after a successful split",
@@ -579,10 +862,16 @@ def main() -> None:
         args.destination,
         args.min_segment_frames,
         args.pick_tolerance_m,
-        args.ffmpeg,
-        args.rollout_manifest,
-        args.successful_parts_only,
-        args.replace,
+        ffmpeg=args.ffmpeg,
+        rollout_manifest=args.rollout_manifest,
+        successful_parts_only=args.successful_parts_only,
+        replace=args.replace,
+        pruning_strategy=args.pruning_strategy,
+        home_tolerance_rad=args.home_tolerance_rad,
+        settle_frames=args.settle_frames,
+        velocity_threshold_rad_s=args.velocity_threshold_rad_s,
+        freeze_velocity_threshold_rad_s=args.freeze_velocity_threshold_rad_s,
+        freeze_duration_s=args.freeze_duration_s,
     )
     print(json.dumps(result, indent=2))
 
