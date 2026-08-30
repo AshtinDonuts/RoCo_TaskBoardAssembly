@@ -98,6 +98,9 @@ def make_l_path_for_part(part_name, target=None, snap_advance_when=None,
     final_height = (cfg.get("final_height")
                     if cfg.get("final_height") is not None
                     else getattr(pc, "FINAL_HEIGHT", None))
+    smooth_return_home = bool(getattr(
+        pc, "ENABLE_SMOOTH_RETURN_HOME", False
+    ))
     full = build_pick_place_phases(
         pick_pos=pick_pos_ee,
         pick_orn=orn if pick_pos_ee is not None else None,
@@ -130,14 +133,17 @@ def make_l_path_for_part(part_name, target=None, snap_advance_when=None,
         return_home_gripper=cfg.get("gripper_open"),
         return_home_cspace_tol=getattr(pc, "RETURN_HOME_CSPACE_TOL", None),
         return_home_settle_steps=getattr(pc, "RETURN_HOME_SETTLE_STEPS", 20),
-        return_home_max_velocity=getattr(
-            pc, "RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S", None
+        return_home_max_velocity=(
+            getattr(pc, "RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S", None)
+            if smooth_return_home else None
         ),
-        return_home_max_acceleration=getattr(
-            pc, "RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2", None
+        return_home_max_acceleration=(
+            getattr(pc, "RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2", None)
+            if smooth_return_home else None
         ),
-        return_home_min_duration=getattr(
-            pc, "RETURN_HOME_MIN_DURATION_S", None
+        return_home_min_duration=(
+            getattr(pc, "RETURN_HOME_MIN_DURATION_S", None)
+            if smooth_return_home else None
         ),
         safe_retract_pos=safe_retract_pos,
         safe_retract_orn=safe_retract_orn,
@@ -195,19 +201,25 @@ class BaselinePolicy(Policy):
             max_ee_orn_step_rad=max_ee_orn_step_rad,
         )
         self._is_first_part = True
-        self._max_joint_velocity = float(getattr(
-            pc, "BASELINE_MAX_JOINT_VELOCITY_RAD_S", 0.5
+        self._joint_rate_limit_enabled = bool(getattr(
+            pc, "ENABLE_BASELINE_JOINT_RATE_LIMIT", False
         ))
-        arm_indices = [env_info.dof_names.index(name)
-                       for name in env_info.L_arm_joints]
+        self._max_joint_velocity = None
+        self._joint_rate_limiter = None
         fallback_dt = float(getattr(
             pc, "BASELINE_CONTROL_DT_FALLBACK_S", 0.1
         ))
         self._control_dt_fallback = fallback_dt
-        self._joint_rate_limiter = JointPositionRateLimiter(
-            arm_indices,
-            max_delta=self._max_joint_velocity * fallback_dt,
-        )
+        if self._joint_rate_limit_enabled:
+            self._max_joint_velocity = float(getattr(
+                pc, "BASELINE_MAX_JOINT_VELOCITY_RAD_S", 0.5
+            ))
+            arm_indices = [env_info.dof_names.index(name)
+                           for name in env_info.L_arm_joints]
+            self._joint_rate_limiter = JointPositionRateLimiter(
+                arm_indices,
+                max_delta=self._max_joint_velocity * fallback_dt,
+            )
         # _last_obs is read by the snap_advance_when closure, which is
         # invoked by EEPathFollower.step() to decide whether to advance
         # past the snap_wait waypoint. Updated every act() call.
@@ -217,7 +229,8 @@ class BaselinePolicy(Policy):
     def reset(self, obs: Observation, target: PartTarget) -> None:
         self._last_obs = obs
         self._last_step_idx = int(obs.step_idx)
-        self._joint_rate_limiter.reset(obs.joint_positions)
+        if self._joint_rate_limiter is not None:
+            self._joint_rate_limiter.reset(obs.joint_positions)
 
         snap_advance_when = None
         snap_timeout_steps = None
@@ -270,6 +283,8 @@ class BaselinePolicy(Policy):
         self._last_step_idx = step_idx
         self._last_obs = obs
         action = self._follower.step(dt=dt)
+        if self._joint_rate_limiter is None:
+            return action
         effective_dt = self._control_dt_fallback if dt is None else dt
         return self._joint_rate_limiter.apply(
             action,

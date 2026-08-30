@@ -89,7 +89,7 @@ RESULTS_JSON_PATH = None
 # Prevents a stuck / buggy policy from hanging the eval. With Cartesian
 # pacing at ~0.1 m/s, a full pick-place can take several thousand steps
 # (hover + descend + transit + settles); 20000 ≈ 100 s at 200 Hz.
-PER_PART_TIMEOUT_STEPS = 6000  # 30 simulated seconds at 200 Hz physics
+PER_PART_TIMEOUT_STEPS = 24000  # 120 simulated seconds at 200 Hz physics
 
 # Physics warmup: number of my_world.step() iterations to run before the
 # pick-and-place task starts (after each reset / first play). Lets PhysX
@@ -358,7 +358,7 @@ PART_CONFIG = {
     },
     "bolt_8mm": {
         "gripper_open":   0.06,
-        "gripper_close":  0.04,
+        "gripper_close":  0.035,
         "pick_pos":       np.array([ 0.04415, 0.00093, 1.039]),
         "place_pos":      np.array([ 0.21531,  0.13135, 1.06]),
         "ee_offset":      np.array([0.0, 0.0147, 0.2045]),
@@ -393,7 +393,7 @@ PART_CONFIG = {
 
     "gear_20teeth": {
         "gripper_open":   0.12,
-        "gripper_close":  0.065,
+        "gripper_close":  0.060,
         # Lands in the gear_60teeth slot (gear_60teeth was deleted from
         # scene_base.usd; gear_20teeth substitutes for it).
         "pick_pos":       np.array([0.14366, -0.043, 1.04]),
@@ -627,19 +627,26 @@ SETTLE_DESCEND_PLACE = 15
 # first IK call. 10 ≈ 1 s at the rig's default physics rate.
 RETURN_HOME_SETTLE_STEPS = 10
 
-# Smooth c-space return limits. The follower snapshots measured q on entry,
-# chooses a duration satisfying these bounds for a quintic smoothstep, then
-# holds the exact home vector for RETURN_HOME_SETTLE_STEPS. These are nominal
-# trajectory limits; the robot drive may track below them.
+# The slowed-motion baseline at revision 35ec027 returned home with the
+# original immediate c-space target. Leave this False to reproduce that
+# behavior; set True to opt into the later quintic return-home trajectory.
+ENABLE_SMOOTH_RETURN_HOME = False
+# Smooth c-space return limits used only when ENABLE_SMOOTH_RETURN_HOME is
+# True. The follower snapshots measured q on entry, chooses a duration
+# satisfying these bounds, then holds the exact home vector for
+# RETURN_HOME_SETTLE_STEPS. These are nominal trajectory limits; the robot
+# drive may track below them.
 RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S = 0.5
 RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2 = 1.0
 RETURN_HOME_MIN_DURATION_S = 0.5
 
-# Defensive ceiling on every scripted L-arm joint-position command. This
-# catches discontinuous IK branch changes (notably the first hover_pick after
-# returning home) without affecting gripper or R-arm commands. Converted to a
-# per-call delta using Observation.step_idx; fallback is for repeated/absent
-# step indices in nonstandard policy hosts.
+# The 35ec027 slowed-motion policy had Cartesian EE pacing but no global
+# joint-command limiter. Leave this False for matching behavior; set True to
+# opt into the later defensive ceiling on every scripted L-arm command.
+ENABLE_BASELINE_JOINT_RATE_LIMIT = False
+# Used only when ENABLE_BASELINE_JOINT_RATE_LIMIT is True. The velocity is
+# converted to a per-call delta using Observation.step_idx; the fallback is
+# for repeated/absent step indices in nonstandard policy hosts.
 BASELINE_MAX_JOINT_VELOCITY_RAD_S = 0.5
 BASELINE_CONTROL_DT_FALLBACK_S = 0.1
 
@@ -649,7 +656,7 @@ BASELINE_CONTROL_DT_FALLBACK_S = 0.1
 # paced) so joint-space home motion does not start near the table. When
 # False, between-part motion goes straight to return_home (Cartesian pacing
 # of pick/place waypoints is unchanged).
-ENABLE_SAFE_RETRACT = True
+ENABLE_SAFE_RETRACT = False
 # World-frame table-top height (m). Parts rest near z≈1.04; 1.0 is the
 # scene table top. Only used when ENABLE_SAFE_RETRACT is True.
 TABLE_Z = 1.0
@@ -697,6 +704,57 @@ ORN_TOL          = 0.05
 # needs ~800 steps of command travel plus PD catch-up — 500 is too
 # short. 10000 ≈ 50 s at 200 Hz is a comfortable ceiling.
 WAYPOINT_TIMEOUT_STEPS = 10000
+
+# Reproducible motion profiles used by the paired seed-0, 120-second-timeout
+# experiments. Set TASK_BASELINE_MOTION_PROFILE to one of these names before
+# launching the runner. When the variable is unset, the literal values above
+# remain in effect (currently the settings35ec027_timeout120 configuration).
+BASELINE_MOTION_PROFILES = {
+    "no_safe_retract_timeout120": {
+        "PER_PART_TIMEOUT_STEPS": 24000,
+        "ENABLE_SMOOTH_RETURN_HOME": True,
+        "RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S": 0.5,
+        "RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2": 1.0,
+        "RETURN_HOME_MIN_DURATION_S": 0.5,
+        "ENABLE_BASELINE_JOINT_RATE_LIMIT": True,
+        "BASELINE_MAX_JOINT_VELOCITY_RAD_S": 0.5,
+        "BASELINE_CONTROL_DT_FALLBACK_S": 0.1,
+        "ENABLE_SAFE_RETRACT": False,
+        "CARTESIAN_MAX_EE_SPEED_M_S": 0.30,
+        "CARTESIAN_MAX_EE_ORN_SPEED_RAD_S": 1.0,
+        "TRANSIT_STEPS": 0,
+        "DESCEND_PICK_STEPS": 0,
+        "DESCEND_PLACE_STEPS": 0,
+        "WAYPOINT_TIMEOUT_STEPS": 10000,
+    },
+    "settings35ec027_timeout120": {
+        "PER_PART_TIMEOUT_STEPS": 24000,
+        "ENABLE_SMOOTH_RETURN_HOME": False,
+        "RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S": 0.5,
+        "RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2": 1.0,
+        "RETURN_HOME_MIN_DURATION_S": 0.5,
+        "ENABLE_BASELINE_JOINT_RATE_LIMIT": False,
+        "BASELINE_MAX_JOINT_VELOCITY_RAD_S": 0.5,
+        "BASELINE_CONTROL_DT_FALLBACK_S": 0.1,
+        "ENABLE_SAFE_RETRACT": False,
+        "CARTESIAN_MAX_EE_SPEED_M_S": 0.30,
+        "CARTESIAN_MAX_EE_ORN_SPEED_RAD_S": 1.0,
+        "TRANSIT_STEPS": 0,
+        "DESCEND_PICK_STEPS": 0,
+        "DESCEND_PLACE_STEPS": 0,
+        "WAYPOINT_TIMEOUT_STEPS": 10000,
+    },
+}
+
+BASELINE_MOTION_PROFILE = os.getenv("TASK_BASELINE_MOTION_PROFILE")
+if BASELINE_MOTION_PROFILE:
+    if BASELINE_MOTION_PROFILE not in BASELINE_MOTION_PROFILES:
+        choices = ", ".join(sorted(BASELINE_MOTION_PROFILES))
+        raise ValueError(
+            f"Unknown TASK_BASELINE_MOTION_PROFILE={BASELINE_MOTION_PROFILE!r}; "
+            f"expected one of: {choices}"
+        )
+    globals().update(BASELINE_MOTION_PROFILES[BASELINE_MOTION_PROFILE])
 
 
 # Truncate the generated path to the first N waypoints (None = run all).
