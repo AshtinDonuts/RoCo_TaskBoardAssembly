@@ -315,6 +315,19 @@ class SplitLeRobotSubtasksTest(unittest.TestCase):
             self.assertEqual(out["episode_index"].to_pylist(), list(range(10)))
             self.assertEqual(json.loads((destination / "meta/stats.json").read_text())["action"]["count"], [10])
             self.assertEqual(len((destination / "meta/roco_subtasks.jsonl").read_text().splitlines()), 10)
+            lineage = [
+                json.loads(line)
+                for line in (destination / "meta/roco_subtasks.jsonl").read_text().splitlines()
+            ]
+            episode_meta = pq.read_table(
+                destination / "meta/episodes/chunk-000/file-000.parquet"
+            ).to_pylist()
+            self.assertEqual([row["pass"] for row in episode_meta], [True] * 10)
+            self.assertEqual([row["pass"] for row in lineage], [True] * 10)
+            self.assertEqual(
+                [row["completion_reason"] for row in episode_meta],
+                [row["completion_reason"] for row in lineage],
+            )
             for episode in range(10):
                 clip = destination / f"videos/observation.images.head/chunk-000/file-{episode:03d}.mp4"
                 frames = subprocess.check_output([
@@ -322,6 +335,19 @@ class SplitLeRobotSubtasksTest(unittest.TestCase):
                     "-show_entries", "stream=nb_read_frames", "-of", "default=nw=1:nk=1", str(clip),
                 ], text=True).strip()
                 self.assertEqual(frames, "1")
+
+            all_parts = root / "derived_all"
+            splitter.split_dataset(
+                source, all_parts, 1, 0.04,
+                rollout_manifest=manifest, successful_parts_only=False,
+                pruning_strategy="waypoint",
+            )
+            all_meta = pq.read_table(
+                all_parts / "meta/episodes/chunk-000/file-000.parquet"
+            ).to_pylist()
+            self.assertEqual(len(all_meta), 18)
+            self.assertEqual(sum(1 for row in all_meta if row["pass"]), 10)
+            self.assertEqual(sum(1 for row in all_meta if not row["pass"]), 8)
 
 
 if __name__ == "__main__":

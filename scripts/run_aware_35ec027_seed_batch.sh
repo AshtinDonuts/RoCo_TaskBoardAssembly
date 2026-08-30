@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Collect randomized 35ec027 rollouts as LeRobot v3 episodes and derive
-# successful-part-only subtask episodes.
+# per-part subtask episodes (pass and fail).
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,7 +24,7 @@ while (($#)); do
     --force) force=1; shift ;;
     -h|--help)
       cat <<'EOF'
-Collect randomized 35ec027 rollouts and split successful part episodes.
+Collect randomized 35ec027 rollouts and split per-part subtask episodes.
 
 Usage: scripts/run_aware_35ec027_seed_batch.sh [options]
 
@@ -68,7 +68,7 @@ fi
 source_dir="${output_dir}/source"
 results_dir="${output_dir}/results"
 logs_dir="${output_dir}/logs"
-derived_dir="${output_dir}/derived_successful_subtasks"
+derived_dir="${output_dir}/derived_subtasks"
 batch_log="${output_dir}/batch.log"
 summary_json="${output_dir}/summary.json"
 batch_marker="${output_dir}/.roco_lerobot_batch"
@@ -172,11 +172,11 @@ if ((validate_ec != 0)); then
   exit 1
 fi
 
-echo "[batch] splitting successful parts $(date -Is)" | tee -a "${batch_log}"
+echo "[batch] splitting subtasks $(date -Is)" | tee -a "${batch_log}"
 uv run --group collection python split_lerobot_subtasks.py \
   "${source_dir}" "${derived_dir}" \
   --rollout-manifest "${source_dir}/meta/roco_rollouts.jsonl" \
-  --successful-parts-only --pruning-strategy "${pruning_strategy}" \
+  --pruning-strategy "${pruning_strategy}" \
   --replace | tee "${output_dir}/split_summary.json"
 
 python3 - "${summary_json}" "${output_dir}/split_summary.json" <<'PY'
@@ -192,5 +192,5 @@ PY
 
 echo "===== BATCH END $(date -Is) =====" | tee -a "${batch_log}"
 echo "[batch] source: ${source_dir}"
-echo "[batch] successful subtasks: ${derived_dir}"
+echo "[batch] subtasks: ${derived_dir}"
 echo "[batch] summary: ${summary_json}"

@@ -723,6 +723,10 @@ def split_dataset(
                         dataset_from_index=next_dataset_index,
                         dataset_to_index=next_dataset_index + length,
                     )
+                    # Additive RoCo grading fields (ignored by LeRobot loaders;
+                    # not part of the frame feature contract in meta/info.json).
+                    meta["pass"] = bool(segment["pass"])
+                    meta["completion_reason"] = segment.get("completion_reason")
                     for key in video_keys:
                         chunk_index, file_index = divmod(episode_idx, int(info["chunks_size"]))
                         meta[f"videos/{key}/chunk_index"] = chunk_index
