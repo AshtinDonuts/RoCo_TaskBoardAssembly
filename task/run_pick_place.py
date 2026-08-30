@@ -167,7 +167,12 @@ class FfmpegVideoRecorder:
             "yuv420p",
             self.path,
         ]
-        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        # Isaac may need LD_PRELOAD=newer libstdc++; that (and any conda
+        # LD_LIBRARY_PATH) breaks system ffmpeg via libffi/tinfo conflicts.
+        env = os.environ.copy()
+        env.pop("LD_PRELOAD", None)
+        env.pop("LD_LIBRARY_PATH", None)
+        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, env=env)
         self._shape = (height, width)
 
     def close(self):

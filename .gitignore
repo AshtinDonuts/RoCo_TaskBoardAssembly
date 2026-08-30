@@ -24,3 +24,5 @@ task/demo.mp4
 
 # ignore Sharpa North files
 robot/sharpa_north/
+
+.hf-cache/
