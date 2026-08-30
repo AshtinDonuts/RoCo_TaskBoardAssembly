@@ -299,28 +299,38 @@ def _refine_segment(
         raise ValueError("observation.state does not contain the documented 44-D contract")
 
     if strategy == "home":
-        home = DEFAULT_LEFT_HOME_Q
-        home_source = "default_35ec027"
-        if manifest_row is not None and manifest_row.get("left_arm_home_q") is not None:
-            home = np.asarray(manifest_row["left_arm_home_q"], dtype=np.float64).reshape(-1)
-            home_source = "rollout_manifest"
-        if home.shape != (7,) or not np.all(np.isfinite(home)):
-            raise ValueError("left_arm_home_q must contain seven finite joint values")
-        error = np.max(np.abs(local[:, LEFT_JOINT_SLICE] - home), axis=1)
-        offset = _first_stable_window(error <= home_tolerance_rad, settle_frames)
-        if offset is None:
-            raise ValueError(
-                f"segment {segment['name']!r} never reaches a stable home pose "
-                f"within {home_tolerance_rad} rad"
+        # The first asset in an episode (currently gear_60teeth in sim
+        # part_order; gear_20teeth in some published datasets) has no
+        # return_home / safe_retract prefix — the arm is already at init.
+        # Home-pose prefix pruning applies only to later parts.
+        if original_begin == 0:
+            evidence.update(
+                skipped=True,
+                reason="first_part_has_no_home_prefix",
             )
-        begin += offset
-        evidence.update(
-            home_source=home_source,
-            home_tolerance_rad=home_tolerance_rad,
-            settle_frames=settle_frames,
-            stable_window_begin=begin,
-            max_joint_error_rad=float(error[offset:offset + settle_frames].max()),
-        )
+        else:
+            home = DEFAULT_LEFT_HOME_Q
+            home_source = "default_35ec027"
+            if manifest_row is not None and manifest_row.get("left_arm_home_q") is not None:
+                home = np.asarray(manifest_row["left_arm_home_q"], dtype=np.float64).reshape(-1)
+                home_source = "rollout_manifest"
+            if home.shape != (7,) or not np.all(np.isfinite(home)):
+                raise ValueError("left_arm_home_q must contain seven finite joint values")
+            error = np.max(np.abs(local[:, LEFT_JOINT_SLICE] - home), axis=1)
+            offset = _first_stable_window(error <= home_tolerance_rad, settle_frames)
+            if offset is None:
+                raise ValueError(
+                    f"segment {segment['name']!r} never reaches a stable home pose "
+                    f"within {home_tolerance_rad} rad"
+                )
+            begin += offset
+            evidence.update(
+                home_source=home_source,
+                home_tolerance_rad=home_tolerance_rad,
+                settle_frames=settle_frames,
+                stable_window_begin=begin,
+                max_joint_error_rad=float(error[offset:offset + settle_frames].max()),
+            )
     elif strategy == "velocity":
         max_velocity = np.max(np.abs(local[:, LEFT_VELOCITY_SLICE]), axis=1)
         measured_q = local[:, LEFT_JOINT_SLICE]
