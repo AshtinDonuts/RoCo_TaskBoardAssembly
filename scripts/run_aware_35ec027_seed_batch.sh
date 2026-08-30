@@ -86,8 +86,9 @@ touch "${batch_marker}"
 cd "${repo_root}"
 export ISAACSIM_HEADLESS="${ISAACSIM_HEADLESS:-1}"
 export TASK_ENABLE_CAMERA_VIEWPORTS="${TASK_ENABLE_CAMERA_VIEWPORTS:-0}"
-export OMNI_KIT_ACCEPT_EULA="${OMNI_KIT_ACCEPT_EULA:-YES}"
 export TASK_BASELINE_MOTION_PROFILE="settings35ec027_timeout120"
+# shellcheck source=scripts/roco_isaac_env.sh
+source "${script_dir}/roco_isaac_env.sh"
 
 {
   echo "===== BATCH START $(date -Is) ====="

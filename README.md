@@ -19,7 +19,10 @@ AssemblyTask/
 ├── README.md                 # this file (organizer-facing overview)
 ├── PARTS.md                  # participant-facing parts/scoring reference
 ├── docs/
+│   ├── SETUP_UBUNTU22_RTX4090.md  # Ubuntu 22.04 + RTX 4090 machine bootstrap
 │   └── pi05_eval.md          # pi0.5 checkpoint eval recipe
+├── scripts/
+│   └── setup_ubuntu22_rtx4090.sh  # apt + uv sync bootstrap for that machine
 ├── pyproject.toml            # uv project: Isaac Sim 5.1.0 + numpy deps, resolver settings
 ├── uv.lock                   # pinned dependency graph (uv sync reproduces .venv/ from this)
 ├── .python-version           # pins CPython 3.11 for uv
@@ -253,6 +256,14 @@ Commit the generated `.gitattributes` file before staging matching assets, so
 large files are stored as LFS objects instead of ordinary Git blobs.
 
 ## ⚙️ Environment Setup
+
+For a **fresh Ubuntu 22.04 + RTX 4090** machine (driver, Vulkan, Git LFS,
+`uv`, smoke test), follow
+[`docs/SETUP_UBUNTU22_RTX4090.md`](docs/SETUP_UBUNTU22_RTX4090.md) or run:
+
+```bash
+bash scripts/setup_ubuntu22_rtx4090.sh
+```
 
 The Python environment is managed with [`uv`](https://docs.astral.sh/uv/).
 Isaac Sim ships as pip packages, so no separate Omniverse-launcher

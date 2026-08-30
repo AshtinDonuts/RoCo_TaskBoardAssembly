@@ -23,6 +23,27 @@ IMAGE_HEIGHT = 240
 IMAGE_WIDTH = 320
 
 
+def _per_part_timeout_reached(
+    *,
+    part_step_count,
+    sim_steps_on_part,
+    snap_tick_count,
+    timeout_steps,
+):
+    """True when any harness clock for the active part exceeds the limit.
+
+    ``part_step_count`` only advances when the outer control path runs. Physics
+    callbacks can keep recording while that path is skipped (e.g. world not
+    playing), so ``sim_steps_on_part`` / snap ticks are also checked.
+    """
+    limit = int(timeout_steps)
+    return (
+        int(part_step_count) >= limit
+        or int(sim_steps_on_part) >= limit
+        or int(snap_tick_count) >= limit
+    )
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(
         description=(
@@ -560,11 +581,13 @@ def main():
     recorded_frame_parts = []
     recorded_frame_waypoints = []
     part_completion_reasons = []
-    per_part_timeout_steps = int(
-        getattr(policy, "PER_PART_TIMEOUT_STEPS",
-                getattr(rp.pc, "PER_PART_TIMEOUT_STEPS", 3000))
-    )
+    part_start_step = 0
+    per_part_timeout_steps = int(getattr(rp.pc, "PER_PART_TIMEOUT_STEPS", 3000))
     warmup_steps = int(getattr(rp.pc, "WARMUP_STEPS", 0))
+    print(
+        f"[collect] PER_PART_TIMEOUT_STEPS={per_part_timeout_steps}",
+        flush=True,
+    )
     effective_max_sim_steps = (
         None if args.max_sim_steps == 0 else int(args.max_sim_steps)
     )
@@ -639,7 +662,8 @@ def main():
 
     def _start_next_part():
         nonlocal current_part, current_snap_attacher, current_snap_sub
-        nonlocal part_step_count, run_complete, part_activation_count, policy_action_ready
+        nonlocal part_step_count, part_start_step
+        nonlocal run_complete, part_activation_count, policy_action_ready
 
         if current_part is not None and current_snap_attacher is not None and current_snap_attacher.attached:
             snap_fired_parts.add(current_part)
@@ -671,6 +695,7 @@ def main():
         target = _build_part_target(current_part)
         policy.reset(obs, target)
         part_step_count = 0
+        part_start_step = int(my_world.current_time_step_index)
         print(f"[collect] now working on the part: {current_part}", flush=True)
         return current_part
 
@@ -810,6 +835,13 @@ def main():
     try:
         record_sub = physx_iface.subscribe_physics_step_events(_on_physics_step)
         _restart_iteration()
+        # Match run_pick_place headless behavior: keep the timeline playing so
+        # control + per-part timeout keep advancing. Without this, physics
+        # callbacks can keep recording while the control path is skipped.
+        try:
+            my_world.play()
+        except Exception:
+            pass
         while True:
             my_world.step(render=render_each_step)
             _flush_record_queue()
@@ -818,7 +850,42 @@ def main():
             if not my_world.is_playing():
                 if my_world.is_stopped():
                     reset_needed = True
-                continue
+                try:
+                    my_world.play()
+                except Exception:
+                    pass
+                if not my_world.is_playing():
+                    # Still paused/stopped: at least enforce sim-clock timeout
+                    # so a part cannot record forever without advancing.
+                    if current_part is not None:
+                        sim_steps_on_part = (
+                            int(my_world.current_time_step_index) - int(part_start_step)
+                        )
+                        snap_tick_count = (
+                            int(getattr(current_snap_attacher, "_tick", 0))
+                            if current_snap_attacher is not None else 0
+                        )
+                        if _per_part_timeout_reached(
+                            part_step_count=part_step_count,
+                            sim_steps_on_part=sim_steps_on_part,
+                            snap_tick_count=snap_tick_count,
+                            timeout_steps=per_part_timeout_steps,
+                        ):
+                            print(
+                                f"[collect] {current_part}: per-part timeout "
+                                f"({per_part_timeout_steps} steps, "
+                                f"sim_on_part={sim_steps_on_part}, "
+                                f"ctrl={part_step_count}, snap_tick={snap_tick_count}) "
+                                f"— advancing (world not playing).",
+                                flush=True,
+                            )
+                            part_completion_reasons.append({
+                                "part": current_part,
+                                "reason": "timeout",
+                                "step_count": max(part_step_count, sim_steps_on_part),
+                            })
+                            _start_next_part()
+                    continue
             if reset_needed:
                 my_world.reset()
                 reset_needed = False
@@ -826,11 +893,19 @@ def main():
                 l_controller.reset()
                 r_controller.reset()
                 _restart_iteration()
+                try:
+                    my_world.play()
+                except Exception:
+                    pass
             if my_world.current_time_step_index == 0:
                 _apply_init_joint_targets()
                 l_controller.reset()
                 r_controller.reset()
                 _restart_iteration()
+                try:
+                    my_world.play()
+                except Exception:
+                    pass
 
             if warmup_steps > 0 and my_world.current_time_step_index < warmup_steps:
                 _apply_init_joint_targets()
@@ -854,18 +929,39 @@ def main():
                 and current_snap_attacher is not None
                 and current_snap_attacher.attached
             )
-            is_timeout = part_step_count >= per_part_timeout_steps
+            sim_steps_on_part = (
+                int(my_world.current_time_step_index) - int(part_start_step)
+            )
+            snap_tick_count = (
+                int(getattr(current_snap_attacher, "_tick", 0))
+                if current_snap_attacher is not None else 0
+            )
+            is_timeout = _per_part_timeout_reached(
+                part_step_count=part_step_count,
+                sim_steps_on_part=sim_steps_on_part,
+                snap_tick_count=snap_tick_count,
+                timeout_steps=per_part_timeout_steps,
+            )
             if policy.is_done(obs) or is_snap_done or is_timeout:
                 completion_reason = (
                     "snap_done" if is_snap_done else
                     "timeout" if is_timeout else
                     "policy_done"
                 )
+                if is_timeout:
+                    print(
+                        f"[collect] {current_part}: per-part timeout "
+                        f"({per_part_timeout_steps} steps, "
+                        f"sim_on_part={sim_steps_on_part}, "
+                        f"ctrl={part_step_count}, snap_tick={snap_tick_count}) "
+                        f"— advancing.",
+                        flush=True,
+                    )
                 if current_part is not None:
                     part_completion_reasons.append({
                         "part": current_part,
                         "reason": completion_reason,
-                        "step_count": part_step_count,
+                        "step_count": max(part_step_count, sim_steps_on_part),
                     })
                 _start_next_part()
                 continue

@@ -116,6 +116,26 @@ class LeRobotCollectionContractTest(unittest.TestCase):
         self.assertEqual(image.shape, (240, 320, 3))
         self.assertEqual(image.dtype, np.uint8)
 
+    def test_per_part_timeout_uses_sim_and_snap_clocks(self):
+        # Control-path counter alone is not enough: recording can continue via
+        # physics callbacks while the outer control loop is skipped.
+        self.assertFalse(collector._per_part_timeout_reached(
+            part_step_count=0, sim_steps_on_part=0, snap_tick_count=0,
+            timeout_steps=100,
+        ))
+        self.assertTrue(collector._per_part_timeout_reached(
+            part_step_count=100, sim_steps_on_part=0, snap_tick_count=0,
+            timeout_steps=100,
+        ))
+        self.assertTrue(collector._per_part_timeout_reached(
+            part_step_count=0, sim_steps_on_part=100, snap_tick_count=0,
+            timeout_steps=100,
+        ))
+        self.assertTrue(collector._per_part_timeout_reached(
+            part_step_count=0, sim_steps_on_part=0, snap_tick_count=100,
+            timeout_steps=100,
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()
