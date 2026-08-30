@@ -608,24 +608,21 @@ GRADE_POS_TOL_M = 0.01   # 10 mm
 INCLUDE_CLOSE    = True     # phase 3
 INCLUDE_OPEN     = True     # phase 7 (release at descend_place)
 
-# Gripper dwell budgets (number of forward() calls; ~10 Hz => 5 ~= 0.5s).
-SETTLE_CLOSE     = 10
+# Gripper dwell budgets (number of forward() calls at physics rate).
+SETTLE_CLOSE     = 5
 SETTLE_OPEN      = 1
-# Hold dwell at hover_place after the transit lerp arrives, before the
-# descend kicks in. Lets the arm settle from any post-transit momentum so
-# the descend starts from a stable hover.
-SETTLE_HOVER_PLACE = 10
-# Hold dwell at descend_place before the gripper opens, so the release
-# happens with the EE actually settled at the place target (not just
-# crossing the advance tolerance for one step).
-SETTLE_DESCEND_PLACE = 15
+# Hold dwell at hover_place after transit arrives, before descend.
+# Keep near zero unless post-transit momentum is a problem.
+SETTLE_HOVER_PLACE = 0
+# Hold dwell at descend_place before the gripper opens.
+SETTLE_DESCEND_PLACE = 3
 
 # Dwell at the ``return_home`` waypoint after the cspace gate fires, before
 # advancing to the next part's hover_pick. During this dwell the runner
 # zeros joint velocities every step (see run_pick_place.py), so a longer
 # value gives the arm more steady-state v=0 ticks before the next part's
-# first IK call. 10 ≈ 1 s at the rig's default physics rate.
-RETURN_HOME_SETTLE_STEPS = 10
+# first IK call.
+RETURN_HOME_SETTLE_STEPS = 3
 
 # The slowed-motion baseline at revision 35ec027 returned home with the
 # original immediate c-space target. Leave this False to reproduce that
@@ -743,6 +740,12 @@ BASELINE_MOTION_PROFILES = {
         "DESCEND_PICK_STEPS": 0,
         "DESCEND_PLACE_STEPS": 0,
         "WAYPOINT_TIMEOUT_STEPS": 10000,
+        "SETTLE_CLOSE": 5,
+        "SETTLE_OPEN": 3,
+        "SETTLE_HOVER_PLACE": 3,
+        "SETTLE_DESCEND_PLACE": 3,
+        "RETURN_HOME_SETTLE_STEPS": 3,
+        
     },
 }
 

@@ -332,73 +332,81 @@ def _refine_segment(
                 max_joint_error_rad=float(error[offset:offset + settle_frames].max()),
             )
     elif strategy == "velocity":
-        max_velocity = np.max(np.abs(local[:, LEFT_VELOCITY_SLICE]), axis=1)
-        measured_q = local[:, LEFT_JOINT_SLICE]
-        measured_velocity = np.full(len(measured_q), np.inf, dtype=np.float64)
-        if len(measured_q) > 1:
-            measured_velocity[1:] = np.max(
-                np.abs(np.diff(measured_q, axis=0)) * fps,
-                axis=1,
+        # Same as home: the first asset has no between-part return/reset
+        # prefix, so reset→freeze detection must not run on it.
+        if original_begin == 0:
+            evidence.update(
+                skipped=True,
+                reason="first_part_has_no_reset_prefix",
             )
-        freeze_frames = max(1, int(np.ceil(freeze_duration_s * fps)))
-        # A reset is expected to be underway immediately. Requiring an early
-        # spike prevents ordinary low-speed task motion later in the segment
-        # from being mistaken for a reset/freeze boundary.
-        reset_probe_frames = min(3, len(max_velocity))
-        early_reset = np.flatnonzero(
-            max_velocity[:reset_probe_frames] > velocity_threshold_rad_s
-        )
-        if not len(early_reset):
-            offset = 0
-            reset_end = None
-            freeze_begin = None
-            freeze_end = None
         else:
-            reset_end = int(early_reset[0])
-            while (
-                reset_end < len(max_velocity)
-                and max_velocity[reset_end] > velocity_threshold_rad_s
-            ):
-                reset_end += 1
-            search_begin = reset_end
-            relative_freeze = _first_stable_window(
-                measured_velocity[search_begin:] <= freeze_velocity_threshold_rad_s,
-                freeze_frames,
-            )
-            if relative_freeze is None:
-                raise ValueError(
-                    f"segment {segment['name']!r} has reset motion but no "
-                    f"{freeze_duration_s:g}s freeze below "
-                    f"{freeze_velocity_threshold_rad_s} rad/s"
+            max_velocity = np.max(np.abs(local[:, LEFT_VELOCITY_SLICE]), axis=1)
+            measured_q = local[:, LEFT_JOINT_SLICE]
+            measured_velocity = np.full(len(measured_q), np.inf, dtype=np.float64)
+            if len(measured_q) > 1:
+                measured_velocity[1:] = np.max(
+                    np.abs(np.diff(measured_q, axis=0)) * fps,
+                    axis=1,
                 )
-            freeze_begin = search_begin + relative_freeze
-            freeze_end = freeze_begin + freeze_frames
-            while (
-                freeze_end < len(measured_velocity)
-                and measured_velocity[freeze_end] <= freeze_velocity_threshold_rad_s
-            ):
-                freeze_end += 1
-            if freeze_end >= len(max_velocity):
-                raise ValueError(
-                    f"segment {segment['name']!r} freezes after reset but never resumes motion"
-                )
-            offset = freeze_end
-        if offset >= len(max_velocity):
-            raise ValueError(
-                f"velocity pruning removes all frames from segment {segment['name']!r}"
+            freeze_frames = max(1, int(np.ceil(freeze_duration_s * fps)))
+            # A reset is expected to be underway immediately. Requiring an early
+            # spike prevents ordinary low-speed task motion later in the segment
+            # from being mistaken for a reset/freeze boundary.
+            reset_probe_frames = min(3, len(max_velocity))
+            early_reset = np.flatnonzero(
+                max_velocity[:reset_probe_frames] > velocity_threshold_rad_s
             )
-        begin += offset
-        evidence.update(
-            reset_velocity_threshold_rad_s=velocity_threshold_rad_s,
-            freeze_velocity_threshold_rad_s=freeze_velocity_threshold_rad_s,
-            freeze_duration_s=freeze_duration_s,
-            freeze_frames=freeze_frames,
-            reset_detected=bool(len(early_reset)),
-            reset_end=(None if reset_end is None else original_begin + reset_end),
-            freeze_begin=(None if freeze_begin is None else original_begin + freeze_begin),
-            freeze_end=(None if freeze_end is None else original_begin + freeze_end),
-            retained_motion_begin=begin,
-        )
+            if not len(early_reset):
+                offset = 0
+                reset_end = None
+                freeze_begin = None
+                freeze_end = None
+            else:
+                reset_end = int(early_reset[0])
+                while (
+                    reset_end < len(max_velocity)
+                    and max_velocity[reset_end] > velocity_threshold_rad_s
+                ):
+                    reset_end += 1
+                search_begin = reset_end
+                relative_freeze = _first_stable_window(
+                    measured_velocity[search_begin:] <= freeze_velocity_threshold_rad_s,
+                    freeze_frames,
+                )
+                if relative_freeze is None:
+                    raise ValueError(
+                        f"segment {segment['name']!r} has reset motion but no "
+                        f"{freeze_duration_s:g}s freeze below "
+                        f"{freeze_velocity_threshold_rad_s} rad/s"
+                    )
+                freeze_begin = search_begin + relative_freeze
+                freeze_end = freeze_begin + freeze_frames
+                while (
+                    freeze_end < len(measured_velocity)
+                    and measured_velocity[freeze_end] <= freeze_velocity_threshold_rad_s
+                ):
+                    freeze_end += 1
+                if freeze_end >= len(max_velocity):
+                    raise ValueError(
+                        f"segment {segment['name']!r} freezes after reset but never resumes motion"
+                    )
+                offset = freeze_end
+            if offset >= len(max_velocity):
+                raise ValueError(
+                    f"velocity pruning removes all frames from segment {segment['name']!r}"
+                )
+            begin += offset
+            evidence.update(
+                reset_velocity_threshold_rad_s=velocity_threshold_rad_s,
+                freeze_velocity_threshold_rad_s=freeze_velocity_threshold_rad_s,
+                freeze_duration_s=freeze_duration_s,
+                freeze_frames=freeze_frames,
+                reset_detected=bool(len(early_reset)),
+                reset_end=(None if reset_end is None else original_begin + reset_end),
+                freeze_begin=(None if freeze_begin is None else original_begin + freeze_begin),
+                freeze_end=(None if freeze_end is None else original_begin + freeze_end),
+                retained_motion_begin=begin,
+            )
     elif strategy == "waypoint":
         if manifest_row is None or not manifest_row.get("waypoint_annotations_complete", False):
             raise ValueError(

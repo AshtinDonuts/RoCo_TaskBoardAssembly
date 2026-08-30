@@ -90,42 +90,64 @@ class SplitLeRobotSubtasksTest(unittest.TestCase):
         )
 
     def test_velocity_pruning_only_removes_startup_prefix(self):
-        segment = self._segment(length=30, begin=0)
-        states = self._states(30)
-        states[:3, 28:35] = 2.0
-        states[15:, 28:35] = 0.1
-        states[15:, 14:21] = np.arange(1, 16, dtype=np.float64)[:, None] * 0.01
-        states[24, 28:35] = 3.0
+        segment = self._segment(length=30, begin=10)
+        states = self._states(40)
+        local = slice(segment["begin"], segment["end"])
+        states[local, 28:35] = 0.1
+        states[segment["begin"]:segment["begin"] + 3, 28:35] = 2.0
+        states[segment["begin"] + 15:segment["end"], 28:35] = 0.1
+        states[segment["begin"] + 15:segment["end"], 14:21] = (
+            np.arange(1, 16, dtype=np.float64)[:, None] * 0.01
+        )
+        states[segment["begin"] + 24, 28:35] = 3.0
         refined = splitter._refine_segment(
             segment, None, states, "velocity", 2, 0.03, 3, 0.5,
         )
-        self.assertEqual(refined["begin"], 15)
-        self.assertEqual(refined["end"], 30)
-        self.assertEqual(refined["pruning_evidence"]["freeze_begin"], 3)
-        self.assertEqual(refined["pruning_evidence"]["freeze_end"], 15)
+        self.assertEqual(refined["begin"], segment["begin"] + 15)
+        self.assertEqual(refined["end"], segment["end"])
+        self.assertEqual(refined["pruning_evidence"]["freeze_begin"], segment["begin"] + 3)
+        self.assertEqual(refined["pruning_evidence"]["freeze_end"], segment["begin"] + 15)
 
     def test_velocity_pruning_leaves_segment_without_immediate_reset_unchanged(self):
-        segment = self._segment(length=30, begin=0)
-        states = self._states(30)
-        states[:, 28:35] = 0.1
-        states[:, 14:21] = np.arange(30, dtype=np.float64)[:, None] * 0.01
-        states[20, 28:35] = 2.0
+        segment = self._segment(length=30, begin=10)
+        states = self._states(40)
+        local = slice(segment["begin"], segment["end"])
+        states[local, 28:35] = 0.1
+        states[local, 14:21] = np.arange(30, dtype=np.float64)[:, None] * 0.01
+        states[segment["begin"] + 20, 28:35] = 2.0
         refined = splitter._refine_segment(
             segment, None, states, "velocity", 2, 0.03, 3, 0.5,
         )
-        self.assertEqual(refined["begin"], 0)
+        self.assertEqual(refined["begin"], segment["begin"])
         self.assertFalse(refined["pruning_evidence"]["reset_detected"])
 
     def test_velocity_pruning_rejects_reset_without_freeze(self):
-        segment = self._segment(length=30, begin=0)
-        states = self._states(30)
-        states[:, 28:35] = 0.1
-        states[:3, 28:35] = 2.0
-        states[:, 14:21] = np.arange(30, dtype=np.float64)[:, None] * 0.01
+        segment = self._segment(length=30, begin=10)
+        states = self._states(40)
+        local = slice(segment["begin"], segment["end"])
+        states[local, 28:35] = 0.1
+        states[segment["begin"]:segment["begin"] + 3, 28:35] = 2.0
+        states[local, 14:21] = np.arange(30, dtype=np.float64)[:, None] * 0.01
         with self.assertRaisesRegex(ValueError, "no 1s freeze"):
             splitter._refine_segment(
                 segment, None, states, "velocity", 2, 0.03, 3, 0.5,
             )
+
+    def test_velocity_pruning_skips_first_episode_segment(self):
+        segment = {"name": "gear_60teeth", "begin": 0, "end": 30, "pass": True}
+        states = self._states(30)
+        states[:3, 28:35] = 2.0  # would look like reset without a freeze
+        states[:, 14:21] = np.arange(30, dtype=np.float64)[:, None] * 0.01
+        refined = splitter._refine_segment(
+            segment, None, states, "velocity", 2, 0.03, 3, 0.5,
+        )
+        self.assertEqual(refined["begin"], 0)
+        self.assertEqual(refined["frames_removed"], 0)
+        self.assertTrue(refined["pruning_evidence"]["skipped"])
+        self.assertEqual(
+            refined["pruning_evidence"]["reason"],
+            "first_part_has_no_reset_prefix",
+        )
 
     def test_waypoint_pruning_removes_only_leading_transition_phases(self):
         segment = self._segment(begin=0)
