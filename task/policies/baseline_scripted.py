@@ -231,12 +231,13 @@ class BaselinePolicy(Policy):
                          else self.env_info.L_arm_init_q)
         self._is_first_part = False
 
-        # Before joint-space return_home, raise the EE vertically while
-        # holding XY and orientation. Even a smooth c-space path can
-        # sweep the elbow/wrist through the table when started low.
+        # Optional Cartesian retreat before joint-space return_home
+        # (ENABLE_SAFE_RETRACT). Even a smooth c-space path can sweep the
+        # elbow/wrist through the table when started low.
         safe_retract_pos = None
         safe_retract_orn = None
-        if return_home_q is not None:
+        if (return_home_q is not None
+                and bool(getattr(pc, "ENABLE_SAFE_RETRACT", False))):
             ee_pos, ee_orn = obs.ee_pose_L
             ee_pos = np.asarray(ee_pos, dtype=np.float64).reshape(-1)
             ee_orn = np.asarray(ee_orn, dtype=np.float64).reshape(-1)

@@ -89,7 +89,7 @@ RESULTS_JSON_PATH = None
 # Prevents a stuck / buggy policy from hanging the eval. With Cartesian
 # pacing at ~0.1 m/s, a full pick-place can take several thousand steps
 # (hover + descend + transit + settles); 20000 ≈ 100 s at 200 Hz.
-PER_PART_TIMEOUT_STEPS = 20000
+PER_PART_TIMEOUT_STEPS = 6000  # 30 simulated seconds at 200 Hz physics
 
 # Physics warmup: number of my_world.step() iterations to run before the
 # pick-and-place task starts (after each reset / first play). Lets PhysX
@@ -643,10 +643,15 @@ RETURN_HOME_MIN_DURATION_S = 0.5
 BASELINE_MAX_JOINT_VELOCITY_RAD_S = 0.5
 BASELINE_CONTROL_DT_FALLBACK_S = 0.1
 
-# World-frame table-top height (m). Before any between-part return_home
-# c-space motion, the baseline raises the EE vertically to at least
-# TABLE_Z + SAFE_RETRACT_CLEARANCE_M while holding XY and orientation
-# (Cartesian-paced). Parts rest near z≈1.04; 1.0 is the scene table top.
+# Optional between-part Cartesian retreat before return_home. When True,
+# the baseline raises the EE vertically to at least
+# TABLE_Z + SAFE_RETRACT_CLEARANCE_M (holding XY / orientation, Cartesian-
+# paced) so joint-space home motion does not start near the table. When
+# False, between-part motion goes straight to return_home (Cartesian pacing
+# of pick/place waypoints is unchanged).
+ENABLE_SAFE_RETRACT = True
+# World-frame table-top height (m). Parts rest near z≈1.04; 1.0 is the
+# scene table top. Only used when ENABLE_SAFE_RETRACT is True.
 TABLE_Z = 1.0
 SAFE_RETRACT_CLEARANCE_M = 0.35
 # Let residual Cartesian-retreat velocity decay before starting c-space home.
