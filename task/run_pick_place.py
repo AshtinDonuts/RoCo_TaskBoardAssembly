@@ -644,6 +644,15 @@ def _grade_task(stage, snap_fired_parts, results_json_path=None, metadata=None,
     print(f"[grade] summary: pass={n_pass}  fail={n_fail}  missing={n_missing}")
     print("=" * 72)
 
+    payload = {
+        "metadata": dict(metadata or {}),
+        "pos_tol_m": GRADE_POS_TOL_M,
+        "n_pass": n_pass,
+        "n_fail": n_fail,
+        "n_missing": n_missing,
+        "per_part": per_part_results,
+    }
+
     # Optional JSON dump for offline aggregation.
     out_path = (results_json_path
                 if results_json_path is not None
@@ -654,19 +663,13 @@ def _grade_task(stage, snap_fired_parts, results_json_path=None, metadata=None,
                         os.path.dirname(os.path.abspath(__file__)), out_path)))
         try:
             os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
-            payload = {
-                "metadata": dict(metadata or {}),
-                "pos_tol_m": GRADE_POS_TOL_M,
-                "n_pass": n_pass,
-                "n_fail": n_fail,
-                "n_missing": n_missing,
-                "per_part": per_part_results,
-            }
             with open(abs_path, "w") as f:
                 json.dump(payload, f, indent=2)
             print(f"[grade] wrote results JSON -> {abs_path}")
         except Exception as e:
             print(f"[grade] WARN: failed to write results JSON to {abs_path}: {e}")
+
+    return payload
 
 
 def _parse_args():

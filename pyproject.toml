@@ -9,6 +9,12 @@ dependencies = [
 ]
 
 [dependency-groups]
+collection = [
+    "lerobot==0.4.4",
+    "pandas>=2.2,<3",
+    "pillow>=10,<12",
+    "pyarrow>=17,<22",
+]
 dev = [
     "pytest",
     "ruff",
@@ -21,6 +27,10 @@ environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 override-dependencies = [
     # Isaac Sim requires numpy 1.x.
     "numpy==1.26.4",
+    # LeRobot 0.4.4 requires packaging>=24.2 while Isaac Sim declares an
+    # exact 23.0 pin. Both are imported by the in-process dataset collector;
+    # Isaac's runtime does not rely on the removed packaging APIs.
+    "packaging==24.2",
     # Work around Isaac Sim's unconditional pywin32 dependency on non-Windows platforms.
     "pywin32==306 ; sys_platform == 'win32'",
 ]

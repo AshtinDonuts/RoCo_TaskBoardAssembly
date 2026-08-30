@@ -1,13 +1,12 @@
 import argparse
 from collections import deque
 import json
-import shutil
+import os
 import traceback
 from pathlib import Path
 from textwrap import dedent
 
 import numpy as np
-from PIL import Image
 
 import run_pick_place as rp
 from isaacsim.core.utils.types import ArticulationAction
@@ -16,11 +15,12 @@ from policy_api import EnvInfo, Observation, PartTarget
 
 
 TASK_DESCRIPTION = (
-    "TaskBoardAssembly baseline scripted rollout collected from Isaac Sim. "
-    "actions.* are absolute Cartesian targets encoded as xyz + rotation-vector + gripper."
+    "assemble the parts onto the task board"
 )
-DEPTH_SCALE_MM = 1000.0
-DEPTH_MAX_MM = np.iinfo(np.uint16).max
+ROBOT_TYPE = "vega_1u"
+GRIPPER_OPEN_LIMIT = 0.6649704
+IMAGE_HEIGHT = 240
+IMAGE_WIDTH = 320
 
 
 def _parse_args():
@@ -35,15 +35,13 @@ def _parse_args():
               - Run with the Isaac Sim Python environment used by this repository.
               - Install lerobot 0.4.4 in that environment.
               - Keep numpy on a 1.x build compatible with Isaac Sim camera annotators.
-              - Pillow is required for 16-bit depth PNG encoding.
 
             Example:
               OMNI_KIT_ACCEPT_EULA=YES ISAACSIM_HEADLESS=1 \
-              ./.conda-isaacsim/bin/python task/collect_lerobot_v3.py \
-                --overwrite \
-                --output-root artifacts/lerobot_taskboard_episode \
-                --sample-hz 30 \
-                --include-depth
+              uv run --group collection python task/collect_lerobot_v3.py \
+                --output-root artifacts/lerobot/source \
+                --results-json artifacts/lerobot/results/seed-000.json \
+                --random-seed 0 --sample-hz 10
             """
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -56,7 +54,7 @@ def _parse_args():
     parser.add_argument(
         "--repo-id",
         type=str,
-        default="taskboard/vega_1u_lerobot_episode",
+        default="taskboard/aware_35ec027_full_assembly",
     )
     parser.add_argument(
         "--policy",
@@ -65,9 +63,9 @@ def _parse_args():
     parser.add_argument(
         "--sample-hz",
         type=float,
-        default=30.0,
+        default=10.0,
         help=(
-            "Target recording rate in Hz. Default is 30 Hz. "
+            "Target recording rate in Hz. Default is 10 Hz. "
             "Ignored when --sample-stride is set."
         ),
     )
@@ -103,25 +101,20 @@ def _parse_args():
     parser.add_argument(
         "--results-json",
         type=Path,
-        default=Path("/tmp/taskboard_lerobot_collect_results.json"),
+        required=True,
+        help="Final per-seed transaction/result JSON.",
     )
     parser.add_argument(
         "--save-summary",
         type=Path,
         default=None,
     )
+    parser.add_argument("--random-seed", type=int, required=True)
     parser.add_argument(
-        "--include-depth",
+        "--append",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=(
-            "Store depth as 16-bit PNG images in millimeters. Enabled by default; use "
-            "--no-include-depth to disable."
-        ),
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
+        help="Append to an existing compatible dataset (default: true).",
     )
     return parser.parse_args()
 
@@ -159,111 +152,102 @@ def _pack_cartesian_action(pos, quat, gripper):
 
 def _as_rgb(frame):
     if frame is None:
-        return np.zeros((480, 640, 3), dtype=np.uint8)
+        return np.zeros((IMAGE_HEIGHT, IMAGE_WIDTH, 3), dtype=np.uint8)
     arr = np.asarray(frame)
     if arr.ndim == 2:
         arr = np.repeat(arr[..., None], 3, axis=-1)
     if arr.shape[-1] == 4:
         arr = arr[..., :3]
-    return arr.astype(np.uint8, copy=False)
+    arr = arr.astype(np.uint8, copy=False)
+    if arr.shape[:2] == (IMAGE_HEIGHT, IMAGE_WIDTH):
+        return arr
+    try:
+        import cv2
+
+        return cv2.resize(arr, (IMAGE_WIDTH, IMAGE_HEIGHT), interpolation=cv2.INTER_AREA)
+    except Exception:
+        from PIL import Image
+
+        return np.asarray(Image.fromarray(arr).resize((IMAGE_WIDTH, IMAGE_HEIGHT)))
 
 
-def _as_depth(frame):
-    if frame is None:
-        return np.zeros((480, 640, 1), dtype=np.float32)
-    arr = np.asarray(frame, dtype=np.float32)
-    if arr.ndim == 2:
-        arr = arr[..., None]
-    return arr.astype(np.float32, copy=False)
-
-
-def _encode_depth_image(frame):
-    depth = _as_depth(frame)[..., 0]
-    depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
-    depth_mm = np.clip(np.rint(depth * DEPTH_SCALE_MM), 0.0, float(DEPTH_MAX_MM)).astype(np.uint16)
-    return Image.fromarray(depth_mm)
-
-
-def _feature_spec(include_depth):
-    features = {
-        "actions.left_arm_action": {
+def _feature_spec():
+    return {
+        "action": {
             "dtype": "float32",
-            "shape": (7,),
-            "names": ["x", "y", "z", "rx", "ry", "rz", "gripper"],
+            "shape": (14,),
+            "names": [
+                "left_ee_x", "left_ee_y", "left_ee_z",
+                "left_ee_rx", "left_ee_ry", "left_ee_rz", "left_gripper",
+                "right_ee_x", "right_ee_y", "right_ee_z",
+                "right_ee_rx", "right_ee_ry", "right_ee_rz", "right_gripper",
+            ],
         },
-        "actions.right_arm_action": {
+        "observation.state": {
             "dtype": "float32",
-            "shape": (7,),
-            "names": ["x", "y", "z", "rx", "ry", "rz", "gripper"],
+            "shape": (44,),
+            "names": (
+                [f"left_ee_{v}" for v in ("x", "y", "z", "qw", "qx", "qy", "qz")]
+                + [f"right_ee_{v}" for v in ("x", "y", "z", "qw", "qx", "qy", "qz")]
+                + [f"left_joint_{i}" for i in range(7)]
+                + [f"right_joint_{i}" for i in range(7)]
+                + [f"left_joint_velocity_{i}" for i in range(7)]
+                + [f"right_joint_velocity_{i}" for i in range(7)]
+                + ["left_gripper", "right_gripper"]
+            ),
         },
-        "observations.left_arm_ee_pose": {
-            "dtype": "float32",
-            "shape": (7,),
-            "names": ["x", "y", "z", "qw", "qx", "qy", "qz"],
-        },
-        "observations.right_arm_ee_pose": {
-            "dtype": "float32",
-            "shape": (7,),
-            "names": ["x", "y", "z", "qw", "qx", "qy", "qz"],
-        },
-        "observations.left_arm_joint_position": {
-            "dtype": "float32",
-            "shape": (7,),
-            "names": [f"left_joint_{i}" for i in range(7)],
-        },
-        "observations.right_arm_joint_position": {
-            "dtype": "float32",
-            "shape": (7,),
-            "names": [f"right_joint_{i}" for i in range(7)],
-        },
-        "observations.left_arm_joint_velocity": {
-            "dtype": "float32",
-            "shape": (7,),
-            "names": [f"left_joint_{i}" for i in range(7)],
-        },
-        "observations.right_arm_joint_velocity": {
-            "dtype": "float32",
-            "shape": (7,),
-            "names": [f"right_joint_{i}" for i in range(7)],
-        },
-        "observations.left_gripper_position": {
-            "dtype": "float32",
-            "shape": (1,),
-            "names": ["left_gripper"],
-        },
-        "observations.right_gripper_position": {
-            "dtype": "float32",
-            "shape": (1,),
-            "names": ["right_gripper"],
-        },
-        "observations.rgb_head": {
+        "observation.images.head": {
             "dtype": "video",
-            "shape": (480, 640, 3),
+            "shape": (IMAGE_HEIGHT, IMAGE_WIDTH, 3),
             "names": ["height", "width", "rgb"],
         },
-        "observations.rgb_left_hand": {
+        "observation.images.left_hand": {
             "dtype": "video",
-            "shape": (480, 640, 3),
+            "shape": (IMAGE_HEIGHT, IMAGE_WIDTH, 3),
             "names": ["height", "width", "rgb"],
         },
-        "observations.rgb_right_hand": {
+        "observation.images.right_hand": {
             "dtype": "video",
-            "shape": (480, 640, 3),
+            "shape": (IMAGE_HEIGHT, IMAGE_WIDTH, 3),
             "names": ["height", "width", "rgb"],
         },
     }
-    if include_depth:
-        for key in (
-            "observations.depth_head",
-            "observations.depth_left_hand",
-            "observations.depth_right_hand",
-        ):
-            features[key] = {
-                "dtype": "image",
-                "shape": (480, 640, 1),
-                "names": ["height", "width", "channel"],
-            }
-    return features
+
+
+def _gripper_ratio(value):
+    return np.float32(np.clip(float(value) / GRIPPER_OPEN_LIMIT, 0.0, 1.0))
+
+
+def _pack_state(l_pos, l_quat, r_pos, r_quat, q, qd, li, ri, lg, rg):
+    return np.concatenate([
+        _pack_pose(l_pos, l_quat),
+        _pack_pose(r_pos, r_quat),
+        np.asarray(q, dtype=np.float32)[li],
+        np.asarray(q, dtype=np.float32)[ri],
+        np.asarray(qd, dtype=np.float32)[li],
+        np.asarray(qd, dtype=np.float32)[ri],
+        np.asarray([_gripper_ratio(q[lg]), _gripper_ratio(q[rg])], dtype=np.float32),
+    ]).astype(np.float32)
+
+
+def _part_segments(frame_parts, part_order):
+    if not frame_parts:
+        raise ValueError("cannot build part segments without recorded frames")
+    segments = []
+    begin = 0
+    active = frame_parts[0]
+    for idx, name in enumerate(frame_parts[1:], 1):
+        if name != active:
+            segments.append({"part": active, "begin": begin, "end": idx})
+            begin, active = idx, name
+    segments.append({"part": active, "begin": begin, "end": len(frame_parts)})
+    actual = [segment["part"] for segment in segments]
+    expected = list(part_order)
+    if actual != expected:
+        raise ValueError(f"recorded part order {actual!r} does not match runtime order {expected!r}")
+    if any(segment["end"] <= segment["begin"] for segment in segments):
+        raise ValueError("every part must have a nonempty recorded segment")
+    return segments
 
 
 def _resolve_gripper_cmd(command, cfg, current_value):
@@ -299,9 +283,7 @@ def _left_action_target(policy, obs, current_cfg):
 
 
 def _build_summary_path(args):
-    if args.save_summary is not None:
-        return args.save_summary
-    return args.output_root / "taskboard_lerobot_summary.json"
+    return args.save_summary
 
 
 def _resolve_sample_stride(args, physics_hz):
@@ -344,10 +326,7 @@ def main():
         raise ValueError("--max-parts must be >= 0")
 
     output_root = args.output_root.resolve()
-    if output_root.exists():
-        if not args.overwrite:
-            raise FileExistsError(f"output root already exists: {output_root}")
-        shutil.rmtree(output_root)
+    args.results_json = args.results_json.resolve()
     output_root.parent.mkdir(parents=True, exist_ok=True)
 
     physics_hz = 200.0
@@ -357,18 +336,99 @@ def main():
     sample_fps = recording_cfg["sample_fps"]
     effective_max_parts = len(rp.pc.part_order) if args.max_parts == 0 else int(args.max_parts)
     effective_max_frames = None if args.max_recorded_frames == 0 else int(args.max_recorded_frames)
-    dataset = LeRobotDataset.create(
-        repo_id=args.repo_id,
-        root=output_root,
-        fps=sample_fps,
-        robot_type="vega_1u_taskboard",
-        features=_feature_spec(args.include_depth),
-        use_videos=True,
-        image_writer_threads=4,
-        streaming_encoding=True,
-        encoder_queue_maxsize=120,
-        vcodec="h264",
+    expected_features = _feature_spec()
+    if output_root.exists():
+        if not args.append:
+            raise FileExistsError(f"output root already exists: {output_root}")
+        dataset = LeRobotDataset(
+            repo_id=args.repo_id,
+            root=output_root,
+            streaming_encoding=True,
+            encoder_queue_maxsize=120,
+            vcodec="h264",
+        )
+        info = dataset.meta.info
+        mismatches = []
+        if int(info["fps"]) != sample_fps:
+            mismatches.append(f"fps={info['fps']} (requested {sample_fps})")
+        if info.get("robot_type") != ROBOT_TYPE:
+            mismatches.append(f"robot_type={info.get('robot_type')!r}")
+        for key, spec in expected_features.items():
+            actual = info.get("features", {}).get(key)
+            if actual is None:
+                mismatches.append(f"missing feature {key}")
+                continue
+            if actual.get("dtype") != spec["dtype"] or tuple(actual.get("shape", ())) != tuple(spec["shape"]):
+                mismatches.append(f"incompatible feature {key}: {actual}")
+        extra = set(info.get("features", {})) - set(expected_features) - {
+            "timestamp", "frame_index", "episode_index", "index", "task_index"
+        }
+        if extra:
+            mismatches.append(f"unexpected features: {sorted(extra)}")
+        if mismatches:
+            raise ValueError("cannot append to incompatible dataset: " + "; ".join(mismatches))
+    else:
+        dataset = LeRobotDataset.create(
+            repo_id=args.repo_id,
+            root=output_root,
+            fps=sample_fps,
+            robot_type=ROBOT_TYPE,
+            features=expected_features,
+            use_videos=True,
+            image_writer_threads=4,
+            streaming_encoding=True,
+            encoder_queue_maxsize=120,
+            vcodec="h264",
+        )
+    episode_index = int(dataset.meta.total_episodes)
+    pending_result_path = args.results_json.with_suffix(".pending.json")
+    if pending_result_path.is_file():
+        pending = json.loads(pending_result_path.read_text(encoding="utf-8"))
+        pending_episode = int(pending.get("episode_index", -1))
+        pending_seed = int(pending.get("seed", -1))
+        if pending_seed != args.random_seed:
+            raise ValueError(
+                f"pending result seed {pending_seed} does not match requested seed {args.random_seed}"
+            )
+        if pending_episode < episode_index:
+            args.results_json.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(pending_result_path, args.results_json)
+            dataset.finalize()
+            print(
+                f"[collect] recovered finalized episode {pending_episode} "
+                f"for seed {args.random_seed}",
+                flush=True,
+            )
+            return
+        if pending_episode == episode_index:
+            pending_result_path.unlink()
+            print(
+                f"[collect] discarding uncommitted pending result for episode {pending_episode}",
+                flush=True,
+            )
+        else:
+            raise RuntimeError(
+                f"pending result episode {pending_episode} is ahead of dataset episode {episode_index}"
+            )
+
+    evaluated_parts = tuple(
+        name for name in rp.pc.part_order
+        if isinstance(name, str) and not name.startswith("<")
     )
+    randomized_trial = rp.XYRandomization.sample(args.random_seed, evaluated_parts)
+    print(
+        f"[collect] randomization seed={args.random_seed} "
+        f"episode_index={episode_index}",
+        flush=True,
+    )
+
+    def _runtime_config(name):
+        return randomized_trial.shifted_config(name, rp.pc.get_part_config(name))
+
+    def _policy_config(name):
+        return rp.resolve_policy_config(
+            name, rp.pc.get_part_config(name), trial=randomized_trial, blind=False
+        )
 
     camera_output_enabled = True
     enable_camera_viewports = bool(rp.pc.enable_camera_viewports and not rp._HEADLESS)
@@ -394,8 +454,10 @@ def main():
         joint_closed_position=np.array([rp.pc.PART_DEFAULTS["gripper_close"]]),
         enable_camera_viewports=enable_camera_viewports,
         enable_camera_output=camera_output_enabled,
+        board_offset=randomized_trial.board_offset,
+        part_offsets=randomized_trial.part_offsets,
     )
-    rp.import_missing_parts()
+    rp.import_missing_parts(randomized_trial.part_offsets)
 
     l_controller = my_controller["L"]
     r_controller = my_controller["R"]
@@ -455,6 +517,7 @@ def main():
     pending_record_queue = deque()
     record_sub = None
     recorded_parts = []
+    recorded_frame_parts = []
     part_completion_reasons = []
     per_part_timeout_steps = int(
         getattr(policy, "PER_PART_TIMEOUT_STEPS",
@@ -476,7 +539,6 @@ def main():
 
     def _camera_payload():
         rgb = {"head": None, "L_wrist": None, "R_wrist": None}
-        depth = {"head": None, "L_wrist": None, "R_wrist": None}
         for key, cam in (("head", head_depth_camera), ("L_wrist", l_wrist_camera), ("R_wrist", r_wrist_camera)):
             if cam is None:
                 continue
@@ -486,14 +548,7 @@ def main():
                     rgb[key] = np.asarray(rgba[..., :3], dtype=np.uint8)
             except Exception:
                 pass
-            if args.include_depth:
-                try:
-                    frame = cam.get_current_frame()
-                    if frame and frame.get("distance_to_image_plane") is not None:
-                        depth[key] = np.asarray(frame["distance_to_image_plane"], dtype=np.float32)
-                except Exception:
-                    pass
-        return rgb, depth
+        return rgb
 
     def _build_observation(step_idx_override=None):
         full_q = np.asarray(l_robot.get_joint_positions(), dtype=np.float64)
@@ -503,7 +558,7 @@ def main():
             full_qd = np.zeros_like(full_q)
 
         ee_pos, ee_orn = _actual_ee_pose(l_controller)
-        rgb, depth = _camera_payload()
+        rgb = _camera_payload()
 
         snap_fired = bool(current_snap_attacher is not None and current_snap_attacher.attached)
         return Observation(
@@ -513,14 +568,14 @@ def main():
             L_gripper_position=float(full_q[l_gripper_dof_index]),
             ee_pose_L=(ee_pos, ee_orn),
             rgb=rgb,
-            depth=depth,
+            depth={"head": None, "L_wrist": None, "R_wrist": None},
             intrinsics={"head": None, "L_wrist": None, "R_wrist": None},
             snap_fired=snap_fired,
             target_part=current_part if isinstance(current_part, str) else None,
         )
 
     def _build_part_target(name):
-        cfg = rp.pc.get_part_config(name)
+        cfg = _policy_config(name)
         snap = cfg.get("snap") or {}
         def _arr(v):
             return None if v is None else np.asarray(v, dtype=np.float64).copy()
@@ -564,7 +619,7 @@ def main():
 
         part_activation_count += 1
         recorded_parts.append(current_part)
-        cfg = rp.pc.get_part_config(current_part)
+        cfg = _runtime_config(current_part)
         if cfg.get("release_mode", "open") == "snap":
             snap_cfg = cfg.get("snap")
             current_snap_attacher = rp.build_snap_attacher(stage, current_part, snap_cfg)
@@ -626,34 +681,32 @@ def main():
         r_pos, r_orn = _actual_ee_pose(r_controller)
         full_q = np.asarray(obs.joint_positions, dtype=np.float32)
         full_qd = np.asarray(obs.joint_velocities, dtype=np.float32)
-        current_cfg = rp.pc.get_part_config(current_part) if current_part is not None else {}
+        current_cfg = _policy_config(current_part) if current_part is not None else {}
         l_target_pos, l_target_orn, l_grip_cmd = _left_action_target(policy, obs, current_cfg)
         r_grip = float(full_q[r_gripper_dof_index])
 
+        left_action = _pack_cartesian_action(
+            l_target_pos, l_target_orn, _gripper_ratio(l_grip_cmd)
+        )
+        right_action = _pack_cartesian_action(
+            r_pos, r_orn, _gripper_ratio(r_grip)
+        )
         frame = {
-            "actions.left_arm_action": _pack_cartesian_action(l_target_pos, l_target_orn, l_grip_cmd),
-            "actions.right_arm_action": _pack_cartesian_action(r_pos, r_orn, r_grip),
-            "observations.left_arm_ee_pose": _pack_pose(l_pos, l_orn),
-            "observations.right_arm_ee_pose": _pack_pose(r_pos, r_orn),
-            "observations.left_arm_joint_position": full_q[l_arm_dof_indices].astype(np.float32),
-            "observations.right_arm_joint_position": full_q[r_arm_dof_indices].astype(np.float32),
-            "observations.left_arm_joint_velocity": full_qd[l_arm_dof_indices].astype(np.float32),
-            "observations.right_arm_joint_velocity": full_qd[r_arm_dof_indices].astype(np.float32),
-            "observations.left_gripper_position": np.array([float(full_q[l_gripper_dof_index])], dtype=np.float32),
-            "observations.right_gripper_position": np.array([float(full_q[r_gripper_dof_index])], dtype=np.float32),
-            "observations.rgb_head": _as_rgb(obs.rgb.get("head")),
-            "observations.rgb_left_hand": _as_rgb(obs.rgb.get("L_wrist")),
-            "observations.rgb_right_hand": _as_rgb(obs.rgb.get("R_wrist")),
+            "action": np.concatenate([left_action, right_action]).astype(np.float32),
+            "observation.state": _pack_state(
+                l_pos, l_orn, r_pos, r_orn,
+                full_q, full_qd,
+                l_arm_dof_indices, r_arm_dof_indices,
+                l_gripper_dof_index, r_gripper_dof_index,
+            ),
+            "observation.images.head": _as_rgb(obs.rgb.get("head")),
+            "observation.images.left_hand": _as_rgb(obs.rgb.get("L_wrist")),
+            "observation.images.right_hand": _as_rgb(obs.rgb.get("R_wrist")),
             "task": TASK_DESCRIPTION,
         }
-        if args.include_depth:
-            frame.update({
-                "observations.depth_head": _encode_depth_image(obs.depth.get("head")),
-                "observations.depth_left_hand": _encode_depth_image(obs.depth.get("L_wrist")),
-                "observations.depth_right_hand": _encode_depth_image(obs.depth.get("R_wrist")),
-            })
         pending_record_queue.append({
             "frame": frame,
+            "part": current_part,
             "sim_time_s": float(sim_time_s - record_time_origin_s),
             "step_idx": int(step_idx),
         })
@@ -672,6 +725,7 @@ def main():
             dataset.add_frame(item["frame"])
             if dataset.episode_buffer is not None and dataset.episode_buffer["timestamp"]:
                 dataset.episode_buffer["timestamp"][-1] = item["sim_time_s"]
+            recorded_frame_parts.append(item["part"])
             recorded_frames += 1
             frame_cap_label = ("unbounded" if effective_max_frames is None else str(effective_max_frames))
             print(f"[collect] recorded frame {recorded_frames}/{frame_cap_label} at sim step {item['step_idx']}")
@@ -694,15 +748,16 @@ def main():
         "effective_max_parts": effective_max_parts,
         "max_sim_steps": args.max_sim_steps,
         "effective_max_sim_steps": effective_max_sim_steps,
-        "include_depth": bool(args.include_depth),
+        "episode_index": episode_index,
+        "seed": args.random_seed,
+        "xy_randomization": randomized_trial.as_dict(),
         "joint_dof_per_arm": 7,
-        "action_encoding": "absolute_cartesian_target_xyz_rotvec_gripper",
+        "action_encoding": "absolute_cartesian_target_xyz_rotvec_normalized_gripper",
         "notes": [
             "right arm is held at its initial pose by the current runner",
-            "depth is stored as 16-bit PNG images in millimeters",
             "frames are selected from physics-step callbacks instead of the outer control loop",
             "stored timestamps are episode-relative physics times written explicitly into the dataset",
-            "sample-hz mode uses simulation-time scheduling so 30 Hz is not rounded down to a fixed 7-step stride",
+            "sample-hz mode uses simulation-time scheduling",
             "vega_1u exposes 7 arm joints per side, not 6",
         ],
     }
@@ -750,7 +805,7 @@ def main():
             if current_snap_attacher is not None and current_snap_attacher.attached:
                 snap_fired_parts.add(current_part)
 
-            cfg = rp.pc.get_part_config(current_part)
+            cfg = _runtime_config(current_part)
             is_snap_done = (
                 cfg.get("release_mode") == "snap"
                 and current_snap_attacher is not None
@@ -789,27 +844,66 @@ def main():
         if recorded_frames == 0:
             raise RuntimeError("no frames were recorded")
         _flush_record_queue()
-        dataset.save_episode(parallel_encoding=False)
-        dataset.finalize()
+        if effective_max_parts != len(evaluated_parts):
+            raise RuntimeError("only full nine-part episodes may be committed to the batch dataset")
 
-        summary.update({
+        segments = _part_segments(recorded_frame_parts, evaluated_parts)
+        reasons = {row["part"]: row for row in part_completion_reasons}
+        grade = rp._grade_task(
+            stage,
+            snap_fired_parts,
+            results_json_path=None,
+            metadata={
+                "completion_reason": "complete",
+                "completed_parts": len(recorded_parts),
+                "total_task_steps": int(sum(row["step_count"] for row in part_completion_reasons)),
+                "sim_time_s": float(my_world.current_time_step_index * physics_dt),
+                "xy_randomization": randomized_trial.as_dict(),
+                "blind_to_xy_randomization": False,
+            },
+            config_resolver=_runtime_config,
+        )
+        outcomes = {row["name"]: row for row in grade["per_part"]}
+        for segment in segments:
+            name = segment["part"]
+            segment["name"] = segment.pop("part")
+            segment["pass"] = bool(outcomes[name]["pass"])
+            segment["completion_reason"] = reasons[name]["reason"]
+            segment["task_steps"] = int(reasons[name]["step_count"])
+
+        result = {
+            "episode_index": episode_index,
+            "seed": args.random_seed,
+            "xy_randomization": randomized_trial.as_dict(),
+            "completion_reason": "complete",
             "recorded_frames": recorded_frames,
             "recorded_parts": recorded_parts,
-            "part_completion_reasons": part_completion_reasons,
-            "results_json": str(args.results_json),
-        })
+            "segments": segments,
+            **grade,
+            "collector": dict(summary),
+        }
         args.results_json.parent.mkdir(parents=True, exist_ok=True)
-        args.results_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        pending_tmp = pending_result_path.with_suffix(".tmp")
+        pending_tmp.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        os.replace(pending_tmp, pending_result_path)
+
+        dataset.save_episode(parallel_encoding=False)
+        dataset.finalize()
+        os.replace(pending_result_path, args.results_json)
+
+        summary.update(result)
         summary_path = _build_summary_path(args)
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        if summary_path is not None:
+            summary_path = summary_path.resolve()
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(summary, indent=2))
     except Exception:
         print("[collect] unhandled exception:", flush=True)
         print(traceback.format_exc(), flush=True)
         raise
     finally:
-        record_sub = None
+        del record_sub
         try:
             rp.simulation_app.close()
         except Exception:
