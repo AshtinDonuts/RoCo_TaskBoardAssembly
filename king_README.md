@@ -6,10 +6,11 @@ Task A.
 Task B.
 Find and use a suitable smoother, slower motion planner - use it with the scripted_baseline file. The purpose is a direct substitute for current motion planner in the scripted baseline, which produces extremely jerky motions.
 
-Failed:
-❌ RPMFlow - exotic motion planner -> inaccurate path planning, difficult (for codex) to debug.
-- Simple Slowing down motion
+❌ RPMFlow - more of an exotic motion planner -> poor path planning, difficult (for codex) to debug.
+✅ Cartesian interpolation between existing waypoints
 - Simple accel / decel
+
+Tune params here: [param config](task/param_config.py)
 
 
 Task C.
