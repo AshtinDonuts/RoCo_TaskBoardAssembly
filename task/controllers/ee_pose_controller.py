@@ -80,6 +80,36 @@ def _quat_angle(q1, q2):
     return 2.0 * float(np.arccos(d))
 
 
+def _quat_slerp(q0, q1, t):
+    """Spherical linear interpolation between unit quaternions (wxyz).
+
+    ``t`` in [0, 1]. Always takes the short arc (negates ``q1`` if needed).
+    """
+    q0 = np.asarray(q0, dtype=np.float64).reshape(-1).copy()
+    q1 = np.asarray(q1, dtype=np.float64).reshape(-1).copy()
+    t = float(np.clip(t, 0.0, 1.0))
+    if t <= 0.0:
+        return q0
+    if t >= 1.0:
+        return q1
+    dot = float(np.dot(q0, q1))
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    if dot > 0.9995:
+        # Nearly identical — fall back to normalized lerp.
+        out = q0 + t * (q1 - q0)
+        n = float(np.linalg.norm(out))
+        return out / n if n > 0.0 else q0
+    dot = min(1.0, max(-1.0, dot))
+    theta_0 = float(np.arccos(dot))
+    sin_0 = float(np.sin(theta_0))
+    theta = theta_0 * t
+    s0 = float(np.sin(theta_0 - theta)) / sin_0
+    s1 = float(np.sin(theta)) / sin_0
+    return s0 * q0 + s1 * q1
+
+
 def _approach_axis_world(quat_wxyz):
     """Return the gripper's local +Z axis expressed in world coords.
 
@@ -279,9 +309,15 @@ class EEPathFollower:
     ``orientation_tolerance`` (radians) of the target — at which point the
     next waypoint becomes active on the following ``step()`` call.
 
-    The controller's IK keeps targeting the *current* waypoint each step;
-    physics converges over many steps. Once all waypoints are reached the
-    follower marks itself done and emits a no-op action (all-None joints).
+    By default the controller's IK targets the *current* waypoint each
+    step and physics converges over many steps. With
+    ``max_ee_step_m`` set, the IK command instead walks in Cartesian space
+    toward that terminal (translation capped per step, orientation via
+    quaternion slerp), while advance remains gated on the actual EE
+    reaching the original terminal. Gripper close/open is issued only
+    once the commanded pose has arrived there. Once all waypoints are
+    reached the follower marks itself done and emits a no-op action
+    (all-None joints).
     """
 
     def __init__(
@@ -291,6 +327,8 @@ class EEPathFollower:
         orientation_tolerance: float = 0.05,  # ~3 deg
         cspace_tolerance: float = 0.05,     # ~3 deg per-joint; for joint-lerp wps
         default_timeout_steps: Optional[int] = None,
+        max_ee_step_m: Optional[float] = None,
+        max_ee_orn_step_rad: Optional[float] = None,
     ) -> None:
         self._ctrl = ee_controller
         self._pos_tol = float(position_tolerance)
@@ -304,6 +342,34 @@ class EEPathFollower:
             int(default_timeout_steps) if default_timeout_steps is not None
             else None
         )
+        # Cartesian pacing: when set, the IK target walks toward each
+        # waypoint's terminal pose by at most ``max_ee_step_m`` metres
+        # (and ``max_ee_orn_step_rad`` radians of slerp) per step(),
+        # instead of snapping the IK command to the terminal. Advance is
+        # still gated on the *actual* EE reaching the original terminal.
+        # Gripper close/open commands are withheld until the commanded
+        # pose has arrived at that terminal. None disables pacing
+        # (legacy snap-to-waypoint IK target).
+        self._max_ee_step_m = (
+            None if max_ee_step_m is None else float(max_ee_step_m)
+        )
+        if self._max_ee_step_m is not None and (
+                not np.isfinite(self._max_ee_step_m)
+                or self._max_ee_step_m <= 0.0):
+            raise ValueError(
+                f"max_ee_step_m must be finite and > 0, got {max_ee_step_m!r}"
+            )
+        self._max_ee_orn_step_rad = (
+            None if max_ee_orn_step_rad is None
+            else float(max_ee_orn_step_rad)
+        )
+        if self._max_ee_orn_step_rad is not None and (
+                not np.isfinite(self._max_ee_orn_step_rad)
+                or self._max_ee_orn_step_rad <= 0.0):
+            raise ValueError(
+                f"max_ee_orn_step_rad must be finite and > 0, "
+                f"got {max_ee_orn_step_rad!r}"
+            )
         self._waypoints: List[Waypoint] = []
         self._idx = 0
         self._done = False
@@ -327,6 +393,12 @@ class EEPathFollower:
         self._lerp_q_B = None
         self._lerp_seg_idx = -1   # index of the first joint_lerp wp in the
                                   # current segment, -1 if no active segment.
+        # Cartesian-pacing commanded pose (seeded from actual EE / previous
+        # command; walks toward the active waypoint terminal each step).
+        self._cmd_pos = None
+        self._cmd_orn = None
+        self._cmd_idx = -1
+        self._cmd_at_terminal = True
 
     def set_path(self, waypoints) -> None:
         self._waypoints = [self._normalize_wp(w) for w in waypoints]
@@ -342,6 +414,7 @@ class EEPathFollower:
         self._lerp_q_A = None
         self._lerp_q_B = None
         self._lerp_seg_idx = -1
+        self._clear_cmd_state()
 
     def reset(self) -> None:
         self._idx = 0
@@ -356,7 +429,14 @@ class EEPathFollower:
         self._lerp_q_A = None
         self._lerp_q_B = None
         self._lerp_seg_idx = -1
+        self._clear_cmd_state()
         self._ctrl.reset()
+
+    def _clear_cmd_state(self) -> None:
+        self._cmd_pos = None
+        self._cmd_orn = None
+        self._cmd_idx = -1
+        self._cmd_at_terminal = True
 
     @staticmethod
     def _normalize_wp(w) -> Waypoint:
@@ -458,6 +538,90 @@ class EEPathFollower:
         self._lerp_q_A = None
         self._lerp_q_B = None
         self._lerp_seg_idx = -1
+
+    def _cartesian_pacing_enabled(self) -> bool:
+        return self._max_ee_step_m is not None
+
+    def _seed_cmd_pose(self, actual_pos, actual_orn, target_orn) -> None:
+        """Seed the commanded pose when entering a new Cartesian waypoint.
+
+        Prefers continuity from the previous command (so PD lag doesn't
+        yank the IK target backward). Falls back to the actual EE pose
+        on the first paced step of a path.
+        """
+        if self._cmd_pos is None:
+            self._cmd_pos = np.asarray(actual_pos, dtype=np.float64).reshape(-1).copy()
+        if target_orn is None:
+            self._cmd_orn = None
+        elif self._cmd_orn is None:
+            self._cmd_orn = np.asarray(
+                actual_orn if actual_orn is not None else target_orn,
+                dtype=np.float64,
+            ).reshape(-1).copy()
+        self._cmd_idx = self._idx
+        self._cmd_at_terminal = False
+
+    def _step_cmd_toward(self, target_pos, target_orn) -> tuple:
+        """Advance the commanded EE pose one capped Cartesian step.
+
+        Returns ``(cmd_pos, cmd_orn, at_terminal)``. Translation is limited
+        to ``max_ee_step_m``; orientation uses quaternion slerp with the
+        same fraction when translating, or ``max_ee_orn_step_rad`` when
+        the motion is orientation-only.
+        """
+        target_pos = np.asarray(target_pos, dtype=np.float64).reshape(-1)
+        delta = target_pos - self._cmd_pos
+        dist = float(np.linalg.norm(delta))
+        max_step = self._max_ee_step_m
+
+        if dist <= max_step:
+            alpha_pos = 1.0
+            self._cmd_pos = target_pos.copy()
+        else:
+            alpha_pos = max_step / dist
+            self._cmd_pos = self._cmd_pos + alpha_pos * delta
+
+        if target_orn is None:
+            self._cmd_orn = None
+            orn_done = True
+        else:
+            target_orn = np.asarray(target_orn, dtype=np.float64).reshape(-1)
+            if self._cmd_orn is None:
+                self._cmd_orn = target_orn.copy()
+                orn_done = True
+            else:
+                orn_err = _quat_angle(self._cmd_orn, target_orn)
+                if dist > 1e-12:
+                    # Couple orientation progress to translation so the
+                    # EE rotates while traveling rather than spinning in
+                    # place at the start or end of the segment.
+                    alpha_orn = alpha_pos
+                elif self._max_ee_orn_step_rad is not None and orn_err > 1e-12:
+                    alpha_orn = min(1.0, self._max_ee_orn_step_rad / orn_err)
+                else:
+                    alpha_orn = 1.0
+                if alpha_orn >= 1.0 - 1e-12 or orn_err <= 1e-12:
+                    self._cmd_orn = target_orn.copy()
+                    orn_done = True
+                else:
+                    self._cmd_orn = _quat_slerp(self._cmd_orn, target_orn, alpha_orn)
+                    orn_done = False
+
+        at_terminal = (alpha_pos >= 1.0 - 1e-12) and orn_done
+        self._cmd_at_terminal = at_terminal
+        return self._cmd_pos, self._cmd_orn, at_terminal
+
+    def _paced_ik_target(self, terminal_pos, terminal_orn, actual_pos, actual_orn):
+        """Return the IK pose/gripper-gate for a Cartesian-paced waypoint.
+
+        When pacing is disabled, returns the terminal pose and
+        ``at_terminal=True`` (gripper may fire immediately).
+        """
+        if not self._cartesian_pacing_enabled():
+            return terminal_pos, terminal_orn, True
+        if self._cmd_idx != self._idx or self._cmd_pos is None:
+            self._seed_cmd_pose(actual_pos, actual_orn, terminal_orn)
+        return self._step_cmd_toward(terminal_pos, terminal_orn)
 
     def step(self) -> ArticulationAction:
         if self._done:
@@ -577,22 +741,32 @@ class EEPathFollower:
         # On first step at a lock_pose waypoint, snapshot the actual EE
         # pose and treat that as the target for both error checks and IK.
         # Holds the arm still while gripper acts (e.g., phases 3/4).
+        # Lock-pose skips Cartesian pacing: the terminal is "here, now".
         if wp.lock_pose and self._locked_idx != self._idx:
             self._locked_pos = actual_pos.copy()
             self._locked_orn = (
                 actual_orn.copy() if wp.orn is not None else None
             )
             self._locked_idx = self._idx
+            self._cmd_pos = self._locked_pos.copy()
+            self._cmd_orn = (
+                None if self._locked_orn is None else self._locked_orn.copy()
+            )
+            self._cmd_idx = self._idx
+            self._cmd_at_terminal = True
 
-        target_pos = self._locked_pos if wp.lock_pose else wp.pos
-        target_orn = (
+        # Advance gate always uses the *original terminal* waypoint pose
+        # (or the lock_pose snapshot), never the intermediate paced command.
+        terminal_pos = self._locked_pos if wp.lock_pose else wp.pos
+        terminal_orn = (
             self._locked_orn if (wp.lock_pose and self._locked_orn is not None)
             else wp.orn
         )
 
-        pos_err = float(np.linalg.norm(actual_pos - target_pos))
+        pos_err = float(np.linalg.norm(actual_pos - terminal_pos))
         orn_err = (
-            _quat_angle(actual_orn, target_orn) if target_orn is not None else 0.0
+            _quat_angle(actual_orn, terminal_orn)
+            if terminal_orn is not None else 0.0
         )
         self.last_pos_err = pos_err
         self.last_orn_err = orn_err
@@ -689,16 +863,34 @@ class EEPathFollower:
                         actual_orn.copy() if wp.orn is not None else None
                     )
                     self._locked_idx = self._idx
-                    target_pos = self._locked_pos
-                    target_orn = self._locked_orn if wp.orn is not None else wp.orn
+                    self._cmd_pos = self._locked_pos.copy()
+                    self._cmd_orn = (
+                        None if self._locked_orn is None
+                        else self._locked_orn.copy()
+                    )
+                    self._cmd_idx = self._idx
+                    self._cmd_at_terminal = True
+                    terminal_pos = self._locked_pos
+                    terminal_orn = (
+                        self._locked_orn if wp.orn is not None else wp.orn
+                    )
                 else:
-                    target_pos = wp.pos
-                    target_orn = wp.orn
+                    terminal_pos = wp.pos
+                    terminal_orn = wp.orn
         else:
             # Gate not satisfied — restart the dwell counter for this wp.
             self._steps_in_tol = 0
 
-        return self._ctrl.forward(target_pos, target_orn, wp.gripper)
+        if wp.lock_pose:
+            ik_pos, ik_orn, at_terminal = terminal_pos, terminal_orn, True
+        else:
+            ik_pos, ik_orn, at_terminal = self._paced_ik_target(
+                terminal_pos, terminal_orn, actual_pos, actual_orn,
+            )
+        # Issue gripper close/open only once the commanded pose has reached
+        # the original terminal (lock_pose is already at-terminal).
+        gripper_cmd = wp.gripper if at_terminal else None
+        return self._ctrl.forward(ik_pos, ik_orn, gripper_cmd)
 
 
 # ---------------------------------------------------------------------------

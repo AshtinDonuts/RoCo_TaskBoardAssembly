@@ -86,9 +86,10 @@ RESULTS_JSON_PATH = None
 
 # Failsafe: maximum number of physics steps the harness will wait for a
 # policy to finish a single part before forcibly advancing to the next.
-# Prevents a stuck / buggy policy from hanging the eval. The baseline
-# scripted policy typically completes a part in 600-1500 steps.
-PER_PART_TIMEOUT_STEPS = 3000
+# Prevents a stuck / buggy policy from hanging the eval. With Cartesian
+# pacing at ~0.1 m/s, a full pick-place can take several thousand steps
+# (hover + descend + transit + settles); 20000 ≈ 100 s at 200 Hz.
+PER_PART_TIMEOUT_STEPS = 20000
 
 # Physics warmup: number of my_world.step() iterations to run before the
 # pick-and-place task starts (after each reset / first play). Lets PhysX
@@ -626,30 +627,34 @@ SETTLE_DESCEND_PLACE = 15
 # first IK call. 10 ≈ 1 s at the rig's default physics rate.
 RETURN_HOME_SETTLE_STEPS = 10
 
-# Maximum rate of change for the scripted baseline's seven L-arm joint
-# position targets. The policy applies this after generating its ordinary
-# EEPathFollower action, so the existing waypoints and IK solutions are
-# unchanged. At 200 Hz, 1 rad/s permits at most 0.005 rad per action step.
-# Gripper commands are deliberately not rate-limited: their waypoint gates
-# remain tied to the actual EE pose and snap state.
-BASELINE_MAX_ARM_JOINT_SPEED_RAD_S = 1.0
+# Maximum Cartesian EE command speed for the scripted baseline (m/s).
+# EEPathFollower walks the IK target toward each waypoint by at most
+# speed * physics_dt metres per step (quaternion slerp for orientation),
+# instead of snapping the IK command to the terminal. Advance is still
+# gated on the actual EE reaching the original terminal; gripper
+# close/open fires only once the commanded pose has arrived there.
+# None disables pacing (legacy snap-to-waypoint IK target).
+# At 200 Hz physics, 0.10 m/s => 0.0005 m per control update.
+CARTESIAN_MAX_EE_SPEED_M_S = 0.30
+# Orientation-only segments (near-zero translation) use this rate for
+# slerp pacing. Coupled to translation progress when both move.
+CARTESIAN_MAX_EE_ORN_SPEED_RAD_S = 1.0
 
 # Joint-space-interpolated transit between lift_pick and hover_place.
 # Inserts this many waypoints lerped in c-space (see PICK_PLACE_PHASES_
 # CHEATSHEET.md for why this bypasses IK at the midpoints). 0 disables.
+# Prefer CARTESIAN_MAX_EE_SPEED_M_S for slow straight-line hover travel;
+# joint-lerp creates non-Cartesian arcs.
 TRANSIT_STEPS    = 0 #usb-a needs 0.
 
 # Joint-space-interpolated descend pacing. When > 0, inserts N intermediate
 # joint-lerp waypoints between hover_pick / descend_pick (DESCEND_PICK_STEPS)
-# and hover_place / descend_place (DESCEND_PLACE_STEPS). The follower
-# lerps the commanded joint vector linearly across the segment instead of
-# snapping the IK target straight to the bottom — same mechanism as
-# TRANSIT_STEPS, but for the short vertical descend. Use this to slow down
-# the descent for visual inspection or to reduce overshoot. 0 = one-step
-# descend (existing behavior). Typical values: 4–8 for a smooth ~1 s drop
-# at the rig's default physics rate.
-DESCEND_PICK_STEPS  = 5
-DESCEND_PLACE_STEPS = 5
+# and hover_place / descend_place (DESCEND_PLACE_STEPS). Prefer leaving
+# these at 0 and using CARTESIAN_MAX_EE_SPEED_M_S so vertical descents
+# stay straight in Cartesian space. 0 = one terminal waypoint (paced by
+# the Cartesian limiter when enabled).
+DESCEND_PICK_STEPS  = 0
+DESCEND_PLACE_STEPS = 0
 
 # Path-follower advance tolerances.
 POS_TOL          = 0.004
@@ -658,10 +663,10 @@ ORN_TOL          = 0.05
 # Per-waypoint safety timeout (physics steps). If a waypoint's own
 # `timeout_steps` is None and the gate doesn't fire within this many
 # steps, the follower force-advances and logs a [follower] WARN. Set to
-# None to disable. Tune up if you have legitimately long settling
-# waypoints. Typical PD lag on this rig is well under 200 steps; 500 is
-# a comfortable safety margin.
-WAYPOINT_TIMEOUT_STEPS = 500
+# None to disable. With Cartesian pacing at ~0.1 m/s, a 0.4 m hover
+# needs ~800 steps of command travel plus PD catch-up — 500 is too
+# short. 10000 ≈ 50 s at 200 Hz is a comfortable ceiling.
+WAYPOINT_TIMEOUT_STEPS = 10000
 
 
 # Truncate the generated path to the first N waypoints (None = run all).

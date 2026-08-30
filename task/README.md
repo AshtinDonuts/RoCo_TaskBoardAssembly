@@ -11,7 +11,7 @@ hands each part to the participant's `Policy`, and grades the result
 |------|------|
 | `run_pick_place.py`       | Eval harness. Sets up sim, spawns missing parts, walks `part_order`, instantiates the selected `Policy`, drives it through each part, then grades. Has the stuck detector (`_diagnose_stuck`) and the `_grade_task` summary. |
 | `policy_api.py`           | Participant-facing contract: `Policy` ABC + `EnvInfo` / `PartTarget` / `Observation` dataclasses. |
-| `policies/baseline_scripted.py` | Reference scripted policy (`BaselinePolicy`). EEPathFollower-driven pick-and-place using the jerk-limited RmpFlowSmoothed backend. |
+| `policies/baseline_scripted.py` | Reference scripted policy (`BaselinePolicy`). EEPathFollower-driven pick-and-place with Cartesian EE-pose pacing for slower, straight-line motion. |
 | `policies/diffusion_lerobot.py`, `dp_server.py` | LeRobot Diffusion Policy sidecar example. The adapter runs in Isaac; the server runs in the model environment. |
 | `policies/pi05_lerobot.py`, `pi05_server.py` | LeRobot pi0.5 sidecar adapter and model-env inference server. |
 | `policies/template.py`    | Participant stub. Copy to `policies/<your_team>.py`, fill in `reset` / `act` / `is_done`, run with `--policy policies.<your_team>.MyPolicy`. |

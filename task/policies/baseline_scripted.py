@@ -4,8 +4,13 @@ Wraps the original `EEPathFollower`-driven pick-and-place: per part, build
 a 9-phase EE-pose path from `PART_CONFIG`, drive Lula IK to follow it,
 gate the snap_wait waypoint on `obs.snap_fired`.
 
-This is the normal (unthrottled) scripted baseline. Participants should not
-modify this file; copy `template.py` instead.
+Cartesian pacing (see `CARTESIAN_MAX_EE_SPEED_M_S`) walks the commanded
+EE pose toward each terminal waypoint before each IK query, so motion is
+physically slower without a separate planner. Close/open still fire only
+at the original terminals.
+
+This is the normal scripted baseline. Participants should not modify this
+file; copy `template.py` instead.
 
 Privileged BC expert under fairness XY randomization: when the harness runs
 with `--random-seed`, `PartTarget.pick_pos` / `place_pos` (and `target.extra`)
@@ -124,6 +129,22 @@ def make_l_path_for_part(part_name, target=None, snap_advance_when=None,
     return full
 
 
+def _cartesian_step_limits(env_info: EnvInfo):
+    """Convert configured EE speeds to per-step caps using physics_dt."""
+    physics_dt = float(getattr(env_info, "physics_dt", 1.0 / 200.0))
+    if not np.isfinite(physics_dt) or physics_dt <= 0.0:
+        physics_dt = 1.0 / 200.0
+    max_speed = getattr(pc, "CARTESIAN_MAX_EE_SPEED_M_S", None)
+    max_orn_speed = getattr(pc, "CARTESIAN_MAX_EE_ORN_SPEED_RAD_S", None)
+    max_ee_step_m = (
+        None if max_speed is None else float(max_speed) * physics_dt
+    )
+    max_ee_orn_step_rad = (
+        None if max_orn_speed is None else float(max_orn_speed) * physics_dt
+    )
+    return max_ee_step_m, max_ee_orn_step_rad
+
+
 class BaselinePolicy(Policy):
     """Scripted EE-path follower over each part's 9-phase pick-place plan.
 
@@ -143,10 +164,14 @@ class BaselinePolicy(Policy):
                 "outside the provided harness."
             )
         self._L_controller = L_controller
+        max_ee_step_m, max_ee_orn_step_rad = _cartesian_step_limits(env_info)
         self._follower = EEPathFollower(
             L_controller,
             position_tolerance=getattr(pc, "POS_TOL", 0.005),
             orientation_tolerance=getattr(pc, "ORN_TOL", 0.05),
+            default_timeout_steps=getattr(pc, "WAYPOINT_TIMEOUT_STEPS", None),
+            max_ee_step_m=max_ee_step_m,
+            max_ee_orn_step_rad=max_ee_orn_step_rad,
         )
         self._is_first_part = True
         # _last_obs is read by the snap_advance_when closure, which is
