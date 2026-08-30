@@ -946,6 +946,8 @@ def build_pick_place_phases(
     return_home_gripper=None,
     return_home_settle_steps: int = 20,
     return_home_cspace_tol=None,
+    safe_retract_pos=None,
+    safe_retract_orn=None,
     final_height: float = None,
 ) -> List[Waypoint]:
     """Generate a (subset of the) canonical 8-phase pick-and-place path.
@@ -1072,6 +1074,17 @@ def build_pick_place_phases(
                                 branch at hover_pick). Pass a tight value
                                 (e.g. 5e-4 rad ≈ 0.03°) here. None defers
                                 to the follower's default.
+      safe_retract_pos        : optional world XYZ prepended *before*
+                                return_home when return_home_q is set.
+                                Intended as a vertical Cartesian lift that
+                                holds XY while raising Z clear of the table
+                                so the subsequent c-space home motion does
+                                not sweep the elbow/wrist through the
+                                table. Uses normal IK + Cartesian pacing.
+                                Ignored when return_home_q is None.
+      safe_retract_orn        : EE orientation held during safe_retract.
+                                Typically the actual EE orn at part start.
+                                None leaves orientation unconstrained.
 
     Returns a list of Waypoint(pos, orn, gripper, settle_steps, name).
     """
@@ -1093,7 +1106,20 @@ def build_pick_place_phases(
     # so the part's first IK call resolves to the same branch it would
     # when running this part alone. ``pos`` is a placeholder (ignored by
     # the cspace-target branch in the follower).
+    #
+    # When safe_retract_pos is also set, a Cartesian vertical retreat is
+    # inserted first so joint-space home motion starts from a high EE pose
+    # rather than near the table (where even a smooth q-path can collide).
     if return_home_q is not None:
+        if safe_retract_pos is not None:
+            out.append(Waypoint(
+                np.asarray(safe_retract_pos, dtype=np.float64).reshape(-1),
+                (None if safe_retract_orn is None
+                 else np.asarray(safe_retract_orn, dtype=np.float64).reshape(-1)),
+                return_home_gripper,
+                0,
+                "safe_retract",
+            ))
         out.append(Waypoint(
             np.zeros(3, dtype=np.float64),  # dummy pos, unused
             None,                            # orn unused

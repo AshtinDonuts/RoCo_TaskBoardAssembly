@@ -10,7 +10,7 @@ Find and use a suitable smoother, slower motion planner - use it with the script
 ✅ Cartesian interpolation between existing waypoints
 - Simple accel / decel
 
-Tune params here: [param config](task/param_config.py)
+Tune params here: [param config](task/param_config.py) - CARTESIAN_MAX_EE_SPEED_M_S
 
 
 Task C.

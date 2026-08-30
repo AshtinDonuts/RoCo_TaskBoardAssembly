@@ -42,7 +42,8 @@ from policy_api import EnvInfo, Observation, PartTarget, Policy  # noqa: E402
 
 
 def make_l_path_for_part(part_name, target=None, snap_advance_when=None,
-                         snap_timeout_steps=None, return_home_q=None):
+                         snap_timeout_steps=None, return_home_q=None,
+                         safe_retract_pos=None, safe_retract_orn=None):
     """Build the 9-phase L path for one part using its PART_CONFIG entry.
 
     Pick/place world OBJECT positions are offset by `cfg["ee_offset"]` to
@@ -61,6 +62,11 @@ def make_l_path_for_part(part_name, target=None, snap_advance_when=None,
     starting hover_pick. The gripper is commanded to this part's
     `gripper_open` value during the return so it's at the right opening
     by the time the new pick begins.
+
+    When `safe_retract_pos` is also set, a Cartesian `safe_retract`
+    waypoint is inserted before `return_home`: raise the EE vertically
+    (holding XY / orientation) clear of the table under existing
+    Cartesian pacing, then begin the joint-space home motion.
     """
     # Privileged path: harness PartTarget may already include fairness XY
     # offsets in pick_pos / place_pos / extra. Prefer those over unshifted
@@ -123,6 +129,8 @@ def make_l_path_for_part(part_name, target=None, snap_advance_when=None,
         return_home_gripper=cfg.get("gripper_open"),
         return_home_cspace_tol=getattr(pc, "RETURN_HOME_CSPACE_TOL", None),
         return_home_settle_steps=getattr(pc, "RETURN_HOME_SETTLE_STEPS", 20),
+        safe_retract_pos=safe_retract_pos,
+        safe_retract_orn=safe_retract_orn,
     )
     if pc.MAX_PHASES is not None and pc.MAX_PHASES < len(full):
         return full[:int(pc.MAX_PHASES)]
@@ -194,12 +202,31 @@ class BaselinePolicy(Policy):
                          else self.env_info.L_arm_init_q)
         self._is_first_part = False
 
+        # Before joint-space return_home, raise the EE vertically while
+        # holding XY and orientation. Even a smooth c-space path can
+        # sweep the elbow/wrist through the table when started low.
+        safe_retract_pos = None
+        safe_retract_orn = None
+        if return_home_q is not None:
+            ee_pos, ee_orn = obs.ee_pose_L
+            ee_pos = np.asarray(ee_pos, dtype=np.float64).reshape(-1)
+            ee_orn = np.asarray(ee_orn, dtype=np.float64).reshape(-1)
+            table_z = float(getattr(pc, "TABLE_Z", 1.0))
+            clearance = float(getattr(pc, "SAFE_RETRACT_CLEARANCE_M", 0.35))
+            safe_z = max(float(ee_pos[2]), table_z + clearance)
+            safe_retract_pos = np.array(
+                [ee_pos[0], ee_pos[1], safe_z], dtype=np.float64
+            )
+            safe_retract_orn = ee_orn
+
         path = make_l_path_for_part(
             target.name,
             target=target,
             snap_advance_when=snap_advance_when,
             snap_timeout_steps=snap_timeout_steps,
             return_home_q=return_home_q,
+            safe_retract_pos=safe_retract_pos,
+            safe_retract_orn=safe_retract_orn,
         )
         self._follower.reset()
         self._follower.set_path(path)

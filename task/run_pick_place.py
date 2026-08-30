@@ -53,6 +53,7 @@ if _PHYSICS_GPU is not None:
 simulation_app = SimulationApp(_SIM_CONFIG)
 
 import argparse
+import csv
 import importlib
 import json
 import numpy as np
@@ -703,6 +704,12 @@ def _parse_args():
         help="Output video frame rate. Frames are sampled from sim time.",
     )
     parser.add_argument(
+        "--trajectory-csv",
+        default=None,
+        help="Write per-control-step measured joint positions, measured "
+             "joint velocities, and commanded joint positions to CSV.",
+    )
+    parser.add_argument(
         "--max-steps",
         type=int,
         default=_env_int("ROCO_EVAL_MAX_STEPS"),
@@ -745,7 +752,7 @@ def _parse_args():
         value = getattr(args, attr, None)
         if value is not None and value <= 0:
             setattr(args, attr, None)
-    for attr in ("results_json", "record_video"):
+    for attr in ("results_json", "record_video", "trajectory_csv"):
         value = getattr(args, attr, None)
         if value and not os.path.isabs(value):
             setattr(args, attr, os.path.abspath(os.path.join(_LAUNCH_CWD, value)))
@@ -871,6 +878,41 @@ def main():
     )
     L_gripper_dof_index = dof_names.index("L_gripper_joint")
     L_arm_joint_names = [j for j in dof_names if j.startswith("L_arm_j")]
+
+    trajectory_file = None
+    trajectory_writer = None
+    if args.trajectory_csv:
+        trajectory_path = os.path.abspath(args.trajectory_csv)
+        os.makedirs(os.path.dirname(trajectory_path) or ".", exist_ok=True)
+        trajectory_file = open(trajectory_path, "w", newline="")
+        trajectory_writer = csv.writer(trajectory_file)
+        trajectory_writer.writerow(
+            ["step", "sim_time_s", "part", "waypoint", "waypoint_index"]
+            + [f"q:{name}" for name in dof_names]
+            + [f"qd:{name}" for name in dof_names]
+            + [f"q_cmd:{name}" for name in dof_names]
+        )
+        print(f"[trajectory] writing CSV -> {trajectory_path}")
+
+    def _write_trajectory_row(obs, action=None, waypoint=None,
+                              waypoint_index=None):
+        if trajectory_writer is None:
+            return
+        wp = (getattr(policy, "current_waypoint", None)
+              if waypoint is None else waypoint)
+        wp_name = getattr(wp, "name", None) if wp is not None else None
+        wp_idx = (getattr(policy, "current_index", None)
+                  if waypoint_index is None else waypoint_index)
+        commanded = getattr(action, "joint_positions", None)
+        if commanded is None:
+            commanded = [None] * len(dof_names)
+        trajectory_writer.writerow(
+            [obs.step_idx, obs.step_idx * env_info.physics_dt,
+             current_part, wp_name, wp_idx]
+            + np.asarray(obs.joint_positions, dtype=np.float64).tolist()
+            + np.asarray(obs.joint_velocities, dtype=np.float64).tolist()
+            + list(commanded)
+        )
 
     def _apply_init_joint_targets():
         """Override the live joint state with pc.INIT_JOINT_TARGETS.
@@ -1251,12 +1293,15 @@ def main():
             )
 
             if policy.is_done(obs) or is_snap_done or is_timeout:
+                _write_trajectory_row(obs)
                 if is_timeout:
                     print(f"[setup] {current_part}: per-part timeout "
                           f"({PER_PART_TIMEOUT_STEPS} steps) — advancing.")
                 _start_next_part()
                 continue
 
+            active_waypoint = getattr(policy, "current_waypoint", None)
+            active_waypoint_index = getattr(policy, "current_index", None)
             L_action = policy.act(obs)
 
             R_action_positions = [None] * len(dof_names)
@@ -1265,10 +1310,15 @@ def main():
             R_action = ArticulationAction(joint_positions=R_action_positions)
 
             merged = merge_bimanual_actions(L_action, R_action, dof_names)
+            _write_trajectory_row(
+                obs, merged, active_waypoint, active_waypoint_index,
+            )
             articulation_controller.apply_action(merged)
 
             part_step_count += 1
     finally:
+        if trajectory_file is not None:
+            trajectory_file.close()
         video_recorder.close()
         simulation_app.close()
 

@@ -62,6 +62,7 @@ def _load_follower_module():
 FOLLOWER_MODULE = _load_follower_module()
 EEPathFollower = FOLLOWER_MODULE.EEPathFollower
 Waypoint = FOLLOWER_MODULE.Waypoint
+build_pick_place_phases = FOLLOWER_MODULE.build_pick_place_phases
 _quat_slerp = FOLLOWER_MODULE._quat_slerp
 _quat_angle = FOLLOWER_MODULE._quat_angle
 
@@ -210,6 +211,61 @@ class CartesianPacingTests(unittest.TestCase):
             controller.last_forward[0], terminal, atol=1e-9
         )
         self.assertEqual(controller.last_forward[2], "open")
+
+
+class SafeRetractTests(unittest.TestCase):
+    def test_safe_retract_prepended_before_return_home(self):
+        home_q = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])
+        retract = np.array([0.2, 0.1, 1.35])
+        orn = np.array([1.0, 0.0, 0.0, 0.0])
+        path = build_pick_place_phases(
+            pick_pos=np.array([0.2, 0.1, 1.05]),
+            pick_orn=orn,
+            place_pos=None,
+            place_orn=None,
+            include_close=False,
+            include_open=False,
+            return_home_q=home_q,
+            return_home_gripper=0.5,
+            safe_retract_pos=retract,
+            safe_retract_orn=orn,
+        )
+        self.assertTrue(path[0].name.endswith("safe_retract"))
+        self.assertTrue(path[1].name.endswith("return_home"))
+        np.testing.assert_allclose(path[0].pos, retract)
+        np.testing.assert_allclose(path[0].orn, orn)
+        self.assertIsNone(path[0].cspace_target)
+        np.testing.assert_allclose(path[1].cspace_target, home_q)
+
+    def test_safe_retract_uses_cartesian_pacing(self):
+        controller = _Controller([0.2, 0.1, 1.10])
+        follower = EEPathFollower(
+            controller,
+            position_tolerance=0.001,
+            max_ee_step_m=0.05,
+        )
+        retract = np.array([0.2, 0.1, 1.35])
+        orn = np.array([1.0, 0.0, 0.0, 0.0])
+        home_q = np.zeros(3)
+        path = build_pick_place_phases(
+            pick_pos=None,
+            pick_orn=None,
+            place_pos=None,
+            place_orn=None,
+            return_home_q=home_q,
+            safe_retract_pos=retract,
+            safe_retract_orn=orn,
+        )
+        # Only return-home block present: safe_retract then return_home.
+        self.assertEqual(len(path), 2)
+        follower.set_path(path)
+
+        follower.step()
+        ik_pos, ik_orn, _ = controller.last_forward
+        # Vertical raise only: XY held, Z stepped by max_ee_step_m.
+        np.testing.assert_allclose(ik_pos, [0.2, 0.1, 1.15], atol=1e-9)
+        np.testing.assert_allclose(ik_orn, orn, atol=1e-9)
+        self.assertEqual(follower.current_index(), 0)
 
 
 if __name__ == "__main__":
