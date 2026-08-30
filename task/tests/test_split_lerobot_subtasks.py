@@ -33,6 +33,126 @@ class SplitLeRobotSubtasksTest(unittest.TestCase):
         self.assertEqual(stats["max"], [3.0, 4.0])
         self.assertEqual(stats["count"], [2])
 
+    @staticmethod
+    def _states(length=12):
+        return np.zeros((length, 44), dtype=np.float64)
+
+    @staticmethod
+    def _segment(length=12):
+        return {"name": "gear_60teeth", "begin": 0, "end": length, "pass": True}
+
+    def test_home_pruning_uses_first_stable_window(self):
+        states = self._states()
+        states[:, 14:21] = splitter.DEFAULT_LEFT_HOME_Q
+        states[:3, 14:21] += 1.0
+        refined = splitter._refine_segment(
+            self._segment(), {"left_arm_home_q": splitter.DEFAULT_LEFT_HOME_Q.tolist()},
+            states, "home", 2, 0.03, 3, 0.5,
+        )
+        self.assertEqual(refined["begin"], 3)
+        self.assertEqual(refined["frames_removed"], 3)
+
+    def test_home_pruning_uses_35ec027_fallback_and_rejects_no_home(self):
+        states = self._states()
+        states[:, 14:21] = splitter.DEFAULT_LEFT_HOME_Q
+        refined = splitter._refine_segment(
+            self._segment(), {}, states, "home", 2, 0.03, 3, 0.5,
+        )
+        self.assertEqual(refined["pruning_evidence"]["home_source"], "default_35ec027")
+        states[:, 14:21] += 1.0
+        with self.assertRaisesRegex(ValueError, "never reaches a stable home pose"):
+            splitter._refine_segment(
+                self._segment(), {}, states, "home", 2, 0.03, 3, 0.5,
+            )
+
+    def test_velocity_pruning_only_removes_startup_prefix(self):
+        states = self._states(30)
+        states[:3, 28:35] = 2.0
+        states[15:, 28:35] = 0.1
+        states[15:, 14:21] = np.arange(1, 16, dtype=np.float64)[:, None] * 0.01
+        states[24, 28:35] = 3.0
+        refined = splitter._refine_segment(
+            self._segment(30), None, states, "velocity", 2, 0.03, 3, 0.5,
+        )
+        self.assertEqual(refined["begin"], 15)
+        self.assertEqual(refined["end"], 30)
+        self.assertEqual(refined["pruning_evidence"]["freeze_begin"], 3)
+        self.assertEqual(refined["pruning_evidence"]["freeze_end"], 15)
+
+    def test_velocity_pruning_leaves_segment_without_immediate_reset_unchanged(self):
+        states = self._states(30)
+        states[:, 28:35] = 0.1
+        states[:, 14:21] = np.arange(30, dtype=np.float64)[:, None] * 0.01
+        states[20, 28:35] = 2.0
+        refined = splitter._refine_segment(
+            self._segment(30), None, states, "velocity", 2, 0.03, 3, 0.5,
+        )
+        self.assertEqual(refined["begin"], 0)
+        self.assertFalse(refined["pruning_evidence"]["reset_detected"])
+
+    def test_velocity_pruning_rejects_reset_without_freeze(self):
+        states = self._states(30)
+        states[:, 28:35] = 0.1
+        states[:3, 28:35] = 2.0
+        states[:, 14:21] = np.arange(30, dtype=np.float64)[:, None] * 0.01
+        with self.assertRaisesRegex(ValueError, "no 1s freeze"):
+            splitter._refine_segment(
+                self._segment(30), None, states, "velocity", 2, 0.03, 3, 0.5,
+            )
+
+    def test_waypoint_pruning_removes_only_leading_transition_phases(self):
+        segment = self._segment()
+        segment["phases"] = [
+            {"name": "safe_retract", "waypoint_index": 0, "begin": 0, "end": 2},
+            {"name": "return_home", "waypoint_index": 1, "begin": 2, "end": 4},
+            {"name": "hover_pick", "waypoint_index": 2, "begin": 4, "end": 12},
+        ]
+        refined = splitter._refine_segment(
+            segment, {"waypoint_annotations_complete": True}, self._states(),
+            "waypoint", 2, 0.03, 3, 0.5,
+        )
+        self.assertEqual(refined["begin"], 4)
+        self.assertEqual(
+            refined["pruning_evidence"]["trimmed_phases"],
+            ["safe_retract", "return_home"],
+        )
+
+    def test_waypoint_pruning_requires_complete_annotations(self):
+        with self.assertRaisesRegex(ValueError, "complete waypoint annotations"):
+            splitter._refine_segment(
+                self._segment(), {"waypoint_annotations_complete": False},
+                self._states(), "waypoint", 2, 0.03, 3, 0.5,
+            )
+
+    def test_manifest_rejects_phase_gap(self):
+        segments = []
+        for i, (name, _, _) in enumerate(splitter.PARTS):
+            segment = {"name": name, "begin": i, "end": i + 1, "pass": True}
+            segment["phases"] = [{
+                "name": "hover_pick", "waypoint_index": 0,
+                "begin": i + (1 if i == 0 else 0), "end": i + 1,
+            }]
+            segments.append(segment)
+        with self.assertRaisesRegex(ValueError, "invalid waypoint phase"):
+            splitter._manifest_segments({"episode_index": 0, "segments": segments}, 9)
+
+    def test_manifest_rejects_claimed_complete_missing_phase_name(self):
+        segments = []
+        for i, (name, _, _) in enumerate(splitter.PARTS):
+            segments.append({
+                "name": name, "begin": i, "end": i + 1, "pass": True,
+                "phases": [{
+                    "name": None if i == 0 else "hover_pick",
+                    "waypoint_index": 0, "begin": i, "end": i + 1,
+                }],
+            })
+        with self.assertRaisesRegex(ValueError, "missing name or index"):
+            splitter._manifest_segments({
+                "episode_index": 0,
+                "waypoint_annotations_complete": True,
+                "segments": segments,
+            }, 9)
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
     def test_successful_manifest_split_is_dense_and_frame_exact(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -109,8 +229,16 @@ class SplitLeRobotSubtasksTest(unittest.TestCase):
             manifest.write_text("".join(
                 json.dumps({
                     "episode_index": episode, "seed": episode,
+                    "waypoint_annotations_complete": True,
                     "segments": [
-                        {"name": name, "begin": i, "end": i + 1, "pass": i % 2 == 0, "completion_reason": "policy_done"}
+                        {
+                            "name": name, "begin": i, "end": i + 1,
+                            "pass": i % 2 == 0, "completion_reason": "policy_done",
+                            "phases": [{
+                                "name": "hover_pick", "waypoint_index": 0,
+                                "begin": i, "end": i + 1,
+                            }],
+                        }
                         for i, (name, _, _) in enumerate(splitter.PARTS)
                     ],
                 }) + "\n"
@@ -120,9 +248,11 @@ class SplitLeRobotSubtasksTest(unittest.TestCase):
             result = splitter.split_dataset(
                 source, destination, 1, 0.04,
                 rollout_manifest=manifest, successful_parts_only=True,
+                pruning_strategy="waypoint",
             )
             self.assertEqual(result["episodes"], 10)
             self.assertEqual(result["frames"], 10)
+            self.assertEqual(result["pruning_strategy"], "waypoint")
             out = pq.read_table(destination / "data/chunk-000/file-000.parquet")
             self.assertEqual(out["index"].to_pylist(), list(range(10)))
             self.assertEqual(out["episode_index"].to_pylist(), list(range(10)))

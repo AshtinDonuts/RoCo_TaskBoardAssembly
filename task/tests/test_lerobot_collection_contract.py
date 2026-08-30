@@ -86,6 +86,31 @@ class LeRobotCollectionContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             collector._part_segments(["a", "c", "b"], parts)
 
+    def test_waypoints_form_absolute_contiguous_phase_ranges(self):
+        segments = [
+            {"part": "a", "begin": 0, "end": 3},
+            {"part": "b", "begin": 3, "end": 5},
+        ]
+        waypoints = [
+            {"name": "hover_pick", "waypoint_index": 0},
+            {"name": "hover_pick", "waypoint_index": 0},
+            {"name": "close", "waypoint_index": 1},
+            {"name": "return_home", "waypoint_index": 0},
+            {"name": "hover_pick", "waypoint_index": 1},
+        ]
+        self.assertTrue(collector._attach_phase_segments(segments, waypoints))
+        self.assertEqual(segments[0]["phases"], [
+            {"name": "hover_pick", "waypoint_index": 0, "begin": 0, "end": 2},
+            {"name": "close", "waypoint_index": 1, "begin": 2, "end": 3},
+        ])
+        self.assertEqual(segments[1]["phases"][0]["name"], "return_home")
+
+    def test_missing_waypoint_marks_annotations_incomplete(self):
+        segments = [{"part": "a", "begin": 0, "end": 1}]
+        self.assertFalse(collector._attach_phase_segments(
+            segments, [{"name": None, "waypoint_index": None}]
+        ))
+
     def test_missing_image_uses_training_resolution(self):
         image = collector._as_rgb(None)
         self.assertEqual(image.shape, (240, 320, 3))

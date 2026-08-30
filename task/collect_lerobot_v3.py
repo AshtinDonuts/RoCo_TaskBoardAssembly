@@ -199,17 +199,17 @@ def _feature_spec():
         "observation.images.head": {
             "dtype": "video",
             "shape": (IMAGE_HEIGHT, IMAGE_WIDTH, 3),
-            "names": ["height", "width", "rgb"],
+            "names": ["height", "width", "channels"],
         },
         "observation.images.left_hand": {
             "dtype": "video",
             "shape": (IMAGE_HEIGHT, IMAGE_WIDTH, 3),
-            "names": ["height", "width", "rgb"],
+            "names": ["height", "width", "channels"],
         },
         "observation.images.right_hand": {
             "dtype": "video",
             "shape": (IMAGE_HEIGHT, IMAGE_WIDTH, 3),
-            "names": ["height", "width", "rgb"],
+            "names": ["height", "width", "channels"],
         },
     }
 
@@ -248,6 +248,46 @@ def _part_segments(frame_parts, part_order):
     if any(segment["end"] <= segment["begin"] for segment in segments):
         raise ValueError("every part must have a nonempty recorded segment")
     return segments
+
+
+def _waypoint_annotation(policy):
+    """Return the active policy waypoint without changing the dataset schema."""
+    try:
+        waypoint = getattr(policy, "current_waypoint", None)
+        if callable(waypoint):
+            waypoint = waypoint()
+        name = None if waypoint is None else getattr(waypoint, "name", None)
+        index = getattr(policy, "current_index", None)
+        if callable(index):
+            index = index()
+        return {
+            "name": None if name is None else str(name),
+            "waypoint_index": None if index is None else int(index),
+        }
+    except Exception:
+        return {"name": None, "waypoint_index": None}
+
+
+def _attach_phase_segments(segments, frame_waypoints):
+    """Attach absolute, contiguous waypoint ranges to each part segment."""
+    if not segments or len(frame_waypoints) != segments[-1]["end"]:
+        raise ValueError("waypoint annotations must align one-to-one with recorded frames")
+    complete = True
+    for segment in segments:
+        phases = []
+        begin, end = int(segment["begin"]), int(segment["end"])
+        phase_begin = begin
+        active = dict(frame_waypoints[begin])
+        for frame_idx in range(begin + 1, end):
+            annotation = dict(frame_waypoints[frame_idx])
+            if annotation != active:
+                phases.append({**active, "begin": phase_begin, "end": frame_idx})
+                phase_begin, active = frame_idx, annotation
+        phases.append({**active, "begin": phase_begin, "end": end})
+        segment["phases"] = phases
+        if any(phase["name"] is None or phase["waypoint_index"] is None for phase in phases):
+            complete = False
+    return complete
 
 
 def _resolve_gripper_cmd(command, cfg, current_value):
@@ -518,6 +558,7 @@ def main():
     record_sub = None
     recorded_parts = []
     recorded_frame_parts = []
+    recorded_frame_waypoints = []
     part_completion_reasons = []
     per_part_timeout_steps = int(
         getattr(policy, "PER_PART_TIMEOUT_STEPS",
@@ -707,6 +748,7 @@ def main():
         pending_record_queue.append({
             "frame": frame,
             "part": current_part,
+            "waypoint": _waypoint_annotation(policy),
             "sim_time_s": float(sim_time_s - record_time_origin_s),
             "step_idx": int(step_idx),
         })
@@ -726,6 +768,7 @@ def main():
             if dataset.episode_buffer is not None and dataset.episode_buffer["timestamp"]:
                 dataset.episode_buffer["timestamp"][-1] = item["sim_time_s"]
             recorded_frame_parts.append(item["part"])
+            recorded_frame_waypoints.append(item["waypoint"])
             recorded_frames += 1
             frame_cap_label = ("unbounded" if effective_max_frames is None else str(effective_max_frames))
             print(f"[collect] recorded frame {recorded_frames}/{frame_cap_label} at sim step {item['step_idx']}")
@@ -848,6 +891,9 @@ def main():
             raise RuntimeError("only full nine-part episodes may be committed to the batch dataset")
 
         segments = _part_segments(recorded_frame_parts, evaluated_parts)
+        waypoint_annotations_complete = _attach_phase_segments(
+            segments, recorded_frame_waypoints
+        )
         reasons = {row["part"]: row for row in part_completion_reasons}
         grade = rp._grade_task(
             stage,
@@ -878,6 +924,8 @@ def main():
             "completion_reason": "complete",
             "recorded_frames": recorded_frames,
             "recorded_parts": recorded_parts,
+            "left_arm_home_q": l_arm_init_q.tolist(),
+            "waypoint_annotations_complete": waypoint_annotations_complete,
             "segments": segments,
             **grade,
             "collector": dict(summary),

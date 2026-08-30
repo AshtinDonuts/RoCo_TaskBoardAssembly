@@ -672,7 +672,7 @@ SAFE_RETRACT_SETTLE_STEPS = 5
 # close/open fires only once the commanded pose has arrived there.
 # None disables pacing (legacy snap-to-waypoint IK target).
 # At 200 Hz physics, 0.10 m/s => 0.0005 m per control update.
-CARTESIAN_MAX_EE_SPEED_M_S = 0.30
+CARTESIAN_MAX_EE_SPEED_M_S = 0.85
 # Orientation-only segments (near-zero translation) use this rate for
 # slerp pacing. Coupled to translation progress when both move.
 CARTESIAN_MAX_EE_ORN_SPEED_RAD_S = 1.0
@@ -737,7 +737,7 @@ BASELINE_MOTION_PROFILES = {
         "BASELINE_MAX_JOINT_VELOCITY_RAD_S": 0.5,
         "BASELINE_CONTROL_DT_FALLBACK_S": 0.1,
         "ENABLE_SAFE_RETRACT": False,
-        "CARTESIAN_MAX_EE_SPEED_M_S": 0.30,
+        "CARTESIAN_MAX_EE_SPEED_M_S": 0.85,
         "CARTESIAN_MAX_EE_ORN_SPEED_RAD_S": 1.0,
         "TRANSIT_STEPS": 0,
         "DESCEND_PICK_STEPS": 0,
