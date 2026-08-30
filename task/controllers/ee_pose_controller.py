@@ -29,8 +29,9 @@ Waypoint = namedtuple(
     "Waypoint",
     ["pos", "orn", "gripper", "settle_steps", "name", "lock_pose",
      "joint_lerp_t", "advance_when", "timeout_steps", "cspace_target",
-     "cspace_tol"],
-    defaults=(False, None, None, None, None, None),
+     "cspace_tol", "cspace_max_velocity", "cspace_max_acceleration",
+     "cspace_min_duration"],
+    defaults=(False, None, None, None, None, None, None, None, None),
 )
 Waypoint.__doc__ = (
     "EE pose waypoint. ``settle_steps`` is the number of EEPathFollower.step()"
@@ -68,6 +69,11 @@ Waypoint.__doc__ = (
     " waypoint to enforce a much tighter gate (so the IK seed at hover_pick"
     " is bit-close to the standalone-sim seed) without tightening the"
     " joint_lerp transit gates, which need to stay loose."
+    " ``cspace_max_velocity`` / ``cspace_max_acceleration`` optionally pace"
+    " a c-space target with a quintic smoothstep trajectory whose duration"
+    " satisfies both limits. ``cspace_min_duration`` supplies an additional"
+    " lower bound in seconds. When pacing fields are omitted the legacy"
+    " immediate-target behavior is retained."
 )
 
 
@@ -399,6 +405,13 @@ class EEPathFollower:
         self._cmd_orn = None
         self._cmd_idx = -1
         self._cmd_at_terminal = True
+        # Time-parameterized c-space target state. The start is the measured
+        # q at waypoint entry; a quintic smoothstep reaches the exact target
+        # with zero nominal velocity and acceleration at both endpoints.
+        self._cspace_start_q = None
+        self._cspace_idx = -1
+        self._cspace_elapsed_s = 0.0
+        self._cspace_duration_s = 0.0
 
     def set_path(self, waypoints) -> None:
         self._waypoints = [self._normalize_wp(w) for w in waypoints]
@@ -414,6 +427,7 @@ class EEPathFollower:
         self._lerp_q_A = None
         self._lerp_q_B = None
         self._lerp_seg_idx = -1
+        self._clear_cspace_state()
         self._clear_cmd_state()
 
     def reset(self) -> None:
@@ -429,6 +443,7 @@ class EEPathFollower:
         self._lerp_q_A = None
         self._lerp_q_B = None
         self._lerp_seg_idx = -1
+        self._clear_cspace_state()
         self._clear_cmd_state()
         self._ctrl.reset()
 
@@ -437,6 +452,12 @@ class EEPathFollower:
         self._cmd_orn = None
         self._cmd_idx = -1
         self._cmd_at_terminal = True
+
+    def _clear_cspace_state(self) -> None:
+        self._cspace_start_q = None
+        self._cspace_idx = -1
+        self._cspace_elapsed_s = 0.0
+        self._cspace_duration_s = 0.0
 
     @staticmethod
     def _normalize_wp(w) -> Waypoint:
@@ -447,6 +468,9 @@ class EEPathFollower:
             timeout = w.get("timeout_steps")
             cspace = w.get("cspace_target")
             cs_tol = w.get("cspace_tol")
+            cs_vel = w.get("cspace_max_velocity")
+            cs_acc = w.get("cspace_max_acceleration")
+            cs_min_duration = w.get("cspace_min_duration")
             return Waypoint(
                 pos=np.asarray(w["pos"], dtype=np.float64),
                 orn=(np.asarray(w["orn"], dtype=np.float64)
@@ -461,6 +485,10 @@ class EEPathFollower:
                 cspace_target=(None if cspace is None
                                else np.asarray(cspace, dtype=np.float64)),
                 cspace_tol=(None if cs_tol is None else float(cs_tol)),
+                cspace_max_velocity=(None if cs_vel is None else float(cs_vel)),
+                cspace_max_acceleration=(None if cs_acc is None else float(cs_acc)),
+                cspace_min_duration=(None if cs_min_duration is None
+                                     else float(cs_min_duration)),
             )
         # Tuple forms: 2/3/4/5/6/7 elements.
         if not (2 <= len(w) <= 7):
@@ -623,7 +651,7 @@ class EEPathFollower:
             self._seed_cmd_pose(actual_pos, actual_orn, terminal_orn)
         return self._step_cmd_toward(terminal_pos, terminal_orn)
 
-    def step(self) -> ArticulationAction:
+    def step(self, dt: Optional[float] = None) -> ArticulationAction:
         if self._done:
             return ArticulationAction(joint_positions=[None] * self._ctrl._n_dof)
 
@@ -647,6 +675,50 @@ class EEPathFollower:
                                   dtype=np.float64).reshape(-1)
             q_actual = np.asarray(self._ctrl.current_cspace_q(),
                                   dtype=np.float64).reshape(-1)
+            paced = (wp.cspace_max_velocity is not None
+                     or wp.cspace_max_acceleration is not None
+                     or wp.cspace_min_duration is not None)
+            trajectory_complete = True
+            q_command = q_target
+            if paced:
+                if self._cspace_idx != self._idx:
+                    self._cspace_start_q = q_actual.copy()
+                    self._cspace_idx = self._idx
+                    self._cspace_elapsed_s = 0.0
+                    max_delta = float(np.max(np.abs(
+                        q_target - self._cspace_start_q
+                    )))
+                    duration = float(wp.cspace_min_duration or 0.0)
+                    if wp.cspace_max_velocity is not None:
+                        max_vel = float(wp.cspace_max_velocity)
+                        if not np.isfinite(max_vel) or max_vel <= 0.0:
+                            raise ValueError("cspace_max_velocity must be finite and > 0")
+                        # max derivative of quintic smoothstep is 1.875.
+                        duration = max(duration, 1.875 * max_delta / max_vel)
+                    if wp.cspace_max_acceleration is not None:
+                        max_acc = float(wp.cspace_max_acceleration)
+                        if not np.isfinite(max_acc) or max_acc <= 0.0:
+                            raise ValueError("cspace_max_acceleration must be finite and > 0")
+                        # max absolute second derivative is 10/sqrt(3) ~= 5.774.
+                        duration = max(
+                            duration,
+                            np.sqrt((10.0 / np.sqrt(3.0)) * max_delta / max_acc),
+                        )
+                    self._cspace_duration_s = duration
+
+                duration = self._cspace_duration_s
+                if duration <= 0.0:
+                    u = 1.0
+                else:
+                    u = min(1.0, self._cspace_elapsed_s / duration)
+                s = u * u * u * (10.0 + u * (-15.0 + 6.0 * u))
+                q_command = self._cspace_start_q + s * (
+                    q_target - self._cspace_start_q
+                )
+                trajectory_complete = u >= 1.0
+                step_dt = float(dt) if dt is not None else 0.0
+                if np.isfinite(step_dt) and step_dt > 0.0:
+                    self._cspace_elapsed_s += step_dt
             cspace_err = float(np.max(np.abs(q_actual - q_target)))
             # Repurpose pos_err for the cspace gap so diagnostics stay
             # populated; orn_err is irrelevant for a c-space target.
@@ -654,7 +726,7 @@ class EEPathFollower:
             self.last_orn_err = 0.0
             self._steps_at_wp += 1
             tol = wp.cspace_tol if wp.cspace_tol is not None else self._cspace_tol
-            gate_ok = cspace_err <= tol
+            gate_ok = trajectory_complete and cspace_err <= tol
             # Timeout fall-through: if the tolerance is set below the PD
             # controller's steady-state floor the gate would never fire and
             # the follower would deadlock. wp.timeout_steps (snap_wait
@@ -675,6 +747,7 @@ class EEPathFollower:
                 self._steps_in_tol += 1
                 if self._steps_in_tol > wp.settle_steps:
                     self._idx += 1
+                    self._clear_cspace_state()
                     self._steps_in_tol = 0
                     self._steps_at_wp = 0
                     if self._idx >= len(self._waypoints):
@@ -684,7 +757,7 @@ class EEPathFollower:
                         )
             else:
                 self._steps_in_tol = 0
-            return self._ctrl.forward_raw_q(q_target, wp.gripper)
+            return self._ctrl.forward_raw_q(q_command, wp.gripper)
 
         # ---------------- joint-lerp branch ----------------
         # Transit waypoints with joint_lerp_t set: bypass IK and emit a raw
@@ -946,8 +1019,12 @@ def build_pick_place_phases(
     return_home_gripper=None,
     return_home_settle_steps: int = 20,
     return_home_cspace_tol=None,
+    return_home_max_velocity=None,
+    return_home_max_acceleration=None,
+    return_home_min_duration=None,
     safe_retract_pos=None,
     safe_retract_orn=None,
+    safe_retract_settle_steps: int = 0,
     final_height: float = None,
 ) -> List[Waypoint]:
     """Generate a (subset of the) canonical 8-phase pick-and-place path.
@@ -1074,6 +1151,12 @@ def build_pick_place_phases(
                                 branch at hover_pick). Pass a tight value
                                 (e.g. 5e-4 rad ≈ 0.03°) here. None defers
                                 to the follower's default.
+      return_home_max_velocity: optional maximum nominal joint velocity
+                                (rad/s) for a quintic c-space return.
+      return_home_max_acceleration: optional maximum nominal joint
+                                acceleration (rad/s^2). Together with the
+                                velocity bound, determines trajectory time.
+      return_home_min_duration: optional lower bound on return duration (s).
       safe_retract_pos        : optional world XYZ prepended *before*
                                 return_home when return_home_q is set.
                                 Intended as a vertical Cartesian lift that
@@ -1085,6 +1168,7 @@ def build_pick_place_phases(
       safe_retract_orn        : EE orientation held during safe_retract.
                                 Typically the actual EE orn at part start.
                                 None leaves orientation unconstrained.
+      safe_retract_settle_steps: in-tolerance dwell before return_home.
 
     Returns a list of Waypoint(pos, orn, gripper, settle_steps, name).
     """
@@ -1117,7 +1201,7 @@ def build_pick_place_phases(
                 (None if safe_retract_orn is None
                  else np.asarray(safe_retract_orn, dtype=np.float64).reshape(-1)),
                 return_home_gripper,
-                0,
+                int(safe_retract_settle_steps),
                 "safe_retract",
             ))
         out.append(Waypoint(
@@ -1133,6 +1217,12 @@ def build_pick_place_phases(
             np.asarray(return_home_q, dtype=np.float64).reshape(-1),
             (None if return_home_cspace_tol is None
              else float(return_home_cspace_tol)),
+            (None if return_home_max_velocity is None
+             else float(return_home_max_velocity)),
+            (None if return_home_max_acceleration is None
+             else float(return_home_max_acceleration)),
+            (None if return_home_min_duration is None
+             else float(return_home_min_duration)),
         ))
 
     pick_ok = pick_pos is not None and pick_orn is not None

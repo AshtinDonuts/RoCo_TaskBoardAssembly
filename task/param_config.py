@@ -627,12 +627,30 @@ SETTLE_DESCEND_PLACE = 15
 # first IK call. 10 ≈ 1 s at the rig's default physics rate.
 RETURN_HOME_SETTLE_STEPS = 10
 
+# Smooth c-space return limits. The follower snapshots measured q on entry,
+# chooses a duration satisfying these bounds for a quintic smoothstep, then
+# holds the exact home vector for RETURN_HOME_SETTLE_STEPS. These are nominal
+# trajectory limits; the robot drive may track below them.
+RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S = 0.5
+RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2 = 1.0
+RETURN_HOME_MIN_DURATION_S = 0.5
+
+# Defensive ceiling on every scripted L-arm joint-position command. This
+# catches discontinuous IK branch changes (notably the first hover_pick after
+# returning home) without affecting gripper or R-arm commands. Converted to a
+# per-call delta using Observation.step_idx; fallback is for repeated/absent
+# step indices in nonstandard policy hosts.
+BASELINE_MAX_JOINT_VELOCITY_RAD_S = 0.5
+BASELINE_CONTROL_DT_FALLBACK_S = 0.1
+
 # World-frame table-top height (m). Before any between-part return_home
 # c-space motion, the baseline raises the EE vertically to at least
 # TABLE_Z + SAFE_RETRACT_CLEARANCE_M while holding XY and orientation
 # (Cartesian-paced). Parts rest near z≈1.04; 1.0 is the scene table top.
 TABLE_Z = 1.0
 SAFE_RETRACT_CLEARANCE_M = 0.35
+# Let residual Cartesian-retreat velocity decay before starting c-space home.
+SAFE_RETRACT_SETTLE_STEPS = 5
 
 # Maximum Cartesian EE command speed for the scripted baseline (m/s).
 # EEPathFollower walks the IK target toward each waypoint by at most

@@ -84,6 +84,8 @@ class _Controller:
         self._n_dof = 3
         self.end_effector = _EndEffector(position, orn)
         self.last_forward = None
+        self.q = np.zeros(3, dtype=np.float64)
+        self.raw_commands = []
 
     def reset(self):
         pass
@@ -97,6 +99,17 @@ class _Controller:
         )
         return types.SimpleNamespace(
             joint_positions=[0.0, 0.0, gripper_cmd],
+            gripper=gripper_cmd,
+        )
+
+    def current_cspace_q(self):
+        return self.q.copy()
+
+    def forward_raw_q(self, q_target, gripper_cmd):
+        command = np.asarray(q_target, dtype=np.float64).copy()
+        self.raw_commands.append(command)
+        return types.SimpleNamespace(
+            joint_positions=command.tolist(),
             gripper=gripper_cmd,
         )
 
@@ -138,6 +151,55 @@ class CartesianPacingTests(unittest.TestCase):
         ik_pos, _, grip = controller.last_forward
         np.testing.assert_allclose(ik_pos, [0.10, 0.0, 0.0], atol=1e-9)
         self.assertIsNone(grip)
+
+
+class CspacePacingTests(unittest.TestCase):
+    def test_quintic_return_starts_continuously_and_respects_velocity(self):
+        controller = _Controller([0.0, 0.0, 0.0])
+        controller.q = np.array([0.2, -0.1, 0.3])
+        target = np.array([1.2, -0.6, 0.8])
+        follower = EEPathFollower(controller, cspace_tolerance=1e-4)
+        follower.set_path([
+            Waypoint(
+                np.zeros(3), None, None, 0, "return_home",
+                cspace_target=target,
+                cspace_tol=1e-4,
+                cspace_max_velocity=1.0,
+                cspace_max_acceleration=2.0,
+                cspace_min_duration=0.1,
+            ),
+        ])
+
+        for _ in range(25):
+            follower.step(dt=0.1)
+
+        commands = np.asarray(controller.raw_commands)
+        np.testing.assert_allclose(commands[0], controller.q, atol=1e-12)
+        sampled_velocity = np.diff(commands, axis=0) / 0.1
+        self.assertLessEqual(float(np.max(np.abs(sampled_velocity))), 1.0 + 1e-9)
+        np.testing.assert_allclose(commands[-1], target, atol=1e-12)
+        # Completing the command trajectory is insufficient: measured q must
+        # reach the exact target before the waypoint advances.
+        self.assertEqual(follower.current_index(), 0)
+
+        controller.q = target.copy()
+        follower.step(dt=0.1)
+        self.assertTrue(follower.is_done())
+
+    def test_unpaced_cspace_target_retains_legacy_immediate_command(self):
+        controller = _Controller([0.0, 0.0, 0.0])
+        controller.q = np.array([0.0, 0.0, 0.0])
+        target = np.array([1.0, 2.0, 3.0])
+        follower = EEPathFollower(controller)
+        follower.set_path([
+            Waypoint(
+                np.zeros(3), None, None, 0, "legacy",
+                cspace_target=target,
+            ),
+        ])
+
+        follower.step(dt=0.1)
+        np.testing.assert_allclose(controller.raw_commands[-1], target)
 
     def test_gripper_only_after_command_reaches_terminal(self):
         controller = _Controller([0.0, 0.0, 0.0])

@@ -26,11 +26,14 @@ class JointPositionRateLimiter:
         if not np.all(np.isfinite(self._previous)):
             raise ValueError("observed joint positions must be finite")
 
-    def apply(self, action):
+    def apply(self, action, max_delta=None):
         """Rate-limit selected entries of ``action.joint_positions`` in place.
 
         Entries outside ``joint_indices`` are untouched. A selected entry set
         to ``None`` is also untouched and does not change the stored command.
+        ``max_delta`` optionally overrides the constructor limit for this call,
+        allowing callers to convert a velocity bound using the measured control
+        interval.
         """
         if action is None:
             return None
@@ -39,6 +42,10 @@ class JointPositionRateLimiter:
             return action
         if self._previous is None:
             raise RuntimeError("reset() must be called before apply()")
+
+        limit = self._max_delta if max_delta is None else float(max_delta)
+        if not np.isfinite(limit) or limit <= 0.0:
+            raise ValueError(f"max_delta must be finite and > 0, got {limit!r}")
 
         limited = list(joint_positions)
         for state_i, action_i in enumerate(self._joint_indices):
@@ -50,7 +57,7 @@ class JointPositionRateLimiter:
                 continue
             previous = float(self._previous[state_i])
             step = float(np.clip(
-                desired - previous, -self._max_delta, self._max_delta
+                desired - previous, -limit, limit
             ))
             command = previous + step
             limited[action_i] = command

@@ -62,6 +62,13 @@ class JointPositionRateLimiterTests(unittest.TestCase):
         self.assertIs(limiter.apply(action), action)
         self.assertEqual(action.marker, "unchanged")
 
+    def test_per_call_delta_override(self):
+        limiter = JointPositionRateLimiter([0], max_delta=0.5)
+        limiter.reset([0.0])
+        action = SimpleNamespace(joint_positions=[1.0])
+        limiter.apply(action, max_delta=0.02)
+        self.assertAlmostEqual(action.joint_positions[0], 0.02)
+
 
 if __name__ == "__main__":
     unittest.main()

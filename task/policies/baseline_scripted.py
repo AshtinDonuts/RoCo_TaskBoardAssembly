@@ -39,6 +39,7 @@ from controllers.ee_pose_controller import (  # noqa: E402
     build_pick_place_phases,
 )
 from policy_api import EnvInfo, Observation, PartTarget, Policy  # noqa: E402
+from policies._joint_rate_limiter import JointPositionRateLimiter  # noqa: E402
 
 
 def make_l_path_for_part(part_name, target=None, snap_advance_when=None,
@@ -129,8 +130,20 @@ def make_l_path_for_part(part_name, target=None, snap_advance_when=None,
         return_home_gripper=cfg.get("gripper_open"),
         return_home_cspace_tol=getattr(pc, "RETURN_HOME_CSPACE_TOL", None),
         return_home_settle_steps=getattr(pc, "RETURN_HOME_SETTLE_STEPS", 20),
+        return_home_max_velocity=getattr(
+            pc, "RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S", None
+        ),
+        return_home_max_acceleration=getattr(
+            pc, "RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2", None
+        ),
+        return_home_min_duration=getattr(
+            pc, "RETURN_HOME_MIN_DURATION_S", None
+        ),
         safe_retract_pos=safe_retract_pos,
         safe_retract_orn=safe_retract_orn,
+        safe_retract_settle_steps=getattr(
+            pc, "SAFE_RETRACT_SETTLE_STEPS", 0
+        ),
     )
     if pc.MAX_PHASES is not None and pc.MAX_PHASES < len(full):
         return full[:int(pc.MAX_PHASES)]
@@ -182,13 +195,29 @@ class BaselinePolicy(Policy):
             max_ee_orn_step_rad=max_ee_orn_step_rad,
         )
         self._is_first_part = True
+        self._max_joint_velocity = float(getattr(
+            pc, "BASELINE_MAX_JOINT_VELOCITY_RAD_S", 0.5
+        ))
+        arm_indices = [env_info.dof_names.index(name)
+                       for name in env_info.L_arm_joints]
+        fallback_dt = float(getattr(
+            pc, "BASELINE_CONTROL_DT_FALLBACK_S", 0.1
+        ))
+        self._control_dt_fallback = fallback_dt
+        self._joint_rate_limiter = JointPositionRateLimiter(
+            arm_indices,
+            max_delta=self._max_joint_velocity * fallback_dt,
+        )
         # _last_obs is read by the snap_advance_when closure, which is
         # invoked by EEPathFollower.step() to decide whether to advance
         # past the snap_wait waypoint. Updated every act() call.
         self._last_obs: Observation = None  # type: ignore[assignment]
+        self._last_step_idx = None
 
     def reset(self, obs: Observation, target: PartTarget) -> None:
         self._last_obs = obs
+        self._last_step_idx = int(obs.step_idx)
+        self._joint_rate_limiter.reset(obs.joint_positions)
 
         snap_advance_when = None
         snap_timeout_steps = None
@@ -232,8 +261,19 @@ class BaselinePolicy(Policy):
         self._follower.set_path(path)
 
     def act(self, obs: Observation):
+        step_idx = int(obs.step_idx)
+        dt = None
+        if self._last_step_idx is not None and step_idx > self._last_step_idx:
+            dt = ((step_idx - self._last_step_idx)
+                  * float(self.env_info.physics_dt))
+        self._last_step_idx = step_idx
         self._last_obs = obs
-        return self._follower.step()
+        action = self._follower.step(dt=dt)
+        effective_dt = self._control_dt_fallback if dt is None else dt
+        return self._joint_rate_limiter.apply(
+            action,
+            max_delta=self._max_joint_velocity * effective_dt,
+        )
 
     def is_done(self, obs: Observation) -> bool:
         self._last_obs = obs
