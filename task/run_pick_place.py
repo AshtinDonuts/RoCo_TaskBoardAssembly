@@ -68,7 +68,12 @@ from isaacsim.core.utils.prims import is_prim_path_valid
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.utils.types import ArticulationAction
 from policy_api import EnvInfo, Observation, PartTarget
-from eval_randomization import XYRandomization, resolve_policy_config
+from eval_randomization import (
+    XY_MAX_M,
+    XY_MIN_M,
+    XYRandomization,
+    resolve_policy_config,
+)
 
 # Physics material prim authored in the scene USD; bound to every spawned
 # DynamicPart so newly imported parts share the same friction/restitution
@@ -710,6 +715,13 @@ def _parse_args():
              "joint velocities, and commanded joint positions to CSV.",
     )
     parser.add_argument(
+        "--observation-snapshot",
+        default=None,
+        help="Write the first available pre-motion camera observation to a "
+             "compressed NPZ (RGB, depth, intrinsics, and camera world pose "
+             "for all streams).",
+    )
+    parser.add_argument(
         "--max-steps",
         type=int,
         default=_env_int("ROCO_EVAL_MAX_STEPS"),
@@ -738,12 +750,17 @@ def _parse_args():
              "seed. Omit for the nominal scene.",
     )
     parser.add_argument(
-        "--blind-to-xy-randomization",
+        "--privileged-xy-randomization",
         action="store_true",
-        help="With --random-seed: still randomize board/part poses and keep "
-             "snap/grade on the shifted world, but hand the policy nominal "
-             "(unshifted) PartTarget waypoints. Useful to demonstrate that "
-             "open-loop experts need privileged XY offsets.",
+        help="DEVELOPMENT ONLY. With --random-seed, hand the policy true "
+             "shifted PartTarget waypoints. By default policies receive "
+             "only nominal reference waypoints and must use camera streams.",
+    )
+    parser.add_argument(
+        "--log-randomization-offsets",
+        action="store_true",
+        help="DEVELOPMENT ONLY. Print sampled board/part offsets. Off by "
+             "default so competition-style logs do not reveal them.",
     )
     # SimulationApp consumes argv too; tolerate unknown args so the runner
     # can be launched as ${ISAAC_SIM}/python.sh run_pick_place.py --policy ...
@@ -752,7 +769,10 @@ def _parse_args():
         value = getattr(args, attr, None)
         if value is not None and value <= 0:
             setattr(args, attr, None)
-    for attr in ("results_json", "record_video", "trajectory_csv"):
+    for attr in (
+        "results_json", "record_video", "trajectory_csv",
+        "observation_snapshot",
+    ):
         value = getattr(args, attr, None)
         if value and not os.path.isabs(value):
             setattr(args, attr, os.path.abspath(os.path.join(_LAUNCH_CWD, value)))
@@ -792,22 +812,30 @@ def main():
         )
         print(
             f"[setup] fairness XY randomization seed={randomized_trial.seed} "
-            f"board_offset=({randomized_trial.board_offset[0]:+.5f}, "
-            f"{randomized_trial.board_offset[1]:+.5f})"
+            f"range=[{XY_MIN_M:+.5f}, {XY_MAX_M:+.5f}] m per axis"
         )
-        for name, offset in sorted(randomized_trial.part_offsets.items()):
+        if args.log_randomization_offsets:
             print(
-                f"[setup] {name} offset=({offset[0]:+.5f}, "
+                f"[setup] DEV board_offset="
+                f"({randomized_trial.board_offset[0]:+.5f}, "
+                f"{randomized_trial.board_offset[1]:+.5f})"
+            )
+        for name, offset in (
+            sorted(randomized_trial.part_offsets.items())
+            if args.log_randomization_offsets else ()
+        ):
+            print(
+                f"[setup] DEV {name} offset=({offset[0]:+.5f}, "
                 f"{offset[1]:+.5f})"
             )
-        if args.blind_to_xy_randomization:
+        if args.privileged_xy_randomization:
             print(
-                "[setup] blind-to-xy-randomization: policy PartTarget stays "
-                "nominal; snap/grade follow the shifted scene"
+                "[setup] WARNING: privileged XY waypoints enabled; this run "
+                "is not competition-faithful"
             )
-    elif args.blind_to_xy_randomization:
+    elif args.privileged_xy_randomization or args.log_randomization_offsets:
         print(
-            "[setup] WARNING: --blind-to-xy-randomization has no effect "
+            "[setup] WARNING: randomization development flags have no effect "
             "without --random-seed"
         )
     video_recorder = FfmpegVideoRecorder(
@@ -821,6 +849,7 @@ def main():
     exit_on_complete = bool(_HEADLESS or video_recorder.enabled)
     run_complete = False
     finalized = False
+    observation_snapshot_written = False
     total_task_steps = 0
     completed_parts = 0
 
@@ -865,7 +894,7 @@ def main():
             name,
             pc.get_part_config(name),
             trial=randomized_trial,
-            blind=bool(args.blind_to_xy_randomization),
+            privileged=bool(args.privileged_xy_randomization),
         )
 
     L_controller = my_controller["L"]
@@ -1051,6 +1080,47 @@ def main():
             target_part=current_part if isinstance(current_part, str) else None,
         )
 
+    def _write_observation_snapshot(obs):
+        """Persist the first camera-ready observation for offline vision work."""
+        nonlocal observation_snapshot_written
+        if observation_snapshot_written or not args.observation_snapshot:
+            return
+        if any(
+            frames.get("head") is None
+            for frames in (obs.rgb, obs.depth, obs.intrinsics)
+        ):
+            return
+        payload = {"step_idx": np.asarray(int(obs.step_idx), dtype=np.int64)}
+        for camera_name in ("head", "L_wrist", "R_wrist"):
+            for field_name, frames in (
+                ("rgb", obs.rgb),
+                ("depth", obs.depth),
+                ("intrinsics", obs.intrinsics),
+            ):
+                value = frames.get(camera_name)
+                if value is not None:
+                    payload[f"{camera_name}_{field_name}"] = np.asarray(value)
+        for camera_name, cam in (
+            ("head", head_depth_camera),
+            ("L_wrist", L_wrist_camera),
+            ("R_wrist", R_wrist_camera),
+        ):
+            if cam is None:
+                continue
+            try:
+                pos, orn = cam.get_world_pose()
+            except Exception:
+                continue
+            if pos is not None:
+                payload[f"{camera_name}_camera_pos"] = np.asarray(pos, dtype=np.float64)
+            if orn is not None:
+                payload[f"{camera_name}_camera_orn"] = np.asarray(orn, dtype=np.float64)
+        snapshot_path = args.observation_snapshot
+        os.makedirs(os.path.dirname(snapshot_path) or ".", exist_ok=True)
+        np.savez_compressed(snapshot_path, **payload)
+        observation_snapshot_written = True
+        print(f"[camera] wrote observation snapshot -> {snapshot_path}")
+
     def _build_part_target(name):
         cfg = _policy_config(name)
         snap = cfg.get("snap") or {}
@@ -1095,8 +1165,8 @@ def main():
         }
         if randomized_trial is not None:
             metadata["xy_randomization"] = randomized_trial.as_dict()
-            metadata["blind_to_xy_randomization"] = bool(
-                args.blind_to_xy_randomization
+            metadata["privileged_xy_randomization"] = bool(
+                args.privileged_xy_randomization
             )
         _grade_task(stage, snap_fired_parts,
                     results_json_path=args.results_json,
@@ -1251,6 +1321,7 @@ def main():
                 continue
 
             obs = _build_observation()
+            _write_observation_snapshot(obs)
             sim_time_s = my_world.current_time_step_index * env_info.physics_dt
             if video_recorder.enabled:
                 if sim_time_s + 1e-9 >= next_record_time_s:

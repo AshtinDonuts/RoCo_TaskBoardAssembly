@@ -41,8 +41,11 @@ A standalone Omniverse-launcher Isaac Sim still works:
 `${ISAAC_SIM}/python.sh task/run_pick_place.py`.
 
 Passing `--random-seed N` enables the fairness evaluation-time XY
-randomization (uniform ±1 cm, deterministic for that trial). Omitting the
-option keeps the nominal scene and targets unchanged.
+randomization (uniform ±1 cm per world X/Y axis, deterministic for that
+trial). The scene moves, while the policy receives nominal reference targets
+and must infer offsets from cameras. Omitting the option keeps the nominal
+scene and targets unchanged. `--privileged-xy-randomization` exposes shifted
+targets for development-only expert rollouts and is not competition-faithful.
 
 `--policy` defaults to `policies.baseline_scripted.BaselinePolicy`.
 `--results-json` overrides `pc.RESULTS_JSON_PATH`.
@@ -51,6 +54,8 @@ option keeps the nominal scene and targets unchanged.
 `--record-video-fps`. `--max-steps`, `--max-sim-seconds`, and
 `--max-parts` end a run early while still writing JSON/video, which is
 useful for smoke tests.
+`--observation-snapshot PATH` writes the first camera-ready pre-motion
+observation to a compressed NPZ containing RGB, depth, and intrinsics.
 
 Edit `pc.part_order` to choose which parts to run. All 9 parts are
 pre-resident in `scene_init.usd`; any `part_order` entry that *isn't* in
@@ -129,6 +134,8 @@ When `enable_camera_output = True`, the harness binds the three cameras
 and surfaces frames via `Observation.rgb` / `depth` / `intrinsics` to
 the policy. `--record-video` also enables camera binding for the selected
 stream even when `enable_camera_output` is `False`.
+Set `TASK_ENABLE_CAMERA_OUTPUT=1` to enable all policy camera observations
+without editing `param_config.py`.
 
 **IK descriptor mode** — three modes per arm via the (`OWNS_LIFT_*`,
 `OWNS_TORSO_*`) flag pair:

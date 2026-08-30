@@ -123,7 +123,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 enable_camera_viewports = _env_bool("TASK_ENABLE_CAMERA_VIEWPORTS", True)   # show the 3-tile viewport layout in Kit UI
-enable_camera_output    = False   # bind sensors so RGB/depth are readable from Python
+enable_camera_output    = _env_bool("TASK_ENABLE_CAMERA_OUTPUT", False)  # bind RGB/depth for policies
 HEAD_DEPTH_CAMERA_FOCAL_LENGTH = float(os.getenv("TASK_HEAD_DEPTH_FOCAL_LENGTH", "10"))
 
 # IK c-space size per arm. Three modes per side, picked by the

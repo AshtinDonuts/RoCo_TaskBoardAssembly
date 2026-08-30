@@ -332,11 +332,16 @@ CLI flags:
 - `--record-video <path>` — writes an MP4 from a task camera. Use
   `--record-video-camera {head,L_wrist,R_wrist}` and
   `--record-video-fps <fps>` to choose the stream and output FPS.
+- `--observation-snapshot <path>` — writes the first camera-ready pre-motion
+  RGB, depth, and intrinsics for all streams to a compressed NPZ.
 - `--max-steps <n>`, `--max-sim-seconds <seconds>`, `--max-parts <n>` —
   bounded eval/smoke-test exits. The runner still writes results JSON
   and closes any video recorder before exiting.
 - `--random-seed <n>` — enables deterministic fairness XY randomization
-  (uniform ±1 cm); omit it for the nominal scene.
+  (uniform ±1 cm per world X/Y axis). Policies receive nominal targets and
+  must infer offsets from camera streams. The development-only
+  `--privileged-xy-randomization` flag exposes shifted targets for expert
+  rollouts; do not use it for competition evaluation.
 
 Edit `task/param_config.py::part_order` to run a subset for debugging.
 See `task/README.md` for the per-runner gotchas (scene drive targets,

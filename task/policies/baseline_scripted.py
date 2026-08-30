@@ -12,12 +12,11 @@ at the original terminals.
 This is the normal scripted baseline. Participants should not modify this
 file; copy `template.py` instead.
 
-Privileged BC expert under fairness XY randomization: when the harness runs
-with `--random-seed`, `PartTarget.pick_pos` / `place_pos` (and `target.extra`)
-already include the trial's XY offsets. This policy must consume those fields
-and must not re-read unshifted `pc.get_part_config` pick/place when a
-`PartTarget` is supplied. Use `--blind-to-xy-randomization` on the harness to
-hand nominal waypoints instead (open-loop miss demo).
+Under fairness XY randomization, the harness normally supplies nominal
+`PartTarget` waypoints, so this open-loop policy is expected to miss. The
+development-only `--privileged-xy-randomization` flag shifts those waypoints
+to generate expert rollouts. A competition policy must instead estimate the
+part and board offsets from `Observation.rgb` / `Observation.depth`.
 """
 from __future__ import annotations
 
@@ -69,9 +68,9 @@ def make_l_path_for_part(part_name, target=None, snap_advance_when=None,
     (holding XY / orientation) clear of the table under existing
     Cartesian pacing, then begin the joint-space home motion.
     """
-    # Privileged path: harness PartTarget may already include fairness XY
-    # offsets in pick_pos / place_pos / extra. Prefer those over unshifted
-    # pc.get_part_config whenever target is provided.
+    # The harness PartTarget is nominal in competition mode and shifted only
+    # under the explicit privileged development flag. In both cases consume
+    # it verbatim; camera-aware policies should adjust a private copy first.
     cfg = (dict(target.extra) if target is not None and target.extra
            else pc.get_part_config(part_name))
     ee_off = np.asarray(cfg["ee_offset"], dtype=np.float64)

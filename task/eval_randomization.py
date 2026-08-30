@@ -12,7 +12,13 @@ from typing import Iterable, Mapping
 import numpy as np
 
 
-XY_LIMIT_M = 0.01
+# Official fairness domain. Each X/Y component is sampled independently from
+# this closed interval. Keep these bounds here as the single source of truth
+# for the evaluator, tests, result metadata, and public fairness note.
+XY_MIN_M = -0.01
+XY_MAX_M = +0.01
+# Backward-compatible magnitude used by older callers/tests.
+XY_LIMIT_M = max(abs(XY_MIN_M), abs(XY_MAX_M))
 SUPPORT_COUPLED_PARTS = frozenset({"gear_60teeth", "rod_16mm", "bolt_8mm"})
 
 
@@ -48,7 +54,7 @@ class XYRandomization:
     @classmethod
     def sample(cls, seed: int, part_names: Iterable[str]) -> "XYRandomization":
         rng = np.random.default_rng(int(seed))
-        board_xy = rng.uniform(-XY_LIMIT_M, XY_LIMIT_M, size=2)
+        board_xy = rng.uniform(XY_MIN_M, XY_MAX_M, size=2)
         board_offset = np.array([board_xy[0], board_xy[1], 0.0], dtype=np.float64)
 
         offsets = {}
@@ -58,7 +64,7 @@ class XYRandomization:
             if name in SUPPORT_COUPLED_PARTS:
                 offsets[name] = board_offset.copy()
                 continue
-            xy = rng.uniform(-XY_LIMIT_M, XY_LIMIT_M, size=2)
+            xy = rng.uniform(XY_MIN_M, XY_MAX_M, size=2)
             offsets[name] = np.array([xy[0], xy[1], 0.0], dtype=np.float64)
         return cls(seed=int(seed), board_offset=board_offset, part_offsets=offsets)
 
@@ -93,6 +99,7 @@ class XYRandomization:
     def as_dict(self) -> dict:
         return {
             "seed": int(self.seed),
+            "xy_range_m": [float(XY_MIN_M), float(XY_MAX_M)],
             "board_offset": [float(x) for x in self.board_offset],
             "part_offsets": {
                 name: [float(x) for x in offset]
@@ -101,13 +108,14 @@ class XYRandomization:
         }
 
 
-def resolve_policy_config(part_name, config, trial=None, blind=False):
+def resolve_policy_config(part_name, config, trial=None, privileged=False):
     """Return the part config that should be handed to the policy as PartTarget.
 
     Scene/snap/grade always use ``trial.shifted_config`` when a trial exists.
-    Policies either receive that same shifted config (privileged BC expert)
-    or the nominal ``config`` when ``blind`` is True.
+    Competition policies receive the nominal reference config and must infer
+    offsets from camera observations. ``privileged=True`` is an explicit
+    development-only escape hatch for expert data generation and diagnostics.
     """
-    if trial is None or blind:
+    if trial is None or not privileged:
         return dict(config)
     return trial.shifted_config(part_name, config)

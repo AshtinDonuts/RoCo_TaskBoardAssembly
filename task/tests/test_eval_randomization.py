@@ -5,6 +5,8 @@ import numpy as np
 
 from task.eval_randomization import (
     SUPPORT_COUPLED_PARTS,
+    XY_MAX_M,
+    XY_MIN_M,
     XY_LIMIT_M,
     XYRandomization,
     resolve_policy_config,
@@ -64,7 +66,7 @@ class XYRandomizationTests(unittest.TestCase):
         np.testing.assert_array_equal(config["place_pos"], original["place_pos"])
         self.assertEqual(config["snap"], original["snap"])
 
-    def test_resolve_policy_config_privileged_vs_blind(self):
+    def test_resolve_policy_config_camera_only_by_default(self):
         config = {
             "pick_pos": np.array([1.0, 2.0, 3.0]),
             "place_pos": np.array([4.0, 5.0, 6.0]),
@@ -75,20 +77,26 @@ class XYRandomizationTests(unittest.TestCase):
             board_offset=np.array([0.1, 0.2, 0.0]),
             part_offsets={"usb_a": np.array([0.3, 0.4, 0.0])},
         )
+        camera_only = resolve_policy_config("usb_a", config, trial=trial)
         privileged = resolve_policy_config(
-            "usb_a", config, trial=trial, blind=False
-        )
-        blind = resolve_policy_config(
-            "usb_a", config, trial=trial, blind=True
+            "usb_a", config, trial=trial, privileged=True
         )
         scene = trial.shifted_config("usb_a", config)
 
         np.testing.assert_array_equal(privileged["pick_pos"], scene["pick_pos"])
         np.testing.assert_array_equal(privileged["place_pos"], scene["place_pos"])
-        np.testing.assert_array_equal(blind["pick_pos"], config["pick_pos"])
-        np.testing.assert_array_equal(blind["place_pos"], config["place_pos"])
-        self.assertFalse(np.array_equal(blind["pick_pos"], scene["pick_pos"]))
-        self.assertFalse(np.array_equal(blind["place_pos"], scene["place_pos"]))
+        np.testing.assert_array_equal(camera_only["pick_pos"], config["pick_pos"])
+        np.testing.assert_array_equal(camera_only["place_pos"], config["place_pos"])
+        self.assertFalse(
+            np.array_equal(camera_only["pick_pos"], scene["pick_pos"])
+        )
+        self.assertFalse(
+            np.array_equal(camera_only["place_pos"], scene["place_pos"])
+        )
+
+    def test_result_metadata_declares_official_range(self):
+        trial = XYRandomization.sample(3, self.PARTS)
+        self.assertEqual(trial.as_dict()["xy_range_m"], [XY_MIN_M, XY_MAX_M])
 
 
 if __name__ == "__main__":
