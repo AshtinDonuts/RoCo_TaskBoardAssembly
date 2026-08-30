@@ -538,7 +538,7 @@ def split_dataset(
     rollout_manifest: Path | None = None,
     successful_parts_only: bool = False,
     replace: bool = False,
-    pruning_strategy: str = "none",
+    pruning_strategy: str = "velocity",
     home_tolerance_rad: float = 0.03,
     settle_frames: int = 5,
     velocity_threshold_rad_s: float = 0.5,
@@ -853,8 +853,8 @@ def main() -> None:
     parser.add_argument(
         "--pruning-strategy",
         choices=PRUNING_STRATEGIES,
-        default="none",
-        help="Mutually exclusive post-filter prefix-pruning strategy (default: none)",
+        default="velocity",
+        help="Mutually exclusive post-filter prefix-pruning strategy (default: velocity)",
     )
     parser.add_argument("--home-tolerance-rad", type=float, default=0.03)
     parser.add_argument("--settle-frames", type=int, default=5)

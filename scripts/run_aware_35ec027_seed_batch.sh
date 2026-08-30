@@ -10,7 +10,7 @@ seed_count=30
 output_dir=""
 sample_fps=10
 repo_id="taskboard/aware_35ec027_full_assembly"
-pruning_strategy="home"
+pruning_strategy="velocity"
 force=0
 
 while (($#)); do
@@ -35,7 +35,7 @@ Usage: scripts/run_aware_35ec027_seed_batch.sh [options]
   --repo-id ID     Local LeRobot repository ID
   --pruning-strategy MODE
                      Derived prefix pruning: none, home, velocity, or waypoint
-                     (default: home)
+                     (default: velocity)
   --force          Delete and rebuild the entire output root
 EOF
       exit 0 ;;
