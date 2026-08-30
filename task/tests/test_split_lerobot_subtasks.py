@@ -122,16 +122,24 @@ class SplitLeRobotSubtasksTest(unittest.TestCase):
         self.assertFalse(refined["pruning_evidence"]["reset_detected"])
 
     def test_velocity_pruning_rejects_reset_without_freeze(self):
+        # Missing freeze no longer aborts the split: keep the full segment.
         segment = self._segment(length=30, begin=10)
         states = self._states(40)
         local = slice(segment["begin"], segment["end"])
         states[local, 28:35] = 0.1
         states[segment["begin"]:segment["begin"] + 3, 28:35] = 2.0
         states[local, 14:21] = np.arange(30, dtype=np.float64)[:, None] * 0.01
-        with self.assertRaisesRegex(ValueError, "no 1s freeze"):
-            splitter._refine_segment(
-                segment, None, states, "velocity", 2, 0.03, 3, 0.5,
-            )
+        refined = splitter._refine_segment(
+            segment, None, states, "velocity", 2, 0.03, 3, 0.5,
+        )
+        self.assertEqual(refined["begin"], segment["begin"])
+        self.assertEqual(refined["frames_removed"], 0)
+        self.assertTrue(refined["pruning_evidence"]["reset_detected"])
+        self.assertFalse(refined["pruning_evidence"]["freeze_found"])
+        self.assertEqual(
+            refined["pruning_evidence"]["reason"],
+            "reset_without_required_freeze",
+        )
 
     def test_velocity_pruning_skips_first_episode_segment(self):
         segment = {"name": "gear_60teeth", "begin": 0, "end": 30, "pass": True}

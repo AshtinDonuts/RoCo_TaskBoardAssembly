@@ -275,7 +275,7 @@ def _refine_segment(
     velocity_threshold_rad_s: float,
     fps: int = 10,
     freeze_velocity_threshold_rad_s: float = 0.02,
-    freeze_duration_s: float = 1.0,
+    freeze_duration_s: float = 0.25,
 ) -> dict:
     """Return a copy with a refined contiguous start and pruning evidence."""
     if strategy not in PRUNING_STRATEGIES:
@@ -374,23 +374,34 @@ def _refine_segment(
                     freeze_frames,
                 )
                 if relative_freeze is None:
-                    raise ValueError(
-                        f"segment {segment['name']!r} has reset motion but no "
-                        f"{freeze_duration_s:g}s freeze below "
-                        f"{freeze_velocity_threshold_rad_s} rad/s"
+                    # Faster baselines often have only a short pause at home;
+                    # keep the full segment rather than failing the split.
+                    offset = 0
+                    freeze_begin = None
+                    freeze_end = None
+                    evidence.update(
+                        freeze_found=False,
+                        reason="reset_without_required_freeze",
                     )
-                freeze_begin = search_begin + relative_freeze
-                freeze_end = freeze_begin + freeze_frames
-                while (
-                    freeze_end < len(measured_velocity)
-                    and measured_velocity[freeze_end] <= freeze_velocity_threshold_rad_s
-                ):
-                    freeze_end += 1
-                if freeze_end >= len(max_velocity):
-                    raise ValueError(
-                        f"segment {segment['name']!r} freezes after reset but never resumes motion"
-                    )
-                offset = freeze_end
+                else:
+                    freeze_begin = search_begin + relative_freeze
+                    freeze_end = freeze_begin + freeze_frames
+                    while (
+                        freeze_end < len(measured_velocity)
+                        and measured_velocity[freeze_end] <= freeze_velocity_threshold_rad_s
+                    ):
+                        freeze_end += 1
+                    if freeze_end >= len(max_velocity):
+                        # Timeout-style segments can stay near-still after
+                        # return_home; do not drop the whole split.
+                        offset = 0
+                        evidence.update(
+                            freeze_found=True,
+                            reason="reset_freeze_never_resumes",
+                        )
+                    else:
+                        offset = freeze_end
+                        evidence.update(freeze_found=True)
             if offset >= len(max_velocity):
                 raise ValueError(
                     f"velocity pruning removes all frames from segment {segment['name']!r}"
@@ -403,8 +414,12 @@ def _refine_segment(
                 freeze_frames=freeze_frames,
                 reset_detected=bool(len(early_reset)),
                 reset_end=(None if reset_end is None else original_begin + reset_end),
-                freeze_begin=(None if freeze_begin is None else original_begin + freeze_begin),
-                freeze_end=(None if freeze_end is None else original_begin + freeze_end),
+                freeze_begin=(
+                    None if freeze_begin is None else original_begin + freeze_begin
+                ),
+                freeze_end=(
+                    None if freeze_end is None else original_begin + freeze_end
+                ),
                 retained_motion_begin=begin,
             )
     elif strategy == "waypoint":
@@ -551,7 +566,7 @@ def split_dataset(
     settle_frames: int = 5,
     velocity_threshold_rad_s: float = 0.5,
     freeze_velocity_threshold_rad_s: float = 0.02,
-    freeze_duration_s: float = 1.0,
+    freeze_duration_s: float = 0.25,
 ) -> dict:
     source = source.resolve()
     destination = destination.resolve()
@@ -868,7 +883,7 @@ def main() -> None:
     parser.add_argument("--settle-frames", type=int, default=5)
     parser.add_argument("--velocity-threshold-rad-s", type=float, default=0.5)
     parser.add_argument("--freeze-velocity-threshold-rad-s", type=float, default=0.02)
-    parser.add_argument("--freeze-duration-s", type=float, default=1.0)
+    parser.add_argument("--freeze-duration-s", type=float, default=0.25)
     parser.add_argument(
         "--replace",
         action="store_true",
