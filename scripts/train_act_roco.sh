@@ -138,9 +138,10 @@ n_action_steps="${ACT_N_ACTION_STEPS:-${chunk_size}}"
 batch_size="${ACT_BATCH_SIZE:-64}"
 num_workers="${ACT_NUM_WORKERS:-8}"
 steps="${ACT_STEPS:-15000}"
-eval_split="${ACT_EVAL_SPLIT:-0.1}"
-eval_steps="${ACT_EVAL_STEPS:-5000}"
-max_eval_samples="${ACT_MAX_EVAL_SAMPLES:-128}"
+# Stock LeRobot uses env rollout eval via eval_freq. Offline holdout flags
+# (dataset.eval_split / eval_steps / max_eval_samples / env_eval_freq) require
+# the feat/offline-validation branch and are not passed here.
+eval_freq="${ACT_EVAL_FREQ:-0}"
 save_freq="${ACT_SAVE_FREQ:-5000}"
 log_freq="${ACT_LOG_FREQ:-100}"
 use_amp="${ACT_USE_AMP:-true}"
@@ -149,6 +150,12 @@ wandb_enable="${ACT_WANDB_ENABLE:-false}"
 export CUDA_VISIBLE_DEVICES="${ACT_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# Training may run in environments where the user's home cache is read-only.
+# Keep framework caches in the project by default, while allowing callers to
+# select an existing/shared cache through the standard environment variables.
+export HF_HOME="${HF_HOME:-${repo_root}/.hf-cache}"
+export TORCH_HOME="${TORCH_HOME:-${HF_HOME}/torch}"
+mkdir -p "${HF_HOME}" "${TORCH_HOME}"
 
 if [[ -n "${ACT_PYTHON:-}" ]]; then
   train_python=("${ACT_PYTHON}")
@@ -165,7 +172,6 @@ train_args=(
   --dataset.repo_id="${dataset_repo_id}"
   --dataset.root="${dataset_root}"
   --dataset.episodes="${episodes}"
-  --dataset.eval_split="${eval_split}"
   --dataset.video_backend=pyav
   --policy.type=act
   --policy.device=cuda
@@ -178,11 +184,9 @@ train_args=(
   --batch_size="${batch_size}"
   --num_workers="${num_workers}"
   --steps="${steps}"
-  --eval_steps="${eval_steps}"
-  --max_eval_samples="${max_eval_samples}"
+  --eval_freq="${eval_freq}"
   --save_freq="${save_freq}"
   --log_freq="${log_freq}"
-  --env_eval_freq=0
   --wandb.enable="${wandb_enable}"
   --wandb.project="${ACT_WANDB_PROJECT:-roco}"
   --job_name="${job_name}"

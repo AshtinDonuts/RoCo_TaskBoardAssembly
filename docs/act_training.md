@@ -80,8 +80,7 @@ The launcher accepts these environment overrides:
 | `ACT_CHUNK_SIZE` / `ACT_N_ACTION_STEPS` | `9` / `9` |
 | `ACT_BATCH_SIZE` / `ACT_NUM_WORKERS` | `64` / `8` |
 | `ACT_STEPS` | `15000` |
-| `ACT_EVAL_SPLIT` / `ACT_EVAL_STEPS` | `0.1` / `5000` |
-| `ACT_MAX_EVAL_SAMPLES` | `128` |
+| `ACT_EVAL_FREQ` | `0` (disable sim env eval; stock LeRobot) |
 | `ACT_SAVE_FREQ` / `ACT_LOG_FREQ` | `5000` / `100` |
 | `ACT_USE_AMP` | `true` |
 | `ACT_CUDA_VISIBLE_DEVICES` | existing `CUDA_VISIBLE_DEVICES`, otherwise `0` |
@@ -100,3 +99,30 @@ ACT_PART=usb_a ./scripts/train_act_roco.sh \
 
 Checkpoints are written beneath `ACT_OUTPUT_DIR`, normally at steps 5,000,
 10,000, and 15,000.
+
+## 10 Hz Gear-60 Prototypes
+
+Create the frame-exact 10 Hz gear-60 derivative of the seed 0–99 data:
+
+```bash
+./scripts/create_roco_10hz_dataset.sh
+```
+
+The prototype output is
+`artifacts/aware_35ec027_timeout120_seeds0-99/derived_subtasks_10hz`.
+To replace it later with all nine parts, run:
+
+```bash
+ROCO_10HZ_ALL_PARTS=1 ROCO_10HZ_REPLACE=1 \
+  ./scripts/create_roco_10hz_dataset.sh
+```
+
+Train both closed-loop gear-60 variants sequentially:
+
+```bash
+LEROBOT_ROOT=/path/to/lerobot ./scripts/train_act_gear60_10hz_variants.sh all
+```
+
+Pass `3` or `5` instead of `all` to train only that chunk size. Both variants
+use `policy.n_action_steps=1`; the model predicts a 0.3 s or 0.5 s chunk but
+deployment replans from the newest observation on every 10 Hz inference tick.
