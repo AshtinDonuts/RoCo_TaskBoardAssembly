@@ -29,7 +29,7 @@ packaging.version = _packaging_version
 
 import numpy as np
 import torch
-from lerobot.policies.act.modeling_act import ACTPolicy
+from lerobot.policies.act.modeling_act import ACTPolicy, ACTTemporalEnsembler
 from lerobot.policies.factory import make_pre_post_processors
 
 CKPT = sys.argv[1]
@@ -37,12 +37,36 @@ DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 policy = ACTPolicy.from_pretrained(CKPT)
 policy.eval().to(DEV)
+# Optional deploy overrides (must satisfy ACTConfig constraints).
+_coeff = os.environ.get("ACT_TEMPORAL_ENSEMBLE_COEFF")
+_n_action = os.environ.get("ACT_N_ACTION_STEPS")
+if _coeff not in (None, ""):
+    coeff = float(_coeff)
+    # Temporal ensembling requires inference every step (n_action_steps=1).
+    if _n_action and int(_n_action) != 1:
+        sys.stderr.write(
+            f"[act_server] temporal ensembling forces n_action_steps=1 "
+            f"(ignoring ACT_N_ACTION_STEPS={_n_action})\n"
+        )
+    policy.config.temporal_ensemble_coeff = coeff
+    policy.config.n_action_steps = 1
+    policy.temporal_ensembler = ACTTemporalEnsembler(coeff, policy.config.chunk_size)
+    policy.reset()
+elif _n_action:
+    # Execute N predicted actions before replanning (<= chunk_size).
+    policy.config.n_action_steps = int(_n_action)
+    policy.reset()
 preprocessor, postprocessor = make_pre_post_processors(
     policy_cfg=policy.config,
     pretrained_path=CKPT,
     preprocessor_overrides={"device_processor": {"device": DEV}},
 )
-sys.stderr.write(f"[act_server] loaded {CKPT} (+processors) on {DEV}\n")
+sys.stderr.write(
+    f"[act_server] loaded {CKPT} (+processors) on {DEV} "
+    f"chunk_size={policy.config.chunk_size} "
+    f"n_action_steps={policy.config.n_action_steps} "
+    f"temporal_ensemble_coeff={policy.config.temporal_ensemble_coeff}\n"
+)
 sys.stderr.flush()
 
 _in = sys.stdin.buffer

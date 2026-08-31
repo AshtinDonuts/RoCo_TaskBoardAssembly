@@ -9,6 +9,8 @@ Env:
   ACT_SERVER       optional path to act_server.py
   ACT_SERVER_LOG   optional stderr log path
   ACT_CUDA_VISIBLE_DEVICES  optional GPU id(s) for the sidecar
+  ACT_N_ACTION_STEPS  optional override for closed-loop action horizon
+  ACT_TEMPORAL_ENSEMBLE_COEFF  optional ACT temporal ensembling coeff
 """
 from __future__ import annotations
 
@@ -100,6 +102,8 @@ class ACTLeRobotPolicy(Policy):
             "HUGGINGFACE_HUB_TOKEN",
             "TOKENIZERS_PARALLELISM",
             "PYTORCH_CUDA_ALLOC_CONF",
+            "ACT_N_ACTION_STEPS",
+            "ACT_TEMPORAL_ENSEMBLE_COEFF",
         )
         env = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
