@@ -138,7 +138,6 @@ def downsample_dataset(
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp = Path(tempfile.mkdtemp(prefix=f".{destination.name}.tmp-", dir=destination.parent))
-    output_tables: list[pa.Table] = []
     output_episode_rows: list[dict] = []
     output_lineage: list[dict] = []
     next_index = 0
@@ -169,7 +168,7 @@ def downsample_dataset(
                 "index": np.arange(next_index, next_index + length, dtype=np.int64),
             }.items():
                 table = _replace(table, key, values)
-            output_tables.append(table)
+            chunk, file = divmod(new_episode, int(info["chunks_size"]))
 
             meta = dict(source_meta)
             meta.update(
@@ -178,10 +177,10 @@ def downsample_dataset(
                 dataset_from_index=next_index,
                 dataset_to_index=next_index + length,
                 **{
-                    "data/chunk_index": 0,
-                    "data/file_index": 0,
-                    "meta/episodes/chunk_index": 0,
-                    "meta/episodes/file_index": 0,
+                    "data/chunk_index": chunk,
+                    "data/file_index": file,
+                    "meta/episodes/chunk_index": chunk,
+                    "meta/episodes/file_index": file,
                 },
             )
             for key in numeric_features:
@@ -200,7 +199,6 @@ def downsample_dataset(
                     int(source_meta[f"videos/{key}/chunk_index"]),
                     int(source_meta[f"videos/{key}/file_index"]),
                 )
-                chunk, file = divmod(new_episode, int(info["chunks_size"]))
                 output_video = _video_path(info, temp, key, chunk, file)
                 _transcode_video(
                     source_video, output_video, factor, output_fps, length, ffmpeg
@@ -211,6 +209,27 @@ def downsample_dataset(
                 meta[f"videos/{key}/to_timestamp"] = length / output_fps
 
             output_episode_rows.append(meta)
+            data_path = temp / info["data_path"].format(
+                chunk_index=chunk, file_index=file
+            )
+            data_path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                table,
+                data_path,
+                compression="snappy",
+                use_dictionary=True,
+            )
+            episode_path = (
+                temp
+                / f"meta/episodes/chunk-{chunk:03d}/file-{file:03d}.parquet"
+            )
+            episode_path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                pa.Table.from_pylist([meta]),
+                episode_path,
+                compression="snappy",
+                use_dictionary=True,
+            )
             lineage = dict(lineage_by_episode[old_episode])
             lineage.update(
                 episode_index=new_episode,
@@ -221,23 +240,6 @@ def downsample_dataset(
             )
             output_lineage.append(lineage)
             next_index += length
-
-        data_path = temp / "data/chunk-000/file-000.parquet"
-        data_path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(
-            pa.concat_tables(output_tables, promote_options="default"),
-            data_path,
-            compression="snappy",
-            use_dictionary=True,
-        )
-        episode_path = temp / "meta/episodes/chunk-000/file-000.parquet"
-        episode_path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(
-            pa.Table.from_pylist(output_episode_rows),
-            episode_path,
-            compression="snappy",
-            use_dictionary=True,
-        )
 
         new_info = dict(info)
         new_info.update(
