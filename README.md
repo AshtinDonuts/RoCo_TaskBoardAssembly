@@ -20,6 +20,7 @@ AssemblyTask/
 ├── PARTS.md                  # participant-facing parts/scoring reference
 ├── docs/
 │   ├── SETUP_UBUNTU22_RTX4090.md  # Ubuntu 22.04 + RTX 4090 machine bootstrap
+│   ├── act_training.md       # per-part LeRobot ACT training recipe
 │   └── pi05_eval.md          # pi0.5 checkpoint eval recipe
 ├── scripts/
 │   └── setup_ubuntu22_rtx4090.sh  # apt + uv sync bootstrap for that machine
@@ -355,6 +356,11 @@ the `SingleRigidPrim` ↔ FixedJoint tensor-view crash, SDF + FixedJoint
 crash, snap `connect_rot` requirement, etc.).
 
 ## 🤖 Deploying a Learned Policy
+
+Training launchers and reproduction settings are documented in
+[`docs/act_training.md`](docs/act_training.md) for per-part ACT skills and
+[`docs/pi05_baseline_training.md`](docs/pi05_baseline_training.md) for the
+pi0.5 baseline.
 
 `policies/baseline_scripted.py` computes its actions from hand-written
 waypoints, but the `Policy` interface makes no assumption about *how* `act`
