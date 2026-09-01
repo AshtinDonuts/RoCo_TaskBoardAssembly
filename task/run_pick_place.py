@@ -722,6 +722,14 @@ def _parse_args():
              "for all streams).",
     )
     parser.add_argument(
+        "--export-offset-frames",
+        default=None,
+        help="For CameraOffsetScriptedPolicy: write the buffered head RGB/depth "
+             "frames used for XY offset estimation (named by buffer index and "
+             "sim step_idx) plus the nominal reference and a manifest.json. "
+             "Also accepted as CAMERA_OFFSET_EXPORT_DIR.",
+    )
+    parser.add_argument(
         "--max-steps",
         type=int,
         default=_env_int("ROCO_EVAL_MAX_STEPS"),
@@ -771,11 +779,15 @@ def _parse_args():
             setattr(args, attr, None)
     for attr in (
         "results_json", "record_video", "trajectory_csv",
-        "observation_snapshot",
+        "observation_snapshot", "export_offset_frames",
     ):
         value = getattr(args, attr, None)
         if value and not os.path.isabs(value):
             setattr(args, attr, os.path.abspath(os.path.join(_LAUNCH_CWD, value)))
+    if args.export_offset_frames:
+        # Policy reads this at construction time (competition policies stay
+        # harness-agnostic aside from this optional debug env var).
+        os.environ["CAMERA_OFFSET_EXPORT_DIR"] = args.export_offset_frames
     return args
 
 

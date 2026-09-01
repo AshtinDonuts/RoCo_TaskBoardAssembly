@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sys
 import tempfile
 import unittest
@@ -240,6 +241,27 @@ class EstimatorTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             bundle.assert_observation_shape(None)
 
+    def test_export_buffered_frames_tags_sim_steps(self):
+        bundle, gray, depth = _synthetic_bundle()
+        rgb = _rgb(gray)
+        est = OffsetEstimator(bundle)
+        est.add_frame(rgb, depth, bundle.intrinsics, sim_step_idx=12)
+        est.add_frame(rgb, depth, bundle.intrinsics, sim_step_idx=13)
+        out = est.estimate()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = est.export_buffered_frames(tmp, estimate=out)
+            man = json.loads((path / "manifest.json").read_text())
+            self.assertEqual(man["n_frames"], 2)
+            self.assertEqual(man["sim_step_idxs"], [12, 13])
+            self.assertEqual(man["buffer_frames_required"], 1)
+            self.assertTrue((path / "buf00_simstep000012_rgb.png").is_file())
+            self.assertTrue((path / "buf01_simstep000013_rgb.png").is_file())
+            self.assertTrue((path / "reference_rgb.png").is_file())
+            self.assertIn("board_xy", man["estimate"])
+            self.assertEqual(
+                man["frames"][0]["diagnostics"]["sim_step_idx"], 12
+            )
+
 
 class PolicyWrapperTests(unittest.TestCase):
     def _env(self):
@@ -339,6 +361,37 @@ class PolicyWrapperTests(unittest.TestCase):
         np.testing.assert_array_equal(seen[0].place_pos, seen[1].place_pos)
         self.assertFalse(np.allclose(seen[0].place_pos, target.place_pos))
         np.testing.assert_array_equal(target.pick_pos, [0.1, 0.2, 1.0])
+
+
+    def test_export_dir_writes_on_estimate(self):
+        bundle, gray, depth = _synthetic_bundle()
+        rgb = _rgb(gray)
+
+        class Baseline:
+            def reset(self, obs, target):
+                pass
+
+            def act(self, obs):
+                return "act"
+
+            def is_done(self, obs):
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = CameraOffsetScriptedPolicy(
+                self._env(),
+                bundle=bundle,
+                baseline=Baseline(),
+                export_dir=tmp,
+            )
+            obs = self._obs(rgb, depth, bundle.intrinsics)
+            obs.step_idx = 42
+            target = PartTarget(name="usb_a", release_mode="open")
+            policy.reset(obs, target)
+            self.assertTrue(Path(tmp, "manifest.json").is_file())
+            man = json.loads(Path(tmp, "manifest.json").read_text())
+            self.assertEqual(man["sim_step_idxs"], [42])
+            self.assertTrue(Path(tmp, "buf00_simstep000042_rgb.png").is_file())
 
 
 class BoundaryAndNominalTests(unittest.TestCase):

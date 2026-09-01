@@ -10,9 +10,16 @@ Run with:
     TASK_ENABLE_CAMERA_OUTPUT=1 uv run python task/run_pick_place.py \\
         --policy policies.camera_offset_scripted.CameraOffsetScriptedPolicy \\
         --random-seed N
+
+To dump the buffered head frames used for the estimate (tagged by buffer
+index and sim ``step_idx``):
+
+    --export-offset-frames artifacts/offset_frames/
+    # or: CAMERA_OFFSET_EXPORT_DIR=artifacts/offset_frames/
 """
 from __future__ import annotations
 
+import os
 import os.path
 import sys
 from types import SimpleNamespace
@@ -57,6 +64,7 @@ class CameraOffsetScriptedPolicy(Policy):
         estimator: OffsetEstimator | None = None,
         baseline: Policy | None = None,
         reference_dir=None,
+        export_dir=None,
     ) -> None:
         super().__init__(env_info)
         if bundle is None:
@@ -74,6 +82,12 @@ class CameraOffsetScriptedPolicy(Policy):
         self._missing_rgb_steps = 0
         # Head cameras often need a few sim steps before the first RGB arrives.
         self._missing_rgb_limit = 600
+        self._export_dir = (
+            export_dir
+            if export_dir is not None
+            else os.environ.get("CAMERA_OFFSET_EXPORT_DIR") or None
+        )
+        self._exported = False
         if not getattr(env_info, "enable_camera_output", True):
             raise RuntimeError(
                 "CameraOffsetScriptedPolicy requires camera output. "
@@ -85,7 +99,7 @@ class CameraOffsetScriptedPolicy(Policy):
         self._baseline_started = False
         if self._estimate is None:
             if self._ingest(obs) and self._estimator.ready():
-                self._estimate = self._estimator.estimate()
+                self._finalize_estimate()
         if self._estimate is not None:
             self._start_baseline(obs, target)
 
@@ -94,7 +108,7 @@ class CameraOffsetScriptedPolicy(Policy):
             if not self._ingest(obs):
                 return _hold_action(self.env_info, obs)
             if self._estimator.ready():
-                self._estimate = self._estimator.estimate()
+                self._finalize_estimate()
                 if self._pending_target is None:
                     raise RuntimeError("offset estimate completed before Policy.reset")
                 self._start_baseline(obs, self._pending_target)
@@ -137,8 +151,27 @@ class CameraOffsetScriptedPolicy(Policy):
                 )
             return False
         self._missing_rgb_steps = 0
-        self._estimator.add_frame(rgb, depth, K)
+        self._estimator.add_frame(
+            rgb, depth, K, sim_step_idx=getattr(obs, "step_idx", None)
+        )
         return True
+
+    def _finalize_estimate(self) -> None:
+        self._estimate = self._estimator.estimate()
+        self._maybe_export_frames()
+
+    def _maybe_export_frames(self) -> None:
+        if self._exported or not self._export_dir:
+            return
+        out = self._estimator.export_buffered_frames(
+            self._export_dir, estimate=self._estimate
+        )
+        self._exported = True
+        n = int(
+            (self._estimate.diagnostics or {}).get("n_frames", 0)
+            if self._estimate is not None else 0
+        )
+        print(f"[camera_offset] exported {n} buffer frame(s) -> {out}")
 
     def _start_baseline(self, obs: Observation, target: PartTarget) -> None:
         if self._estimate is None:

@@ -1,8 +1,10 @@
 """Camera-only board/part XY offset estimator."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -28,6 +30,15 @@ FEASIBLE_SLACK_M = 1.5e-3
 
 
 @dataclass
+class BufferedFrame:
+    """One head RGB-D observation held for the pre-motion offset buffer."""
+
+    rgb: np.ndarray
+    depth: Optional[np.ndarray]
+    sim_step_idx: Optional[int] = None
+
+
+@dataclass
 class OffsetEstimate:
     board_xy: np.ndarray
     part_xy: Dict[str, np.ndarray]
@@ -49,22 +60,112 @@ class OffsetEstimator:
 
     def __init__(self, bundle: ReferenceBundle) -> None:
         self.bundle = bundle
-        self._frames: List[tuple] = []
+        self._frames: List[BufferedFrame] = []
         self._estimate: Optional[OffsetEstimate] = None
 
     def reset_episode(self) -> None:
         self._frames.clear()
         self._estimate = None
 
-    def add_frame(self, rgb, depth, intrinsics=None) -> None:
+    def add_frame(
+        self,
+        rgb,
+        depth,
+        intrinsics=None,
+        *,
+        sim_step_idx: Optional[int] = None,
+    ) -> None:
         self.bundle.assert_observation_shape(rgb, depth, intrinsics)
         rgb_arr = np.asarray(rgb)
         depth_arr = None if depth is None else np.asarray(depth, dtype=np.float64)
-        self._frames.append((rgb_arr.copy(), depth_arr))
+        step = None if sim_step_idx is None else int(sim_step_idx)
+        self._frames.append(
+            BufferedFrame(rgb=rgb_arr.copy(), depth=depth_arr, sim_step_idx=step)
+        )
 
     def ready(self, min_frames: Optional[int] = None) -> bool:
         need = int(self.bundle.buffer_frames if min_frames is None else min_frames)
         return len(self._frames) >= max(1, need)
+
+    def export_buffered_frames(
+        self,
+        directory: Union[str, Path],
+        *,
+        estimate: Optional[OffsetEstimate] = None,
+    ) -> Path:
+        """Write buffered head frames + nominal reference used for estimation.
+
+        Filenames encode both buffer index and the sim ``step_idx`` at which
+        each frame was ingested (when known):
+
+            buf00_simstep000012_rgb.png
+            buf00_simstep000012_depth_viz.png
+            reference_rgb.png
+            manifest.json
+        """
+        out = Path(directory)
+        out.mkdir(parents=True, exist_ok=True)
+        if not self._frames:
+            raise RuntimeError("OffsetEstimator has no buffered frames to export")
+
+        est = estimate if estimate is not None else self._estimate
+        frame_meta = []
+        for i, fr in enumerate(self._frames):
+            step_tag = (
+                "unknown" if fr.sim_step_idx is None
+                else f"{int(fr.sim_step_idx):06d}"
+            )
+            stem = f"buf{i:02d}_simstep{step_tag}"
+            rgb_name = f"{stem}_rgb.png"
+            depth_viz_name = f"{stem}_depth_viz.png"
+            depth_npy_name = f"{stem}_depth_m.npy"
+            _save_rgb_png(out / rgb_name, fr.rgb)
+            entry = {
+                "buffer_index": i,
+                "sim_step_idx": fr.sim_step_idx,
+                "rgb": rgb_name,
+            }
+            if fr.depth is not None:
+                np.save(out / depth_npy_name, np.asarray(fr.depth, dtype=np.float64))
+                _save_depth_viz_png(out / depth_viz_name, fr.depth)
+                entry["depth_m"] = depth_npy_name
+                entry["depth_viz"] = depth_viz_name
+            if est is not None and i < len(est.diagnostics.get("frames", [])):
+                entry["diagnostics"] = est.diagnostics["frames"][i]
+            frame_meta.append(entry)
+
+        _save_rgb_png(out / "reference_rgb.png", self.bundle.rgb)
+        np.save(out / "reference_depth_m.npy",
+                np.asarray(self.bundle.depth, dtype=np.float64))
+        _save_depth_viz_png(out / "reference_depth_viz.png", self.bundle.depth)
+
+        manifest = {
+            "buffer_frames_required": int(self.bundle.buffer_frames),
+            "n_frames": len(self._frames),
+            "sim_step_idxs": [fr.sim_step_idx for fr in self._frames],
+            "frames": frame_meta,
+            "reference": {
+                "rgb": "reference_rgb.png",
+                "depth_m": "reference_depth_m.npy",
+                "depth_viz": "reference_depth_viz.png",
+            },
+        }
+        if est is not None:
+            manifest["estimate"] = {
+                "board_xy": [float(est.board_xy[0]), float(est.board_xy[1])],
+                "board_confidence": float(est.board_confidence),
+                "part_xy": {
+                    k: [float(v[0]), float(v[1])] for k, v in est.part_xy.items()
+                },
+                "part_confidence": {
+                    k: float(v) for k, v in est.part_confidence.items()
+                },
+                "n_frames": int(est.diagnostics.get("n_frames", len(self._frames))),
+            }
+        (out / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        )
+        return out
 
     def estimate(self, force=False) -> OffsetEstimate:
         if self._estimate is not None and not force:
@@ -80,7 +181,8 @@ class OffsetEstimator:
         }
         part_conf: Dict[str, List[float]] = {name: [] for name in self.bundle.parts}
         frame_diag = []
-        for rgb, depth in self._frames:
+        for fr in self._frames:
+            rgb, depth = fr.rgb, fr.depth
             board_xy, board_c, board_src = self._estimate_board(rgb, depth)
             board_samples.append(board_xy)
             per_part = {}
@@ -97,6 +199,8 @@ class OffsetEstimator:
                 }
             frame_diag.append(
                 {
+                    "buffer_index": len(frame_diag),
+                    "sim_step_idx": fr.sim_step_idx,
                     "board_xy": [float(board_xy[0]), float(board_xy[1])],
                     "board_confidence": float(board_c),
                     "board_source": board_src,
@@ -126,7 +230,12 @@ class OffsetEstimator:
             part_xy=parts,
             board_confidence=board_c,
             part_confidence=confidences,
-            diagnostics={"frames": frame_diag, "n_frames": len(self._frames)},
+            diagnostics={
+                "frames": frame_diag,
+                "n_frames": len(self._frames),
+                "sim_step_idxs": [fr.sim_step_idx for fr in self._frames],
+                "buffer_frames_required": int(self.bundle.buffer_frames),
+            },
         )
         return self._estimate
 
@@ -342,3 +451,45 @@ def _roi_crop(image, centre_uv, template_hw, half_u, half_v):
     if x1 - x0 < tw or y1 - y0 < th:
         return None, None
     return image[y0:y1, x0:x1], (x0, y0)
+
+
+def _as_u8_rgb(rgb: np.ndarray) -> np.ndarray:
+    arr = np.asarray(rgb)
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+    arr = arr[..., :3]
+    if np.issubdtype(arr.dtype, np.floating):
+        maxv = float(np.nanmax(arr)) if arr.size else 1.0
+        if maxv <= 1.0 + 1e-6:
+            arr = np.clip(arr, 0.0, 1.0) * 255.0
+        else:
+            arr = np.clip(arr, 0.0, 255.0)
+    return np.asarray(np.rint(arr), dtype=np.uint8)
+
+
+def _save_rgb_png(path: Path, rgb: np.ndarray) -> None:
+    u8 = _as_u8_rgb(rgb)
+    try:
+        from PIL import Image
+        Image.fromarray(u8, mode="RGB").save(path)
+    except ImportError:
+        # Portable fallback when Pillow is unavailable.
+        np.save(path.with_suffix(".npy"), u8)
+
+
+def _save_depth_viz_png(path: Path, depth: np.ndarray) -> None:
+    d = np.asarray(depth, dtype=np.float64)
+    finite = np.isfinite(d) & (d > 0)
+    viz = np.zeros(d.shape[:2], dtype=np.uint8)
+    if np.any(finite):
+        lo = float(np.percentile(d[finite], 5))
+        hi = float(np.percentile(d[finite], 95))
+        if hi <= lo:
+            hi = lo + 1e-6
+        scaled = np.clip((d - lo) / (hi - lo), 0.0, 1.0)
+        viz = np.where(finite, np.rint(scaled * 255.0), 0).astype(np.uint8)
+    try:
+        from PIL import Image
+        Image.fromarray(viz, mode="L").save(path)
+    except ImportError:
+        np.save(path.with_suffix(".npy"), viz)
