@@ -52,6 +52,9 @@ AssemblyTask/
     ├── policy_api.py                      # Policy / Observation / PartTarget / EnvInfo
     ├── policies/
     │   ├── baseline_scripted.py           # reference EEPathFollower policy
+    │   ├── camera_offset_scripted.py      # camera-only XY offset + baseline wrapper
+    │   ├── camera_offset/                 # ReferenceBundle / OffsetEstimator helpers
+    │   ├── camera_reference/              # packaged nominal head RGB-D assets
     │   ├── diffusion_lerobot.py           # LeRobot Diffusion Policy sidecar adapter
     │   ├── pi05_lerobot.py                # LeRobot pi0.5 sidecar adapter
     │   └── template.py                    # participant stub
@@ -342,6 +345,34 @@ CLI flags:
   must infer offsets from camera streams. The development-only
   `--privileged-xy-randomization` flag exposes shifted targets for expert
   rollouts; do not use it for competition evaluation.
+
+Camera-only submission policy:
+
+```bash
+TASK_ENABLE_CAMERA_OUTPUT=1 uv run python task/run_pick_place.py \
+  --policy policies.camera_offset_scripted.CameraOffsetScriptedPolicy \
+  --random-seed 0
+```
+
+Offline estimator gates (no Isaac Sim):
+
+```bash
+uv run python scripts/evaluate_camera_offset_gates.py \
+  --reference task/policies/camera_reference \
+  --nominal-observation artifacts/randomization-final-frames/reference/nominal-observation.npz \
+  --observations artifacts/randomization-final-frames/observations \
+  --results artifacts/randomization-final-frames/results
+```
+
+Held-out real seeds (≥100 recommended for submission):
+
+```bash
+scripts/generate_randomization_final_frames.sh --count 100
+uv run python scripts/report_camera_offset_accuracy.py \
+  --reference task/policies/camera_reference \
+  --observations artifacts/randomization-final-frames/observations \
+  --results artifacts/randomization-final-frames/results
+```
 
 Edit `task/param_config.py::part_order` to run a subset for debugging.
 See `task/README.md` for the per-runner gotchas (scene drive targets,

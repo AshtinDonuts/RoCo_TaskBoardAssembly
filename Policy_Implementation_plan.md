@@ -160,3 +160,31 @@ missing rather than silently behaving as though privileged waypoints exist.
   seeds, shifted configs, USD prim transforms, result metadata, or simulator
   object poses. Re-run identical recorded frames twice and require identical
   offsets and action sequences.
+
+## Implementation status
+
+### Done
+
+1. Nominal reference bundle under `task/policies/camera_reference/` plus
+   `scripts/build_camera_reference.py`.
+2. `ReferenceBundle` / `OffsetEstimator` / `CameraOffsetScriptedPolicy` with
+   ECC+ORB board consensus, multi-scale NCC (early-exit), support coupling,
+   and failed-estimate → nominal-zero fallback.
+3. Camera-only harness default (`--random-seed`); privileged flags are
+   development-only.
+4. Unit tests (`task/tests/test_camera_offset_policy.py`) and privilege audit
+   (`task/tests/test_camera_offset_privilege_audit.py`).
+5. Offline gates pass via `scripts/evaluate_camera_offset_gates.py`:
+   nominal near-zero, 100 synthetic held-out warps, ±1 cm corners,
+   identical-frame determinism. Accuracy reporter:
+   `scripts/report_camera_offset_accuracy.py`.
+
+### Remaining (Isaac Sim / leaderboard)
+
+- Capture ≥100 **real** evaluator seeds:
+  `scripts/generate_randomization_final_frames.sh --count 100`
+- Full assembly score under
+  `TASK_ENABLE_CAMERA_OUTPUT=1 ... --policy policies.camera_offset_scripted.CameraOffsetScriptedPolicy --random-seed N`
+- Drive connector (usb/hdmi/pin) **real-render** XY error to ≤1 mm (current
+  ~10-seed sample: connectors MAE ~1.7 mm; synthetic warp gates already
+  pass the 1 mm board/connector MAE target when the template matches).

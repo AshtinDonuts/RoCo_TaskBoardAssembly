@@ -71,6 +71,9 @@ class CameraOffsetScriptedPolicy(Policy):
         self._estimate = None
         self._pending_target: PartTarget | None = None
         self._baseline_started = False
+        self._missing_rgb_steps = 0
+        # Head cameras often need a few sim steps before the first RGB arrives.
+        self._missing_rgb_limit = 600
         if not getattr(env_info, "enable_camera_output", True):
             raise RuntimeError(
                 "CameraOffsetScriptedPolicy requires camera output. "
@@ -81,15 +84,15 @@ class CameraOffsetScriptedPolicy(Policy):
         self._pending_target = target
         self._baseline_started = False
         if self._estimate is None:
-            self._ingest(obs)
-            if self._estimator.ready():
+            if self._ingest(obs) and self._estimator.ready():
                 self._estimate = self._estimator.estimate()
         if self._estimate is not None:
             self._start_baseline(obs, target)
 
     def act(self, obs: Observation):
         if self._estimate is None:
-            self._ingest(obs)
+            if not self._ingest(obs):
+                return _hold_action(self.env_info, obs)
             if self._estimator.ready():
                 self._estimate = self._estimator.estimate()
                 if self._pending_target is None:
@@ -120,16 +123,22 @@ class CameraOffsetScriptedPolicy(Policy):
             return self._baseline.current_index
         return 0
 
-    def _ingest(self, obs: Observation) -> None:
+    def _ingest(self, obs: Observation) -> bool:
+        """Buffer a head frame. Returns False while the stream is still warming up."""
         rgb = None if obs.rgb is None else obs.rgb.get("head")
         depth = None if obs.depth is None else obs.depth.get("head")
         K = None if obs.intrinsics is None else obs.intrinsics.get("head")
         if rgb is None:
-            raise RuntimeError(
-                "CameraOffsetScriptedPolicy requires Observation.rgb['head']. "
-                "Set TASK_ENABLE_CAMERA_OUTPUT=1 and wait for the head stream."
-            )
+            self._missing_rgb_steps += 1
+            if self._missing_rgb_steps >= self._missing_rgb_limit:
+                raise RuntimeError(
+                    "CameraOffsetScriptedPolicy requires Observation.rgb['head']. "
+                    "Set TASK_ENABLE_CAMERA_OUTPUT=1 and wait for the head stream."
+                )
+            return False
+        self._missing_rgb_steps = 0
         self._estimator.add_frame(rgb, depth, K)
+        return True
 
     def _start_baseline(self, obs: Observation, target: PartTarget) -> None:
         if self._estimate is None:

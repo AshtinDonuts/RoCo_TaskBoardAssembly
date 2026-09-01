@@ -265,13 +265,12 @@ class PolicyWrapperTests(unittest.TestCase):
             intrinsics={"head": K, "L_wrist": None, "R_wrist": None},
         )
 
-    def test_missing_rgb_raises(self):
+    def test_missing_rgb_holds_then_raises(self):
         bundle, gray, depth = _synthetic_bundle()
-        fake = SimpleNamespace(reset_targets=[], done=False)
 
         class Baseline:
             def reset(self, obs, target):
-                fake.reset_targets.append(target)
+                pass
 
             def act(self, obs):
                 return "act"
@@ -282,10 +281,18 @@ class PolicyWrapperTests(unittest.TestCase):
         policy = CameraOffsetScriptedPolicy(
             self._env(), bundle=bundle, baseline=Baseline()
         )
+        policy._missing_rgb_limit = 3
         obs = self._obs(None, depth, bundle.intrinsics)
         target = PartTarget(name="usb_a", release_mode="open")
+        # First reset may arrive before the head stream is ready.
+        policy.reset(obs, target)
+        hold = policy.act(obs)
+        self.assertIsNotNone(hold)
+        self.assertIsNone(getattr(policy, "_estimate", None) or None)
+        # Counter is 2 after reset+act; one more act hits the limit.
         with self.assertRaises(RuntimeError):
-            policy.reset(obs, target)
+            policy.act(obs)
+
 
     def test_camera_disabled_raises(self):
         bundle, _, _ = _synthetic_bundle()
@@ -332,6 +339,26 @@ class PolicyWrapperTests(unittest.TestCase):
         np.testing.assert_array_equal(seen[0].place_pos, seen[1].place_pos)
         self.assertFalse(np.allclose(seen[0].place_pos, target.place_pos))
         np.testing.assert_array_equal(target.pick_pos, [0.1, 0.2, 1.0])
+
+
+class BoundaryAndNominalTests(unittest.TestCase):
+    def test_synthetic_corners_recover_within_2mm(self):
+        bundle, gray, depth = _synthetic_bundle()
+        corners = [
+            (XY_MIN_M, XY_MIN_M),
+            (XY_MIN_M, XY_MAX_M),
+            (XY_MAX_M, XY_MIN_M),
+            (XY_MAX_M, XY_MAX_M),
+        ]
+        for xy in corners:
+            pix = world_xy_to_pixel_delta(xy, bundle.jacobian_xy_per_px)
+            rgb = _rgb(_shift_image(gray, int(round(pix[0])), int(round(pix[1]))))
+            depth_s = _shift_image(depth, int(round(pix[0])), int(round(pix[1])))
+            est = OffsetEstimator(bundle)
+            est.add_frame(rgb, depth_s, bundle.intrinsics)
+            out = est.estimate()
+            err = np.linalg.norm(out.board_xy - np.asarray(xy, dtype=np.float64))
+            self.assertLess(err, 0.0025, msg=f"corner {xy} err={err}")
 
 
 if __name__ == "__main__":

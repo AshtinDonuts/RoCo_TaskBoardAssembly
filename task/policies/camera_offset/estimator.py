@@ -8,8 +8,11 @@ import numpy as np
 
 from .constants import (
     BOARD_CONFIDENCE_MIN,
+    BOARD_CONSENSUS_MAX_M,
     DEFAULT_ROI_MARGIN_PX,
     DEPTH_DISAGREE_M,
+    NCC_SCALES,
+    ORB_MIN_INLIERS,
     PART_NCC_MIN,
     SUPPORT_COUPLED_PARTS,
 )
@@ -114,7 +117,8 @@ class OffsetEstimator:
                 parts[name] = clamp_xy(_median_xy(samples))
                 confidences[name] = float(np.median(part_conf[name]))
             else:
-                parts[name] = board.copy()
+                # Plan §4: failed estimate → nominal zero (not board offset).
+                parts[name] = np.zeros(2, dtype=np.float64)
                 confidences[name] = 0.0
         board_c = float(np.median([d["board_confidence"] for d in frame_diag]))
         self._estimate = OffsetEstimate(
@@ -138,27 +142,52 @@ class OffsetEstimator:
 
     def _estimate_board(self, rgb, depth):
         mask = self._foreground_mask(depth)
-        matchers = (
-            ("ecc", lambda: M.ecc_translation(self.bundle.rgb, rgb, mask=mask)),
-            ("phasecorr", lambda: M.phase_correlate(self.bundle.rgb, rgb, mask=mask)),
-        )
+        jac = self.bundle.jacobian_xy_per_px
         valid = []
-        for name, fn in matchers:
-            try:
-                du_dv, score = fn()
-            except Exception:
-                continue
-            world = clamp_xy(
-                pixel_delta_to_world_xy(du_dv, self.bundle.jacobian_xy_per_px)
+
+        try:
+            du_dv, score = M.ecc_translation(self.bundle.rgb, rgb, mask=mask)
+            world = clamp_xy(pixel_delta_to_world_xy(du_dv, jac))
+            valid.append((world, float(score), "ecc"))
+        except Exception:
+            pass
+
+        try:
+            orb_du, orb_score, n_inl = M.orb_translation(
+                self.bundle.rgb, rgb, mask=mask, min_inliers=ORB_MIN_INLIERS
             )
-            valid.append((world, float(score), name))
-            if score >= BOARD_CONFIDENCE_MIN:
+            if n_inl >= ORB_MIN_INLIERS:
+                world = clamp_xy(pixel_delta_to_world_xy(orb_du, jac))
+                valid.append((world, float(orb_score), "orb"))
+        except Exception:
+            pass
+
+        try:
+            du_dv, score = M.phase_correlate(
+                self.bundle.rgb, rgb, mask=mask, use_highpass=True
+            )
+            world = clamp_xy(pixel_delta_to_world_xy(du_dv, jac))
+            valid.append((world, float(score), "phasecorr"))
+        except Exception:
+            pass
+
+        if not valid:
+            return np.zeros(2, dtype=np.float64), 0.0, "zero"
+
+        by_name = {name: (world, score) for world, score, name in valid}
+        if "ecc" in by_name and "orb" in by_name:
+            ecc_w, ecc_s = by_name["ecc"]
+            orb_w, orb_s = by_name["orb"]
+            if float(np.linalg.norm(ecc_w - orb_w)) <= BOARD_CONSENSUS_MAX_M:
+                world = clamp_xy(0.5 * (ecc_w + orb_w))
+                return world, float(0.5 * (ecc_s + orb_s)), "ecc_orb_avg"
+
+        # Prefer ECC when confident; otherwise median of available matchers.
+        for world, score, name in valid:
+            if name == "ecc" and score >= BOARD_CONFIDENCE_MIN:
                 return world, float(score), name
-        if valid:
-            # Deterministic fallback: median of matcher XY, keep first score.
-            world = _median_xy([v[0] for v in valid])
-            return clamp_xy(world), float(valid[0][1]), "median_matchers"
-        return np.zeros(2, dtype=np.float64), 0.0, "zero"
+        world = _median_xy([v[0] for v in valid])
+        return clamp_xy(world), float(valid[0][1]), "median_matchers"
 
     def _estimate_part(self, name, tmpl, rgb, depth):
         jac = (tmpl.jacobian_xy_per_px
@@ -187,12 +216,13 @@ class OffsetEstimator:
             )
         valid = []
         for src, image, template in searches:
-            result = M.ncc_search(
+            result = M.multiscale_ncc_search(
                 image,
                 template,
                 template_mask=tmpl.mask,
                 search_origin_uv=tmpl.search_center_uv,
                 search_half=(half_u, half_v),
+                scales=NCC_SCALES,
             )
             if not result["valid"]:
                 continue

@@ -608,39 +608,138 @@ GRADE_POS_TOL_M = 0.01   # 10 mm
 INCLUDE_CLOSE    = True     # phase 3
 INCLUDE_OPEN     = True     # phase 7 (release at descend_place)
 
+# ---------------------------------------------------------------------------
+# Scripted-baseline motion pacing — one knob.
+#
+# MOTION_SPEED selects a packaged profile (or a bare scale factor). Speeds /
+# accelerations scale ×N; settle dwells and return-home min duration scale ÷N
+# (dwell steps floored at 1). Override with env ROCO_MOTION_SPEED.
+#
+# Packaged presets:
+#   "original" / "1x" / "1"  → N=1.0   (default baseline)
+#   "2.5x" / "2.5"           → N=2.5
+#   "4x" / "4"               → N=4.0
+# Also accepts any positive float string, e.g. "3".
+# ---------------------------------------------------------------------------
+MOTION_SPEED = os.getenv("ROCO_MOTION_SPEED", "original")
+
+_MOTION_SPEED_PRESETS = {
+    "original": 1.0,
+    "1x": 1.0,
+    "1": 1.0,
+    "2.5x": 2.5,
+    "2.5": 2.5,
+    "4x": 4.0,
+    "4": 4.0,
+}
+
+# Original (1×) motion parameter bundle. Derived values below are filled by
+# _apply_motion_speed(); do not edit the exported SETTLE_* / CARTESIAN_* /
+# BASELINE_* / RETURN_HOME_* names for speed experiments — change MOTION_SPEED.
+_MOTION_ORIGINAL = {
+    "SETTLE_CLOSE": 10,
+    "SETTLE_OPEN": 1,
+    "SETTLE_HOVER_PLACE": 10,
+    "SETTLE_DESCEND_PLACE": 15,
+    "RETURN_HOME_SETTLE_STEPS": 10,
+    "SAFE_RETRACT_SETTLE_STEPS": 5,
+    "RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S": 0.5,
+    "RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2": 1.0,
+    "RETURN_HOME_MIN_DURATION_S": 0.5,
+    "BASELINE_MAX_JOINT_VELOCITY_RAD_S": 0.5,
+    "CARTESIAN_MAX_EE_SPEED_M_S": 0.30,
+    "CARTESIAN_MAX_EE_ORN_SPEED_RAD_S": 1.0,
+}
+
+
+def _parse_motion_speed(raw) -> float:
+    key = str(raw).strip().lower()
+    if key in _MOTION_SPEED_PRESETS:
+        return float(_MOTION_SPEED_PRESETS[key])
+    try:
+        scale = float(key.rstrip("x"))
+    except ValueError as exc:
+        raise ValueError(
+            f"MOTION_SPEED={raw!r} is not a known preset "
+            f"({', '.join(sorted(_MOTION_SPEED_PRESETS))}) "
+            f"or positive float"
+        ) from exc
+    if scale <= 0.0:
+        raise ValueError(f"MOTION_SPEED scale must be > 0, got {scale}")
+    return scale
+
+
+def _apply_motion_speed(scale: float) -> dict:
+    """Return motion params for scale N (speeds ×N, dwells ÷N)."""
+    o = _MOTION_ORIGINAL
+
+    def _dwell(steps: int) -> int:
+        return max(1, int(round(float(steps) / scale)))
+
+    return {
+        "SETTLE_CLOSE": _dwell(o["SETTLE_CLOSE"]),
+        "SETTLE_OPEN": _dwell(o["SETTLE_OPEN"]),
+        "SETTLE_HOVER_PLACE": _dwell(o["SETTLE_HOVER_PLACE"]),
+        "SETTLE_DESCEND_PLACE": _dwell(o["SETTLE_DESCEND_PLACE"]),
+        "RETURN_HOME_SETTLE_STEPS": _dwell(o["RETURN_HOME_SETTLE_STEPS"]),
+        "SAFE_RETRACT_SETTLE_STEPS": _dwell(o["SAFE_RETRACT_SETTLE_STEPS"]),
+        "RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S": (
+            o["RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S"] * scale
+        ),
+        "RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2": (
+            o["RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2"] * scale
+        ),
+        "RETURN_HOME_MIN_DURATION_S": o["RETURN_HOME_MIN_DURATION_S"] / scale,
+        "BASELINE_MAX_JOINT_VELOCITY_RAD_S": (
+            o["BASELINE_MAX_JOINT_VELOCITY_RAD_S"] * scale
+        ),
+        "CARTESIAN_MAX_EE_SPEED_M_S": o["CARTESIAN_MAX_EE_SPEED_M_S"] * scale,
+        "CARTESIAN_MAX_EE_ORN_SPEED_RAD_S": (
+            o["CARTESIAN_MAX_EE_ORN_SPEED_RAD_S"] * scale
+        ),
+    }
+
+
+MOTION_SPEED_SCALE = _parse_motion_speed(MOTION_SPEED)
+_motion = _apply_motion_speed(MOTION_SPEED_SCALE)
+
 # Gripper dwell budgets (number of forward() calls; ~10 Hz => 5 ~= 0.5s).
-SETTLE_CLOSE     = 10
-SETTLE_OPEN      = 1
+SETTLE_CLOSE = _motion["SETTLE_CLOSE"]
+SETTLE_OPEN = _motion["SETTLE_OPEN"]
 # Hold dwell at hover_place after the transit lerp arrives, before the
 # descend kicks in. Lets the arm settle from any post-transit momentum so
 # the descend starts from a stable hover.
-SETTLE_HOVER_PLACE = 10
+SETTLE_HOVER_PLACE = _motion["SETTLE_HOVER_PLACE"]
 # Hold dwell at descend_place before the gripper opens, so the release
 # happens with the EE actually settled at the place target (not just
 # crossing the advance tolerance for one step).
-SETTLE_DESCEND_PLACE = 15
+SETTLE_DESCEND_PLACE = _motion["SETTLE_DESCEND_PLACE"]
 
 # Dwell at the ``return_home`` waypoint after the cspace gate fires, before
 # advancing to the next part's hover_pick. During this dwell the runner
 # zeros joint velocities every step (see run_pick_place.py), so a longer
 # value gives the arm more steady-state v=0 ticks before the next part's
-# first IK call. 10 ≈ 1 s at the rig's default physics rate.
-RETURN_HOME_SETTLE_STEPS = 10
+# first IK call. 10 ≈ 1 s at the rig's default physics rate (1× profile).
+RETURN_HOME_SETTLE_STEPS = _motion["RETURN_HOME_SETTLE_STEPS"]
 
 # Smooth c-space return limits. The follower snapshots measured q on entry,
 # chooses a duration satisfying these bounds for a quintic smoothstep, then
 # holds the exact home vector for RETURN_HOME_SETTLE_STEPS. These are nominal
 # trajectory limits; the robot drive may track below them.
-RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S = 0.5
-RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2 = 1.0
-RETURN_HOME_MIN_DURATION_S = 0.5
+RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S = _motion[
+    "RETURN_HOME_MAX_JOINT_VELOCITY_RAD_S"
+]
+RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2 = _motion[
+    "RETURN_HOME_MAX_JOINT_ACCELERATION_RAD_S2"
+]
+RETURN_HOME_MIN_DURATION_S = _motion["RETURN_HOME_MIN_DURATION_S"]
 
 # Defensive ceiling on every scripted L-arm joint-position command. This
 # catches discontinuous IK branch changes (notably the first hover_pick after
 # returning home) without affecting gripper or R-arm commands. Converted to a
 # per-call delta using Observation.step_idx; fallback is for repeated/absent
 # step indices in nonstandard policy hosts.
-BASELINE_MAX_JOINT_VELOCITY_RAD_S = 0.5
+BASELINE_MAX_JOINT_VELOCITY_RAD_S = _motion["BASELINE_MAX_JOINT_VELOCITY_RAD_S"]
 BASELINE_CONTROL_DT_FALLBACK_S = 0.1
 
 # Optional between-part Cartesian retreat before return_home. When True,
@@ -655,7 +754,7 @@ ENABLE_SAFE_RETRACT = True
 TABLE_Z = 1.0
 SAFE_RETRACT_CLEARANCE_M = 0.35
 # Let residual Cartesian-retreat velocity decay before starting c-space home.
-SAFE_RETRACT_SETTLE_STEPS = 5
+SAFE_RETRACT_SETTLE_STEPS = _motion["SAFE_RETRACT_SETTLE_STEPS"]
 
 # Maximum Cartesian EE command speed for the scripted baseline (m/s).
 # EEPathFollower walks the IK target toward each waypoint by at most
@@ -665,10 +764,10 @@ SAFE_RETRACT_SETTLE_STEPS = 5
 # close/open fires only once the commanded pose has arrived there.
 # None disables pacing (legacy snap-to-waypoint IK target).
 # At 200 Hz physics, 0.10 m/s => 0.0005 m per control update.
-CARTESIAN_MAX_EE_SPEED_M_S = 0.30
+CARTESIAN_MAX_EE_SPEED_M_S = _motion["CARTESIAN_MAX_EE_SPEED_M_S"]
 # Orientation-only segments (near-zero translation) use this rate for
 # slerp pacing. Coupled to translation progress when both move.
-CARTESIAN_MAX_EE_ORN_SPEED_RAD_S = 1.0
+CARTESIAN_MAX_EE_ORN_SPEED_RAD_S = _motion["CARTESIAN_MAX_EE_ORN_SPEED_RAD_S"]
 
 # Joint-space-interpolated transit between lift_pick and hover_place.
 # Inserts this many waypoints lerped in c-space (see PICK_PLACE_PHASES_

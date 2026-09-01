@@ -1,7 +1,7 @@
 """Deterministic translation matchers (NCC, phase correlation, ECC)."""
 from __future__ import annotations
 
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Iterable, Optional, Sequence, Tuple  # Sequence used by multiscale_ncc_search
 
 import numpy as np
 
@@ -44,8 +44,29 @@ def _window2d(shape: Tuple[int, int]) -> np.ndarray:
     return np.outer(wy, wx)
 
 
+def highpass(gray: np.ndarray, ksize: int = 9) -> np.ndarray:
+    """Deterministic box-blur high-pass used before phase correlation."""
+    g = np.asarray(gray, dtype=np.float64)
+    k = int(max(3, ksize))
+    if k % 2 == 0:
+        k += 1
+    pad = np.pad(g, k // 2, mode="edge")
+    # Separable cumulative sum blur (no SciPy dependency).
+    c = np.cumsum(np.cumsum(pad, axis=0), axis=1)
+    c = np.pad(c, ((1, 0), (1, 0)), mode="constant")
+    h, w = g.shape
+    blur = (
+        c[k:k + h, k:k + w]
+        - c[0:h, k:k + w]
+        - c[k:k + h, 0:w]
+        + c[0:h, 0:w]
+    ) / float(k * k)
+    return g - blur
+
+
 def phase_correlate(reference: np.ndarray, current: np.ndarray,
-                    mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, float]:
+                    mask: Optional[np.ndarray] = None,
+                    *, use_highpass: bool = True) -> Tuple[np.ndarray, float]:
     """Return ``(du, dv)`` shifting ``reference`` onto ``current`` plus peak score.
 
     ``du`` is +right (columns), ``dv`` is +down (rows). Uses FFT phase
@@ -57,6 +78,9 @@ def phase_correlate(reference: np.ndarray, current: np.ndarray,
     b = to_gray(current)
     if a.shape != b.shape:
         raise ValueError(f"shape mismatch {a.shape} vs {b.shape}")
+    if use_highpass:
+        a = highpass(a)
+        b = highpass(b)
     if mask is not None:
         m = np.asarray(mask, dtype=bool)
         if m.shape != a.shape:
@@ -83,6 +107,146 @@ def phase_correlate(reference: np.ndarray, current: np.ndarray,
     # Negate so +du/+dv match np.roll / NCC: current content is to the
     # right/down of the reference.
     return np.array([-(du + du_sub), -(dv + dv_sub)], dtype=np.float64), score
+
+
+def ncc_at_uv(image: np.ndarray, template: np.ndarray, uv_centre,
+              template_mask: Optional[np.ndarray] = None) -> float:
+    """Masked NCC of ``template`` placed at ``uv_centre`` in ``image``."""
+    img = to_gray(image)
+    tmpl = to_gray(template)
+    th, tw = tmpl.shape
+    cu, cv = float(uv_centre[0]), float(uv_centre[1])
+    x = int(round(cu - tw / 2.0))
+    y = int(round(cv - th / 2.0))
+    if x < 0 or y < 0 or x + tw > img.shape[1] or y + th > img.shape[0]:
+        return -1.0
+    if template_mask is not None:
+        m = np.asarray(template_mask, dtype=bool)
+    else:
+        m = np.ones(tmpl.shape, dtype=bool)
+    if not np.any(m):
+        return -1.0
+    t = tmpl[m]
+    t = t - t.mean()
+    patch = img[y:y + th, x:x + tw][m]
+    patch = patch - patch.mean()
+    denom = (np.sqrt(float(np.dot(patch, patch)) * float(np.dot(t, t))) + 1e-12)
+    return float(np.dot(patch, t) / denom)
+
+
+def resize_gray(image: np.ndarray, scale: float) -> np.ndarray:
+    """Nearest-neighbour resize (deterministic, no OpenCV required)."""
+    img = to_gray(image)
+    if abs(scale - 1.0) < 1e-9:
+        return img
+    h, w = img.shape
+    nh = max(1, int(round(h * scale)))
+    nw = max(1, int(round(w * scale)))
+    ys = np.clip((np.arange(nh) / scale).astype(int), 0, h - 1)
+    xs = np.clip((np.arange(nw) / scale).astype(int), 0, w - 1)
+    return img[ys][:, xs]
+
+
+def multiscale_ncc_search(image: np.ndarray, template: np.ndarray,
+                          template_mask: Optional[np.ndarray] = None,
+                          search_origin_uv=None, search_half=None,
+                          scales: Sequence[float] = (1.0, 0.9, 1.1),
+                          *, early_score: float = 0.55) -> dict:
+    """Run NCC at fixed scales; stop early when the primary scale is strong."""
+    best = None
+    for scale in scales:
+        if abs(float(scale) - 1.0) < 1e-9:
+            tmpl = to_gray(template)
+            mask = template_mask
+            img = to_gray(image)
+            origin = search_origin_uv
+            half = search_half
+        else:
+            tmpl = resize_gray(template, scale)
+            img = to_gray(image)
+            if template_mask is not None:
+                mask = resize_gray(
+                    np.asarray(template_mask, dtype=np.float64), scale
+                ) >= 0.5
+            else:
+                mask = None
+            if search_origin_uv is None:
+                origin = None
+            else:
+                origin = (
+                    float(search_origin_uv[0]),
+                    float(search_origin_uv[1]),
+                )
+            half = search_half
+        result = ncc_search(
+            img, tmpl, template_mask=mask,
+            search_origin_uv=origin, search_half=half,
+        )
+        if not result["valid"]:
+            continue
+        if best is None or result["score"] > best["score"]:
+            best = result
+            best["scale"] = float(scale)
+        if abs(float(scale) - 1.0) < 1e-9 and result["score"] >= early_score:
+            break
+    if best is None:
+        return {
+            "du": 0.0, "dv": 0.0, "score": 0.0,
+            "uv": None, "candidates": (), "valid": False,
+        }
+    return best
+
+
+def orb_translation(reference: np.ndarray, current: np.ndarray,
+                    mask: Optional[np.ndarray] = None,
+                    *, min_inliers: int = 12) -> Tuple[np.ndarray, float, int]:
+    """Deterministic ORB + translation-only inlier consensus.
+
+    Returns ``(du, dv)``, inlier fraction, and inlier count. Falls back to
+    zeros with score 0 when OpenCV is missing or matching fails.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return np.zeros(2, dtype=np.float64), 0.0, 0
+
+    a = np.clip(to_gray(reference), 0, 255).astype(np.uint8)
+    b = np.clip(to_gray(current), 0, 255).astype(np.uint8)
+    a = cv2.equalizeHist(a)
+    b = cv2.equalizeHist(b)
+    orb = cv2.ORB_create(
+        nfeatures=2000, scaleFactor=1.2, nlevels=4,
+        edgeThreshold=15, patchSize=31,
+    )
+    input_mask = None
+    if mask is not None:
+        input_mask = np.asarray(mask, dtype=np.uint8) * np.uint8(255)
+    k1, d1 = orb.detectAndCompute(a, input_mask)
+    k2, d2 = orb.detectAndCompute(b, input_mask)
+    if d1 is None or d2 is None or len(k1) < 8 or len(k2) < 8:
+        return np.zeros(2, dtype=np.float64), 0.0, 0
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = sorted(matcher.match(d1, d2), key=lambda m: m.distance)
+    matches = [m for m in matches if m.distance < 64][:200]
+    if len(matches) < 8:
+        return np.zeros(2, dtype=np.float64), 0.0, len(matches)
+    src = np.asarray([k1[m.queryIdx].pt for m in matches], dtype=np.float64)
+    dst = np.asarray([k2[m.trainIdx].pt for m in matches], dtype=np.float64)
+    diffs = dst - src
+    best_inliers = 0
+    best_t = np.zeros(2, dtype=np.float64)
+    # Deterministic hypothesis loop over matches (no RNG).
+    for i in range(len(diffs)):
+        err = np.linalg.norm(diffs - diffs[i], axis=1)
+        inl_mask = err < 1.5
+        inl = int(np.sum(inl_mask))
+        if inl > best_inliers:
+            best_inliers = inl
+            best_t = np.median(diffs[inl_mask], axis=0)
+    if best_inliers < int(min_inliers):
+        return np.zeros(2, dtype=np.float64), 0.0, best_inliers
+    score = float(best_inliers) / float(max(1, len(diffs)))
+    return np.asarray(best_t, dtype=np.float64), score, best_inliers
 
 
 def _peak_to_signed_shift(peak_rc, shape) -> Tuple[float, float]:

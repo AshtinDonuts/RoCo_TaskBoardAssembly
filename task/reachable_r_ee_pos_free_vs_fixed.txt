@@ -1,0 +1,6 @@
+total=500
+fixed_top_down=317 (63.4%)
+free_any_tilt=454 (90.8%)
+orn_none=492 (98.4%)
+grid=10x10x5 EE targets above board (+0.05 m XY margin, z +2..+30 cm)
+note=teleop-like --target-is-ee-pos; free uses top-down plus ±0.3/0.6 rad axis tilts

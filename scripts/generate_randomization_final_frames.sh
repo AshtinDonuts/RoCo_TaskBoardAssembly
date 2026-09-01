@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Capture nominal + seeded fairness RGB-D snapshots for offline offset eval.
+#
+# IMPORTANT: each seed relaunches Isaac Sim. Back-to-back Kit processes will
+# OOM/crash this machine (swap fills). Prefer:
+#   --no-video --cooldown-sec 45 --retries 2
+# or the chunked wrapper:
+#   scripts/capture_randomization_chunked.sh --start-seed 0 --count 100
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,6 +20,11 @@ max_steps=3
 policy="policies.baseline_scripted.BaselinePolicy"
 include_reference=1
 force=0
+record_video=1
+cooldown_sec=30
+retries=2
+continue_on_error=1
+min_free_mem_mb=12000
 
 while (($#)); do
   case "$1" in
@@ -48,6 +60,26 @@ while (($#)); do
       include_reference=0
       shift
       ;;
+    --no-video)
+      record_video=0
+      shift
+      ;;
+    --cooldown-sec)
+      cooldown_sec="$2"
+      shift 2
+      ;;
+    --retries)
+      retries="$2"
+      shift 2
+      ;;
+    --min-free-mem-mb)
+      min_free_mem_mb="$2"
+      shift 2
+      ;;
+    --fail-fast)
+      continue_on_error=0
+      shift
+      ;;
     --force)
       force=1
       shift
@@ -60,24 +92,26 @@ Usage:
   scripts/generate_randomization_final_frames.sh [options]
 
 Options:
-  --start-seed N   First seed (default: 0)
-  --count N        Number of seeds (default: 10)
-  --output-dir DIR Output root (default: artifacts/randomization-final-frames)
-  --camera NAME    head, L_wrist, or R_wrist (default: head)
-  --fps N          Recorded video FPS (default: 15)
-  --max-steps N    Control steps before snapshot (default: 3)
-  --policy PATH    Dotted policy class used during capture
-  --no-reference   Do not capture the nominal, unrandomized reference frame
-  --force          Rerun and overwrite completed seed outputs
-  -h, --help       Show this help
+  --start-seed N        First seed (default: 0)
+  --count N             Number of seeds (default: 10)
+  --output-dir DIR      Output root (default: artifacts/randomization-final-frames)
+  --camera NAME         head, L_wrist, or R_wrist (default: head)
+  --fps N               Recorded video FPS (default: 15)
+  --max-steps N         Control steps before snapshot (default: 3)
+  --policy PATH         Dotted policy class used during capture
+  --no-reference        Do not capture/rebuild the nominal reference
+  --no-video            Skip MP4/ffmpeg (recommended; NPZ+JSON are enough
+                        for estimator accuracy). Much less likely to OOM.
+  --cooldown-sec N      Sleep between Isaac launches (default: 30)
+  --retries N           Retries per seed after a failed launch (default: 2)
+  --min-free-mem-mb N   Wait until this much MemAvailable (default: 12000)
+  --fail-fast           Abort the batch on the first failed seed
+  --force               Rerun and overwrite completed seed outputs
+  -h, --help            Show this help
 
-Randomized runs are competition-faithful: the policy receives nominal config,
-camera output is enabled, and sampled offsets are not printed. Exact offsets
-remain in the post-run results JSON for offline estimator-error measurement.
-Each capture also writes RGB, depth, intrinsics, and camera pose to NPZ.
-The nominal capture is converted into task/policies/camera_reference for
-CameraOffsetScriptedPolicy. Completed captures are skipped unless --force
-is supplied.
+Do NOT fire 100 Kit relaunches with no cooldown — Isaac will crash once
+RAM/swap is exhausted. For large sweeps use:
+  scripts/capture_randomization_chunked.sh --start-seed 0 --count 100
 EOF
       exit 0
       ;;
@@ -105,6 +139,18 @@ if ! [[ "${max_steps}" =~ ^[1-9][0-9]*$ ]]; then
   echo "--max-steps must be a positive integer" >&2
   exit 2
 fi
+if ! [[ "${cooldown_sec}" =~ ^[0-9]+$ ]]; then
+  echo "--cooldown-sec must be a non-negative integer" >&2
+  exit 2
+fi
+if ! [[ "${retries}" =~ ^[0-9]+$ ]]; then
+  echo "--retries must be a non-negative integer" >&2
+  exit 2
+fi
+if ! [[ "${min_free_mem_mb}" =~ ^[0-9]+$ ]]; then
+  echo "--min-free-mem-mb must be a non-negative integer" >&2
+  exit 2
+fi
 case "${camera}" in
   head|L_wrist|R_wrist) ;;
   *)
@@ -117,10 +163,12 @@ if [[ "${output_dir}" != /* ]]; then
   output_dir="${repo_root}/${output_dir}"
 fi
 
-command -v ffmpeg >/dev/null 2>&1 || {
-  echo "ffmpeg is required to extract final frames" >&2
-  exit 1
-}
+if ((record_video == 1)); then
+  command -v ffmpeg >/dev/null 2>&1 || {
+    echo "ffmpeg is required unless --no-video is set" >&2
+    exit 1
+  }
+fi
 
 videos_dir="${output_dir}/videos"
 frames_dir="${output_dir}/frames"
@@ -134,6 +182,54 @@ cd "${repo_root}"
 export ISAACSIM_HEADLESS="${ISAACSIM_HEADLESS:-1}"
 export TASK_ENABLE_CAMERA_OUTPUT=1
 
+_available_mem_mb() {
+  # Prefer MemAvailable (accounts for reclaimable cache).
+  awk '/MemAvailable:/ {print int($2/1024); exit}' /proc/meminfo
+}
+
+_wait_for_memory() {
+  local free_mb
+  free_mb="$(_available_mem_mb)"
+  if ((free_mb >= min_free_mem_mb)); then
+    return 0
+  fi
+  echo "[batch] waiting for memory: available=${free_mb} MiB < ${min_free_mem_mb} MiB"
+  local waited=0
+  while ((free_mb < min_free_mem_mb)); do
+    sleep 10
+    waited=$((waited + 10))
+    free_mb="$(_available_mem_mb)"
+    if ((waited % 30 == 0)); then
+      echo "[batch] still waiting: available=${free_mb} MiB (${waited}s)"
+    fi
+    # Cap wait so a permanently low-memory machine still progresses.
+    if ((waited >= 300)); then
+      echo "[batch] WARN: proceeding with available=${free_mb} MiB after ${waited}s"
+      break
+    fi
+  done
+}
+
+_cleanup_isaac_leftovers() {
+  # Best-effort: reap orphaned Kit/python children from a prior crash.
+  pkill -f "task/run_pick_place.py" 2>/dev/null || true
+  pkill -f "isaacsim" 2>/dev/null || true
+  sleep 2
+}
+
+_seed_complete() {
+  local observation_path="$1"
+  local results_path="$2"
+  local frame_path="$3"
+  if [[ ! -s "${observation_path}" || ! -s "${results_path}" ]]; then
+    return 1
+  fi
+  if ((record_video == 1)) && [[ ! -s "${frame_path}" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 if ((include_reference == 1)); then
   reference_dir="${output_dir}/reference"
   mkdir -p "${reference_dir}"
@@ -143,21 +239,34 @@ if ((include_reference == 1)); then
   reference_log="${reference_dir}/nominal.log"
   reference_observation="${reference_dir}/nominal-observation.npz"
 
-  if ((force == 1)) || [[ ! -s "${reference_frame}" \
-      || ! -s "${reference_results}" || ! -s "${reference_observation}" ]]; then
+  if ((force == 1)) || [[ ! -s "${reference_results}" \
+      || ! -s "${reference_observation}" ]]; then
     echo "[batch] nominal layout: capturing ${camera} reference"
-    "${repo_root}/scripts/run_roco.sh" \
-      --policy "${policy}" \
-      --max-steps "${max_steps}" \
-      --record-video "${reference_video}" \
-      --record-video-camera "${camera}" \
-      --record-video-fps "${video_fps}" \
-      --observation-snapshot "${reference_observation}" \
-      --results-json "${reference_results}" \
-      2>&1 | tee "${reference_log}"
-    ffmpeg -y -loglevel error \
-      -sseof -5 -i "${reference_video}" \
-      -vf reverse -frames:v 1 "${reference_frame}"
+    _wait_for_memory
+    ref_cmd=(
+      "${repo_root}/scripts/run_roco.sh"
+      --policy "${policy}"
+      --max-steps "${max_steps}"
+      --observation-snapshot "${reference_observation}"
+      --results-json "${reference_results}"
+    )
+    if ((record_video == 1)); then
+      ref_cmd+=(
+        --record-video "${reference_video}"
+        --record-video-camera "${camera}"
+        --record-video-fps "${video_fps}"
+      )
+    fi
+    "${ref_cmd[@]}" 2>&1 | tee "${reference_log}"
+    if ((record_video == 1)) && [[ -s "${reference_video}" ]]; then
+      ffmpeg -y -loglevel error \
+        -sseof -5 -i "${reference_video}" \
+        -vf reverse -frames:v 1 "${reference_frame}"
+    fi
+    _cleanup_isaac_leftovers
+    if ((cooldown_sec > 0)); then
+      sleep "${cooldown_sec}"
+    fi
   else
     echo "[batch] nominal layout: complete; skipping"
   fi
@@ -171,6 +280,7 @@ if ((include_reference == 1)); then
   fi
 fi
 
+failed_seeds=()
 for ((i = 0; i < seed_count; i++)); do
   seed=$((start_seed + i))
   seed_tag="$(printf '%03d' "${seed}")"
@@ -180,55 +290,104 @@ for ((i = 0; i < seed_count; i++)); do
   log_path="${logs_dir}/seed-${seed_tag}.log"
   observation_path="${observations_dir}/seed-${seed_tag}.npz"
 
-  if ((force == 0)) && [[ -s "${frame_path}" && -s "${results_path}" \
-      && -s "${observation_path}" ]]; then
+  if ((force == 0)) && _seed_complete "${observation_path}" "${results_path}" "${frame_path}"; then
     echo "[batch] seed ${seed}: complete; skipping"
     continue
   fi
 
-  if ((force == 1)) || [[ ! -s "${video_path}" || ! -s "${results_path}" \
-      || ! -s "${observation_path}" ]]; then
-    echo "[batch] seed ${seed}: running rollout"
-    "${repo_root}/scripts/run_roco.sh" \
-      --policy "${policy}" \
-      --random-seed "${seed}" \
-      --max-steps "${max_steps}" \
-      --record-video "${video_path}" \
-      --record-video-camera "${camera}" \
-      --record-video-fps "${video_fps}" \
-      --observation-snapshot "${observation_path}" \
-      --results-json "${results_path}" \
-      2>&1 | tee "${log_path}"
+  attempt=0
+  ok=0
+  while ((attempt <= retries)); do
+    if ((attempt > 0)); then
+      echo "[batch] seed ${seed}: retry ${attempt}/${retries}"
+      _cleanup_isaac_leftovers
+      if ((cooldown_sec > 0)); then
+        sleep "${cooldown_sec}"
+      fi
+    fi
+    _wait_for_memory
+    echo "[batch] seed ${seed}: running rollout (attempt $((attempt + 1)))"
+    cmd=(
+      "${repo_root}/scripts/run_roco.sh"
+      --policy "${policy}"
+      --random-seed "${seed}"
+      --max-steps "${max_steps}"
+      --observation-snapshot "${observation_path}"
+      --results-json "${results_path}"
+    )
+    if ((record_video == 1)); then
+      cmd+=(
+        --record-video "${video_path}"
+        --record-video-camera "${camera}"
+        --record-video-fps "${video_fps}"
+      )
+    fi
+    set +e
+    "${cmd[@]}" 2>&1 | tee "${log_path}"
+    rc=${PIPESTATUS[0]}
+    set -e
+    if ((rc == 0)) && [[ -s "${observation_path}" && -s "${results_path}" ]]; then
+      ok=1
+      break
+    fi
+    echo "[batch] seed ${seed}: launch failed rc=${rc}" >&2
+    attempt=$((attempt + 1))
+  done
+
+  _cleanup_isaac_leftovers
+
+  if ((ok == 0)); then
+    failed_seeds+=("${seed}")
+    echo "[batch] seed ${seed}: FAILED after $((retries + 1)) attempts" >&2
+    if ((continue_on_error == 0)); then
+      exit 1
+    fi
+    if ((cooldown_sec > 0)); then
+      sleep "${cooldown_sec}"
+    fi
+    continue
+  fi
+
+  if ((record_video == 1)); then
+    if [[ ! -s "${video_path}" ]]; then
+      echo "[batch] seed ${seed}: rollout produced no video" >&2
+      failed_seeds+=("${seed}")
+      if ((continue_on_error == 0)); then
+        exit 1
+      fi
+      continue
+    fi
+    echo "[batch] seed ${seed}: extracting final frame"
+    ffmpeg -y -loglevel error \
+      -sseof -5 -i "${video_path}" \
+      -vf reverse -frames:v 1 "${frame_path}"
   else
-    echo "[batch] seed ${seed}: reusing existing rollout video"
+    echo "[batch] seed ${seed}: wrote observation+results (no video)"
   fi
 
-  if [[ ! -s "${video_path}" ]]; then
-    echo "[batch] seed ${seed}: rollout produced no video" >&2
-    exit 1
+  if ((cooldown_sec > 0)); then
+    echo "[batch] cooldown ${cooldown_sec}s before next seed"
+    sleep "${cooldown_sec}"
   fi
-
-  echo "[batch] seed ${seed}: extracting final frame"
-  # Read only the final five seconds, reverse that short segment, then keep
-  # its first frame. This yields the last decodable frame without buffering
-  # the entire rollout in ffmpeg's reverse filter.
-  ffmpeg -y -loglevel error \
-    -sseof -5 -i "${video_path}" \
-    -vf reverse -frames:v 1 "${frame_path}"
 done
 
-contact_sheet="${output_dir}/contact-sheet.png"
-echo "[batch] building contact sheet"
-ffmpeg -y -loglevel error \
-  -pattern_type glob -framerate 1 -i "${frames_dir}/seed-*-final.png" \
-  -vf "scale=320:-1,tile=5x6:padding=4:margin=4" \
-  -frames:v 1 "${contact_sheet}"
+if ((record_video == 1)) && compgen -G "${frames_dir}/seed-*-final.png" >/dev/null; then
+  contact_sheet="${output_dir}/contact-sheet.png"
+  echo "[batch] building contact sheet"
+  ffmpeg -y -loglevel error \
+    -pattern_type glob -framerate 1 -i "${frames_dir}/seed-*-final.png" \
+    -vf "scale=320:-1,tile=5x6:padding=4:margin=4" \
+    -frames:v 1 "${contact_sheet}" || true
+  echo "[batch] contact sheet: ${contact_sheet}"
+fi
 
 echo "[batch] done"
-echo "[batch] final frames: ${frames_dir}"
 echo "[batch] RGB-D observations: ${observations_dir}"
+echo "[batch] results JSON: ${results_dir}"
 if ((include_reference == 1)); then
-  echo "[batch] nominal reference: ${reference_frame}"
   echo "[batch] nominal RGB-D observation: ${reference_observation}"
 fi
-echo "[batch] contact sheet: ${contact_sheet}"
+if ((${#failed_seeds[@]} > 0)); then
+  echo "[batch] FAILED seeds: ${failed_seeds[*]}" >&2
+  exit 1
+fi

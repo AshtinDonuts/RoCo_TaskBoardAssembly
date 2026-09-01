@@ -1,0 +1,7 @@
+=== R-arm fixed-orientation reachability ===
+home_engage           468/720        65.0%  orn=[0.003, 1.0, -0.0004, -0.0055]  approach=[-0.011, -0.006, -1.0]
+top_down              469/720        65.1%  orn=[0.0, 1.0, 0.0, 0.0]  approach=[0.0, 0.0, -1.0]
+identity              340/720        47.2%  orn=[1.0, 0.0, 0.0, 0.0]  approach=[0.0, 0.0, 1.0]
+
+home_engage=65.0%  top_down=65.1%
+fix_orientation freezes ≈ home_engage at clutch; fixed_orientation_wxyz=[0,1,0,0] freezes top_down.
