@@ -55,6 +55,10 @@ ALLOWED_MANIFEST_KEYS = {
     "camera_t_world",
 }
 ALLOWED_PART_KEYS = {"search_center_uv", "jacobian_xy_per_px"}
+ALLOWED_ACTION_MODULES = {
+    "isaacsim.core.utils.types",
+    "omni.isaac.core.utils.types",
+}
 
 
 def _iter_policy_py():
@@ -81,7 +85,7 @@ class PrivilegeAuditTests(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom):
                     mod = node.module or ""
                     # ArticulationAction typing only is allowed.
-                    if mod.startswith("omni.isaac.core.utils.types"):
+                    if mod in ALLOWED_ACTION_MODULES:
                         continue
                     for bad in FORBIDDEN_MODULE_SUBSTR:
                         self.assertNotIn(

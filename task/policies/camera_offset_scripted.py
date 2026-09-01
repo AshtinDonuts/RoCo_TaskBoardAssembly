@@ -47,7 +47,7 @@ def _hold_action(env_info: EnvInfo, obs: Observation):
     gidx = env_info.dof_names.index(env_info.L_gripper_joint)
     joints[gidx] = float(obs.L_gripper_position)
     try:
-        from omni.isaac.core.utils.types import ArticulationAction
+        from isaacsim.core.utils.types import ArticulationAction
         return ArticulationAction(joint_positions=joints)
     except ImportError:
         return SimpleNamespace(joint_positions=joints)
@@ -80,6 +80,7 @@ class CameraOffsetScriptedPolicy(Policy):
         self._pending_target: PartTarget | None = None
         self._baseline_started = False
         self._missing_rgb_steps = 0
+        self._last_seen_step_idx: int | None = None
         # Head cameras often need a few sim steps before the first RGB arrives.
         self._missing_rgb_limit = 600
         self._export_dir = (
@@ -95,6 +96,11 @@ class CameraOffsetScriptedPolicy(Policy):
             )
 
     def reset(self, obs: Observation, target: PartTarget) -> None:
+        step_idx = int(getattr(obs, "step_idx", 0))
+        if (self._last_seen_step_idx is not None
+                and step_idx < self._last_seen_step_idx):
+            self._reset_episode_state()
+        self._last_seen_step_idx = step_idx
         self._pending_target = target
         self._baseline_started = False
         if self._estimate is None:
@@ -104,6 +110,7 @@ class CameraOffsetScriptedPolicy(Policy):
             self._start_baseline(obs, target)
 
     def act(self, obs: Observation):
+        self._last_seen_step_idx = int(getattr(obs, "step_idx", 0))
         if self._estimate is None:
             if not self._ingest(obs):
                 return _hold_action(self.env_info, obs)
@@ -159,6 +166,18 @@ class CameraOffsetScriptedPolicy(Policy):
     def _finalize_estimate(self) -> None:
         self._estimate = self._estimator.estimate()
         self._maybe_export_frames()
+
+    def _reset_episode_state(self) -> None:
+        """Discard seed-specific state after the simulator step counter resets."""
+        self._estimator.reset_episode()
+        self._estimate = None
+        self._pending_target = None
+        self._baseline_started = False
+        self._missing_rgb_steps = 0
+        self._exported = False
+        reset_episode = getattr(self._baseline, "reset_episode", None)
+        if callable(reset_episode):
+            reset_episode()
 
     def _maybe_export_frames(self) -> None:
         if self._exported or not self._export_dir:

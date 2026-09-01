@@ -421,6 +421,58 @@ class PolicyWrapperTests(unittest.TestCase):
             self.assertEqual(man["sim_step_idxs"], [42])
             self.assertTrue(Path(tmp, "buf00_simstep000042_rgb.png").is_file())
 
+    def test_world_reset_discards_previous_seed_estimate(self):
+        bundle, gray, depth = _synthetic_bundle()
+        seen = []
+
+        class Baseline:
+            def __init__(self):
+                self.episode_resets = 0
+
+            def reset_episode(self):
+                self.episode_resets += 1
+
+            def reset(self, obs, target):
+                seen.append(copy.deepcopy(target))
+
+            def act(self, obs):
+                return "act"
+
+            def is_done(self, obs):
+                return True
+
+        baseline = Baseline()
+        policy = CameraOffsetScriptedPolicy(
+            self._env(), bundle=bundle, baseline=baseline
+        )
+        target = PartTarget(
+            name="usb_a",
+            release_mode="open",
+            pick_pos=np.array([0.1, 0.2, 1.0]),
+            place_pos=np.array([0.3, 0.4, 1.0]),
+        )
+
+        first = self._obs(
+            _rgb(_shift_image(gray, 3, 1)),
+            _shift_image(depth, 3, 1),
+            bundle.intrinsics,
+        )
+        first.step_idx = 100
+        policy.reset(first, target)
+
+        second = self._obs(
+            _rgb(_shift_image(gray, -3, -1)),
+            _shift_image(depth, -3, -1),
+            bundle.intrinsics,
+        )
+        second.step_idx = 0
+        policy.reset(second, target)
+
+        self.assertEqual(baseline.episode_resets, 1)
+        self.assertEqual(len(seen), 2)
+        self.assertFalse(np.allclose(seen[0].pick_pos, seen[1].pick_pos))
+        self.assertFalse(np.allclose(seen[0].place_pos, seen[1].place_pos))
+
 
 class BoundaryAndNominalTests(unittest.TestCase):
     def test_synthetic_corners_recover_within_2mm(self):

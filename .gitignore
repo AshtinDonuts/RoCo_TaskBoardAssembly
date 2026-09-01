@@ -26,3 +26,6 @@ task/demo.mp4
 robot/sharpa_north/
 
 runs/
+
+# Reproducible contest submission archives
+dist/

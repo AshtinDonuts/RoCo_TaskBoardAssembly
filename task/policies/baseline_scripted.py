@@ -213,6 +213,12 @@ class BaselinePolicy(Policy):
         self._last_obs: Observation = None  # type: ignore[assignment]
         self._last_step_idx = None
 
+    def reset_episode(self) -> None:
+        """Reset state that spans per-part ``reset`` calls within one trial."""
+        self._is_first_part = True
+        self._last_obs = None  # type: ignore[assignment]
+        self._last_step_idx = None
+
     def reset(self, obs: Observation, target: PartTarget) -> None:
         self._last_obs = obs
         self._last_step_idx = int(obs.step_idx)
