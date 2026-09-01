@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Sequence, Union
 import numpy as np
 
 from .constants import (
+    AVERAGE_BUFFERED_FRAMES,
     BOARD_CONFIDENCE_MIN,
     BOARD_CONSENSUS_MAX_M,
     DEFAULT_ROI_MARGIN_PX,
@@ -36,6 +37,32 @@ class BufferedFrame:
     rgb: np.ndarray
     depth: Optional[np.ndarray]
     sim_step_idx: Optional[int] = None
+
+
+def average_buffered_frames(frames: Sequence[BufferedFrame]) -> BufferedFrame:
+    """Mean-pool RGB (and nanmean depth) across the pre-motion buffer.
+
+    Temporal averaging reduces single-frame RT denoiser / path-trace flicker
+    before the composite is compared to the sharp nominal reference.
+    """
+    if not frames:
+        raise ValueError("average_buffered_frames requires at least one frame")
+    rgb_stack = np.stack(
+        [np.asarray(fr.rgb, dtype=np.float64) for fr in frames], axis=0
+    )
+    rgb_mean = np.mean(rgb_stack, axis=0)
+    depth_mean = None
+    depth_list = [
+        np.asarray(fr.depth, dtype=np.float64)
+        for fr in frames if fr.depth is not None
+    ]
+    if depth_list:
+        depth_stack = np.stack(depth_list, axis=0)
+        with np.errstate(all="ignore"):
+            depth_mean = np.nanmean(depth_stack, axis=0)
+    # Tag with the last buffered sim step (buffer spans [first, last]).
+    last_step = frames[-1].sim_step_idx
+    return BufferedFrame(rgb=rgb_mean, depth=depth_mean, sim_step_idx=last_step)
 
 
 @dataclass
@@ -130,9 +157,28 @@ class OffsetEstimator:
                 _save_depth_viz_png(out / depth_viz_name, fr.depth)
                 entry["depth_m"] = depth_npy_name
                 entry["depth_viz"] = depth_viz_name
-            if est is not None and i < len(est.diagnostics.get("frames", [])):
-                entry["diagnostics"] = est.diagnostics["frames"][i]
             frame_meta.append(entry)
+
+        compose_meta = None
+        if est is not None and est.diagnostics.get("compose") == "mean":
+            composed = average_buffered_frames(self._frames)
+            _save_rgb_png(out / "buffer_mean_rgb.png", composed.rgb)
+            compose_meta = {
+                "mode": "mean",
+                "rgb": "buffer_mean_rgb.png",
+                "n_frames": len(self._frames),
+                "sim_step_idxs": [fr.sim_step_idx for fr in self._frames],
+            }
+            if composed.depth is not None:
+                np.save(
+                    out / "buffer_mean_depth_m.npy",
+                    np.asarray(composed.depth, dtype=np.float64),
+                )
+                _save_depth_viz_png(out / "buffer_mean_depth_viz.png", composed.depth)
+                compose_meta["depth_m"] = "buffer_mean_depth_m.npy"
+                compose_meta["depth_viz"] = "buffer_mean_depth_viz.png"
+            if est.diagnostics.get("composed") is not None:
+                compose_meta["diagnostics"] = est.diagnostics["composed"]
 
         _save_rgb_png(out / "reference_rgb.png", self.bundle.rgb)
         np.save(out / "reference_depth_m.npy",
@@ -143,6 +189,7 @@ class OffsetEstimator:
             "buffer_frames_required": int(self.bundle.buffer_frames),
             "n_frames": len(self._frames),
             "sim_step_idxs": [fr.sim_step_idx for fr in self._frames],
+            "compose": compose_meta,
             "frames": frame_meta,
             "reference": {
                 "rgb": "reference_rgb.png",
@@ -161,6 +208,7 @@ class OffsetEstimator:
                     k: float(v) for k, v in est.part_confidence.items()
                 },
                 "n_frames": int(est.diagnostics.get("n_frames", len(self._frames))),
+                "compose": est.diagnostics.get("compose"),
             }
         (out / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
@@ -175,6 +223,55 @@ class OffsetEstimator:
                 "OffsetEstimator has no head frames. "
                 "Set TASK_ENABLE_CAMERA_OUTPUT=1 and wait for rgb['head']."
             )
+
+        if AVERAGE_BUFFERED_FRAMES:
+            composed = average_buffered_frames(self._frames)
+            board_xy, board_c, board_src = self._estimate_board(
+                composed.rgb, composed.depth
+            )
+            board_xy = clamp_xy(board_xy)
+            parts = {}
+            confidences = {}
+            per_part = {}
+            for name, tmpl in self.bundle.parts.items():
+                if name in SUPPORT_COUPLED_PARTS:
+                    parts[name] = board_xy.copy()
+                    confidences[name] = float(board_c)
+                    continue
+                xy, conf, src = self._estimate_part(
+                    name, tmpl, composed.rgb, composed.depth
+                )
+                parts[name] = clamp_xy(xy)
+                confidences[name] = float(conf)
+                per_part[name] = {
+                    "xy": [float(xy[0]), float(xy[1])],
+                    "confidence": float(conf),
+                    "source": src,
+                }
+            composed_diag = {
+                "board_xy": [float(board_xy[0]), float(board_xy[1])],
+                "board_confidence": float(board_c),
+                "board_source": board_src,
+                "parts": per_part,
+                "sim_step_idxs": [fr.sim_step_idx for fr in self._frames],
+            }
+            self._estimate = OffsetEstimate(
+                board_xy=board_xy,
+                part_xy=parts,
+                board_confidence=float(board_c),
+                part_confidence=confidences,
+                diagnostics={
+                    "compose": "mean",
+                    "composed": composed_diag,
+                    "frames": [],
+                    "n_frames": len(self._frames),
+                    "sim_step_idxs": [fr.sim_step_idx for fr in self._frames],
+                    "buffer_frames_required": int(self.bundle.buffer_frames),
+                },
+            )
+            return self._estimate
+
+        # Legacy path: match each buffer frame, then median the offsets.
         board_samples = []
         part_samples: Dict[str, List[np.ndarray]] = {
             name: [] for name in self.bundle.parts
@@ -231,6 +328,7 @@ class OffsetEstimator:
             board_confidence=board_c,
             part_confidence=confidences,
             diagnostics={
+                "compose": "per_frame_median",
                 "frames": frame_diag,
                 "n_frames": len(self._frames),
                 "sim_step_idxs": [fr.sim_step_idx for fr in self._frames],

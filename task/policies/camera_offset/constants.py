@@ -11,6 +11,10 @@ SUPPORT_COUPLED_PARTS = frozenset({"gear_60teeth", "rod_16mm", "bolt_8mm"})
 
 BUNDLE_VERSION = 1
 DEFAULT_BUFFER_FRAMES = 5
+# Mean-pool buffered RGB/depth into one composite before matching the
+# nominal reference. Suppresses temporal render/denoiser flicker that
+# otherwise makes single head frames look blurry/noisy.
+AVERAGE_BUFFERED_FRAMES = True
 DEFAULT_TEMPLATE_HALF_PX = 24
 DEFAULT_ROI_MARGIN_PX = 6
 DEPTH_DISAGREE_M = 0.008

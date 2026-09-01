@@ -20,7 +20,10 @@ from policies.camera_offset.constants import (  # noqa: E402
     XY_MAX_M,
     XY_MIN_M,
 )
-from policies.camera_offset.estimator import OffsetEstimator  # noqa: E402
+from policies.camera_offset.estimator import (  # noqa: E402
+    OffsetEstimator,
+    average_buffered_frames,
+)
 from policies.camera_offset.geometry import (  # noqa: E402
     clamp_xy,
     pixel_delta_to_world_xy,
@@ -254,13 +257,38 @@ class EstimatorTests(unittest.TestCase):
             self.assertEqual(man["n_frames"], 2)
             self.assertEqual(man["sim_step_idxs"], [12, 13])
             self.assertEqual(man["buffer_frames_required"], 1)
+            self.assertEqual(man["compose"]["mode"], "mean")
             self.assertTrue((path / "buf00_simstep000012_rgb.png").is_file())
             self.assertTrue((path / "buf01_simstep000013_rgb.png").is_file())
+            self.assertTrue((path / "buffer_mean_rgb.png").is_file())
             self.assertTrue((path / "reference_rgb.png").is_file())
             self.assertIn("board_xy", man["estimate"])
-            self.assertEqual(
-                man["frames"][0]["diagnostics"]["sim_step_idx"], 12
+            self.assertEqual(man["estimate"]["compose"], "mean")
+
+    def test_mean_compose_recovers_shift_from_noisy_buffer(self):
+        bundle, gray, depth = _synthetic_bundle()
+        du, dv = 3, -2
+        clean = _shift_image(gray, du, dv)
+        rng = np.random.default_rng(0)
+        est = OffsetEstimator(bundle)
+        for i in range(5):
+            noise = rng.normal(0.0, 25.0, size=clean.shape)
+            noisy = np.clip(clean + noise, 0, 255)
+            est.add_frame(
+                _rgb(noisy),
+                _shift_image(depth, du, dv),
+                bundle.intrinsics,
+                sim_step_idx=100 + i,
             )
+        out = est.estimate()
+        self.assertEqual(out.diagnostics.get("compose"), "mean")
+        expected = pixel_delta_to_world_xy([du, dv], bundle.jacobian_xy_per_px)
+        np.testing.assert_allclose(out.board_xy, expected, atol=0.002)
+        composed = average_buffered_frames(est._frames)
+        # Averaging should pull the buffer closer to the clean shifted image.
+        err_mean = np.mean(np.abs(composed.rgb[..., 0] - clean))
+        err_single = np.mean(np.abs(est._frames[0].rgb[..., 0] - clean))
+        self.assertLess(err_mean, err_single)
 
 
 class PolicyWrapperTests(unittest.TestCase):
