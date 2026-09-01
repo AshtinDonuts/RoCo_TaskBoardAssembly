@@ -187,7 +187,7 @@ train_one() {
     --batch_size="${BATCH_SIZE}" \
     --num_workers="${NUM_WORKERS}" \
     --steps="${STEPS}" \
-    --eval_freq=0 \
+    --env_eval_freq=0 \
     --save_freq="${SAVE_FREQ}" \
     --log_freq=100 \
     --wandb.enable=false \

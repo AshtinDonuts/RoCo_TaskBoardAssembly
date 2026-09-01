@@ -1,0 +1,37 @@
+{
+  "metadata": {
+    "completion_reason": "interrupted",
+    "current_part": "gear_60teeth",
+    "completed_parts": 0,
+    "total_task_steps": 643,
+    "sim_time_s": 0.0,
+    "max_steps": null,
+    "max_sim_seconds": null,
+    "max_parts": 1,
+    "snap_fired_parts": []
+  },
+  "pos_tol_m": 0.01,
+  "n_pass": 0,
+  "n_fail": 1,
+  "n_missing": 0,
+  "per_part": [
+    {
+      "name": "gear_60teeth",
+      "release_mode": "open",
+      "measure": "meshT",
+      "pos_err_m": 0.09142646931744838,
+      "tolerance_m": 0.01,
+      "actual": [
+        -0.09423838465750428,
+        -0.08787349386608002,
+        1.0332584025462541
+      ],
+      "target": [
+        -0.00851,
+        -0.056146127605838425,
+        1.0315798358785877
+      ],
+      "pass": false
+    }
+  ]
+}

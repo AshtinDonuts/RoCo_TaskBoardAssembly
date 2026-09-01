@@ -1,10 +1,15 @@
 import os
+from typing import Optional
+
 import numpy as np
 
 import isaacsim.robot_motion.motion_generation as mg
 from isaacsim.core.api.controllers.base_controller import BaseController
 from isaacsim.core.prims import Articulation
 from isaacsim.core.utils.types import ArticulationAction
+
+
+from .soft_orientation import cone_orientation_samples
 
 
 # Joint order matches the `cspace:` list in each description yaml.
@@ -21,17 +26,31 @@ _CSPACE_JOINT_NAMES = {
 }
 
 
-# URDF<->USD frame offset on the vega_1u EE link.
+# URDF<->USD frame offset on the vega_1u EE link (per arm).
 # Empirical relationship from the runtime diag:
 #   stage_ee_world_orient = lula_target_orientation * R_offset
-# with R_offset = (0, 0, 0, -1)  (180 deg about gripper local Z, the
-# approach axis). We pre-multiply the user's requested target by the
-# inverse of this offset before sending to Lula, so the stage prim ends up
-# at exactly the user-requested orientation:
+# For the LEFT arm, R_offset = (0, 0, 0, -1) (180 deg about gripper local
+# Z). We pre-multiply the user's requested target by the inverse before
+# sending to Lula so the stage prim ends up at the user-requested
+# orientation:
 #   q_for_lula = q_user_target * R_offset_inverse
-# R_offset is its own inverse rotation in SO(3); the conjugate (used here
-# as the multiplicative inverse) is (0, 0, 0, +1).
-_STAGE_OFFSET_INV = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+# R_offset is its own inverse in SO(3); the conjugate used here is
+# (0, 0, 0, +1).
+#
+# The RIGHT arm's EE fixed joint is ~identity in USD (not the L ~π Z), so
+# applying the L offset on R flips the wrist under IK. R uses identity.
+_STAGE_OFFSET_INV_L = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+_STAGE_OFFSET_INV_R = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+# Back-compat alias (L offset); prefer the side-specific constants.
+_STAGE_OFFSET_INV = _STAGE_OFFSET_INV_L
+
+# Post-IK continuity gates (forward only). Reject successful Lula solutions
+# that jump too far from the physical warm-start — typical wrist-branch
+# flips move *_arm_j5 by ~π while EE pose stays nearly identical. Leave
+# solve() ungated so path-follower / reachability probes can explore.
+J5_WRAP_THRESH_RAD = 1.2       # ~70 deg; below a half-turn, above normal teleop rate
+CSPACE_JUMP_THRESH_RAD = 1.8   # backstop for multi-joint flips with smaller j5 Δ
+_WRAP_REJECT_LOG_EVERY = 60    # physics steps between reject log lines
 
 
 def _quat_mul(q1, q2):
@@ -92,6 +111,10 @@ class LulaIKController(BaseController):
             os.path.join(base_dir, "..", "..", "robot", "vega_1u_gripper.urdf")
         )
 
+        self._side = side
+        self._stage_offset_inv = (
+            _STAGE_OFFSET_INV_L if side == "L" else _STAGE_OFFSET_INV_R
+        )
         self._ee_frame = f"{side}_ee_link_gripper_link"
         self._ik = mg.LulaKinematicsSolver(
             robot_description_path=robot_description_path,
@@ -109,6 +132,13 @@ class LulaIKController(BaseController):
 
         self._articulation = robot_articulation
         self._cspace_joint_names = _CSPACE_JOINT_NAMES[(side, owns_lift, owns_torso)]
+        j5_name = f"{side}_arm_j5"
+        try:
+            self._j5_cspace_index = self._cspace_joint_names.index(j5_name)
+        except ValueError as exc:
+            raise ValueError(
+                f"cspace for side={side!r} is missing {j5_name!r}"
+            ) from exc
 
         dof_names = list(robot_articulation.dof_names)
         self._dof_index = {n: i for i, n in enumerate(dof_names)}
@@ -116,6 +146,7 @@ class LulaIKController(BaseController):
         self._cspace_dof_indices = np.array(
             [self._dof_index[j] for j in self._cspace_joint_names], dtype=np.int64
         )
+        self._wrap_reject_count = 0
 
         self._default_position, self._default_orientation = (
             robot_articulation.get_world_pose()
@@ -147,6 +178,9 @@ class LulaIKController(BaseController):
         self.ik_ok = True
         self._last_target_position = None
         self._last_target_orientation = None
+        # Last soft-cone quat that produced a wrap-safe solution (hysteresis).
+        self._last_soft_orn = None
+        self._soft_cone_hit_count = 0
 
     def reset(self) -> None:
         super().reset()
@@ -156,56 +190,107 @@ class LulaIKController(BaseController):
         )
         self._last_full = [None] * self._n_dof
         self._last_cspace_q = None
+        self._last_soft_orn = None
 
     def _current_cspace_q(self) -> np.ndarray:
         q_full = np.asarray(self._articulation.get_joint_positions()).reshape(-1)
         return q_full[self._cspace_dof_indices].astype(np.float64)
 
-    def forward(
+    def _try_ik_candidate(
         self,
-        target_end_effector_position: np.ndarray,
-        target_end_effector_orientation: np.ndarray = None,
-    ) -> ArticulationAction:
-        warm_start = self._current_cspace_q()
-        target_orn = (
-            np.asarray(target_end_effector_orientation, dtype=np.float64)
-            if target_end_effector_orientation is not None
-            else None
-        )
-        # Pre-compose the inverse URDF<->USD frame offset so the stage prim
-        # (what end_effector.get_world_pose() reports) ends up at exactly
-        # `target_orn`, not at `target_orn * R_offset`.
+        target_pos: np.ndarray,
+        target_orn: Optional[np.ndarray],
+        warm_start: np.ndarray,
+    ):
+        """Run Lula + wrap gate. Returns (full_dof_list, q_cspace, orn) or None."""
         target_orn_for_lula = (
-            _quat_mul(target_orn, _STAGE_OFFSET_INV)
+            _quat_mul(target_orn, self._stage_offset_inv)
             if target_orn is not None
             else None
         )
         action, success = self._ik.compute_inverse_kinematics(
             frame_name=self._ee_frame,
-            target_position=np.asarray(target_end_effector_position, dtype=np.float64),
+            target_position=target_pos,
             target_orientation=target_orn_for_lula,
             warm_start=warm_start,
             position_tolerance=self._position_tolerance,
             orientation_tolerance=self._orientation_tolerance,
         )
-        self.ik_ok = bool(success) and action is not None
-        if not self.ik_ok:
-            return ArticulationAction(joint_positions=list(self._last_full))
+        if not (bool(success) and action is not None):
+            return None
 
         if isinstance(action, np.ndarray):
             q_cspace = np.asarray(action, dtype=np.float64).reshape(-1)
         else:
             q_cspace = np.asarray(action.joint_positions, dtype=np.float64).reshape(-1)
 
+        dq = q_cspace - warm_start
+        dq_j5 = float(dq[self._j5_cspace_index])
+        dq_max = float(np.max(np.abs(dq)))
+        if abs(dq_j5) > J5_WRAP_THRESH_RAD or dq_max > CSPACE_JUMP_THRESH_RAD:
+            self._wrap_reject_count += 1
+            if self._wrap_reject_count % _WRAP_REJECT_LOG_EVERY == 1:
+                print(
+                    f"[lula_ik {self._side}] reject wrap branch: "
+                    f"dq_j5={np.degrees(dq_j5):+.1f}deg "
+                    f"dq_max={np.degrees(dq_max):.1f}deg "
+                    f"(thresh_j5={np.degrees(J5_WRAP_THRESH_RAD):.0f} "
+                    f"thresh_max={np.degrees(CSPACE_JUMP_THRESH_RAD):.0f})",
+                    flush=True,
+                )
+            return None
+
         full = [None] * self._n_dof
         for jname, val in zip(self._cspace_joint_names, q_cspace.tolist()):
             full[self._dof_index[jname]] = float(val)
-        self._last_full = list(full)
-        self._last_cspace_q = q_cspace.astype(np.float64)
-        self._last_target_position = np.asarray(target_end_effector_position, dtype=np.float64).copy()
-        self._last_target_orientation = (
+        return full, q_cspace.astype(np.float64), (
             target_orn.copy() if target_orn is not None else None
         )
+
+    def forward(
+        self,
+        target_end_effector_position: np.ndarray,
+        target_end_effector_orientation: np.ndarray = None,
+        orientation_cone_rad: float = None,
+    ) -> ArticulationAction:
+        warm_start = self._current_cspace_q()
+        target_pos = np.asarray(target_end_effector_position, dtype=np.float64)
+        target_orn = (
+            np.asarray(target_end_effector_orientation, dtype=np.float64)
+            if target_end_effector_orientation is not None
+            else None
+        )
+
+        cone = float(orientation_cone_rad) if orientation_cone_rad is not None else 0.0
+        if target_orn is not None and cone > 0.0:
+            samples = cone_orientation_samples(
+                target_orn,
+                cone,
+                last_achieved_wxyz=self._last_soft_orn,
+            )
+        else:
+            samples = [target_orn]
+
+        hit = None
+        for i, orn in enumerate(samples):
+            hit = self._try_ik_candidate(target_pos, orn, warm_start)
+            if hit is not None:
+                if i > 0:
+                    self._soft_cone_hit_count += 1
+                break
+
+        if hit is None:
+            self.ik_ok = False
+            return ArticulationAction(joint_positions=list(self._last_full))
+
+        full, q_cspace, used_orn = hit
+        self.ik_ok = True
+        self._last_full = list(full)
+        self._last_cspace_q = q_cspace
+        self._last_target_position = target_pos.copy()
+        self._last_target_orientation = used_orn
+        if used_orn is not None:
+            self._last_soft_orn = used_orn.copy()
         return ArticulationAction(joint_positions=full)
 
     def solve(self, target_position, target_orientation=None, seed=None):
@@ -219,7 +304,7 @@ class LulaIKController(BaseController):
             else None
         )
         target_orn_for_lula = (
-            _quat_mul(target_orn, _STAGE_OFFSET_INV)
+            _quat_mul(target_orn, self._stage_offset_inv)
             if target_orn is not None
             else None
         )

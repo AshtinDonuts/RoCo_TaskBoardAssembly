@@ -1,0 +1,154 @@
+leader_endpoint: "127.0.0.1:19850"
+leader_rate_hz: 50
+record_hz: 10
+max_ik_fail_streak: 15
+
+# Physical ALOHA Solo leader (wx250s). Follower is never launched.
+leader:
+  robot: aloha_solo
+  name: leader_solo
+  model: aloha_wx250s
+  fps: 50
+  start_arm_pose: [0.0, -0.6, 0.5, 0.0, 1.2, 0.0]
+  gripper_joint_open: 0.8298
+  gripper_joint_close: -0.0552
+  gripper_close_thresh: 0.0
+  # Preferred source is control.gravity_compensation in teleop_export.json
+  # (default false). Kept here only as a fallback for leader_bridge.
+  gravity_compensation: false
+
+# Relative Cartesian map from ALOHA EE deltas onto DexMate right EE
+# (control.arms=right in config/teleop_export.json). Dual mode uses the same
+# map independently for left and right leader streams.
+# Units: leader EE pose is meters (Interbotix FK). translation_gain scales
+# those meter deltas onto DexMate stage meters (1.0 = 1:1). Gain > 1 makes
+# DexMate travel farther than the physical leader for the same hand motion.
+#
+# Frame: head-camera view (robot base ≈ world). Leader base is ROS-style
+# X-forward / Y-left / Z-up. axes_map sends those deltas into DexMate world so
+# that:
+#   leader +X (away from operator) → into the headcam image (≈ world -Y)
+#   leader +Y (left) / +Z (up)     → image-left / image-up (includes head_j1
+#                                   pitch tilt at INIT +55 deg)
+# When axes_map is set it replaces axes_perm / axes_sign.
+# Orientation uses the same map as a space-fixed conjugation
+# (R_dex = R_map R_rel R_map^T R_dex0) so wrist tilts match the headcam view.
+retarget:
+  axes_perm: [0, 1, 2]
+  axes_sign: [1.0, 1.0, 1.0]
+  axes_map:
+    - [0.0, 0.57358151, 0.81914849]
+    - [-1.0, 0.0, 0.0]
+    - [0.0, -0.81914849, 0.57358151]
+  translation_gain: 2.0
+  rotation_gain: 1.0
+  # Right EE: hold clutch-engage quat; Lula IK compensates while translating.
+  # Left (dual) forces this off in aloha_teleop.py.
+  fix_orientation: false
+  # Constant world/stage top-down grasp (wxyz). Same quat as scripted left
+  # PART_DEFAULTS ee_orientation. When set, teleop tracks XYZ + gripper only;
+  # leader/keyboard wrist tilts are ignored. Right arm only; dual-mode left
+  # clears this in aloha_teleop.py. Prefer this over fix_orientation when the
+  # desired lock is a hardcoded world quat rather than engage-time pose.
+  # Disable (full 6DoF wrist again): set null / false, or comment the key out.
+  fixed_orientation_wxyz: [0.0, 1.0, 0.0, 0.0]
+  # Claw-machine free tilts (rad) around fixed_orientation_wxyz. Lula tries
+  # preferred then in-cone samples so XYZ is not blocked when exact top-down
+  # is IK-infeasible. 0 / null = hard lock. ~0.40 rad ≈ 23 deg.
+  orientation_cone_rad: 0.40
+  # Stage/world coordinates. The task board and initial EE are near z=1 m;
+  # the old z max of 0.70 clamped the initial target and caused IK lockout.
+  workspace_min: [-0.50, -0.80, 0.50]
+  workspace_max: [0.80, 0.80, 1.50]
+  # Keep max_lin_vel high enough that rate limiting does not cancel gain.
+  max_lin_vel: 0.70
+  max_ang_vel: 1.2
+  max_lin_acc: 3.0
+  # Drop one-frame leader jumps above these speeds (hold last good sample).
+  # Removes spurious FK/IPC jerks so proximity_delta_gain does not integrate them.
+  spike_filter_enabled: true
+  spike_max_lin_vel: 1.5
+  spike_max_ang_vel: 8.0
+  spike_max_gripper_vel: 5.0
+  # Near-contact fine control from R-wrist laser last_length.
+  # proximity_rate_limit: scale max_lin/ang_vel (+accel); absolute map
+  #   unchanged → EEF catches up (default off).
+  # proximity_delta_gain: scale per-frame leader→DexMate deltas into the
+  #   absolute target (translation + rotation); no catch-up, no snap.
+  proximity_rate_limit:
+    enabled: false
+    depth_outer_m: 0.40
+    depth_inner_m: 0.25
+    scale_min: 0.05
+  proximity_delta_gain:
+    enabled: true
+    depth_outer_m: 0.40
+    depth_inner_m: 0.18
+    scale_min: 0.4
+  gripper_open_limit: 0.6649704
+  # Soft GRIPPER_DRIVE_* (stiffness/damping/maxForce) are applied by the
+  # harness the same way as scripted baseline (_apply_gripper_compliance).
+  # Command-side slow close + stall hold is separate (below).
+  # Default close endpoint when ROCO_TELEOP_PART is unset. With
+  # collect --part NAME, aloha_teleop overrides this from
+  # grasp_width_m + aperture_calibration in part_local_aabb_extents.json
+  # (Design D), falling back to PART_CONFIG[NAME].gripper_close.
+  gripper_close: 0.0
+  # Master switch for command-side compliance (slew + stall hold).
+  # Soft PhysX drives stay on regardless.
+  gripper_compliance_enabled: false
+  # continuous (default): linear leader norm → aperture, then optional slew/hold.
+  # binary: open/close intent only.
+  gripper_mode: continuous
+  # Leader gripper_norm at/below which DexMate full close (continuous) or
+  # close intent (binary). Absorbs short physical leader travel.
+  gripper_close_norm: 0.20
+  gripper_hysteresis: 0.03
+  # Slow close so stall detection has time to freeze aperture on contact.
+  gripper_close_speed_rad_s: 0.4
+  gripper_open_speed_rad_s: 0.75
+  gripper_stall_qd: 0.02
+  # Must be <= gripper_max_close_lag so lag-based stall can fire when capped.
+  gripper_stall_err: 0.008
+  gripper_stall_dq: 0.005
+  gripper_stall_min_close_rad: 0.03
+  gripper_hold_margin: 0.002
+  # Hard cap: never command more closed than measured by more than this
+  # (compliance beats continuous leader-0 aperture catch-up).
+  gripper_max_close_lag: 0.01
+  # ~0.24s at 50Hz; slow soft-drive free-air creep must not false-hold.
+  gripper_stall_hold_ticks: 12
+  gripper_stall_progress: 0.002
+  stale_hold_s: 0.10
+  stale_pause_s: 0.50
+
+keyboard:
+  # World-axis holds aligned with headcam view (level approx of axes_map):
+  # into-scene=-Y, image-right=-X, up=+Z.
+  lin_vel_mps: 0.12
+  ang_vel_rps: 0.8
+
+recording:
+  # Session timers prefer config/teleop_export.json; kept here for reference only.
+  episode_time_s: 600
+  warmup_time_s: 5
+  num_episodes: 1
+
+operator:
+  # After leader start, clutch mode is track so DexMate EE follows leader
+  # deltas. Space track↔pause / reanchor is WIP — hardware tests still fail
+  # to recapture origins on resume; do not rely on it for collection.
+  clutch_default: true
+  deadman_default: true
+  keys:
+    clutch_toggle: " "
+    recenter: "r"
+    pause: "p"
+    resume: "u"
+    part_done: "n"
+    abort: "x"
+    estop: "e"
+    start: "s"
+    save_episode: "right"
+    rerecord_episode: "left"
+    stop_recording: "esc"

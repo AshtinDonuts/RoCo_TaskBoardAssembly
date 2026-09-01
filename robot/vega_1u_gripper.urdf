@@ -69,7 +69,7 @@
     <parent link="L_ee_link_gripper_link"/>
     <child link="L_ee_link_gripper_active_link"/>
     <axis xyz="0. 1. 0."/>
-    <limit lower="0." upper="0.6649704" effort="10000000." velocity="2.0"/>
+    <limit lower="0." upper="0.6649704" effort="3." velocity="2.0"/>
   </joint>
   <joint name="L_gripper_joint_01" type="revolute">
     <origin xyz="-0.0225 -0.012235 0.0825 " rpy="0. -0. 0."/>
@@ -154,7 +154,7 @@
     <parent link="R_ee_link_gripper_link"/>
     <child link="R_ee_link_gripper_active_link"/>
     <axis xyz="0. 1. 0."/>
-    <limit lower="0." upper="0.6649704" effort="10000000." velocity="2.0"/>
+    <limit lower="0." upper="0.6649704" effort="3." velocity="2.0"/>
   </joint>
   <joint name="R_gripper_joint_01" type="revolute">
     <origin xyz="-0.0225 -0.012235 0.0825 " rpy="0. -0. 0."/>
