@@ -47,9 +47,46 @@ class LeRobotCollectionContractTest(unittest.TestCase):
             "action", "observation.state", "observation.images.head",
             "observation.images.left_hand", "observation.images.right_hand",
         })
-        self.assertEqual(features["action"]["shape"], (14,))
-        self.assertEqual(features["observation.state"]["shape"], (44,))
+        self.assertEqual(features["action"]["shape"], (8,))
+        self.assertEqual(features["observation.state"]["shape"], (15,))
+        self.assertEqual(features["action"]["names"], [
+            "L_arm_j1", "L_arm_j2", "L_arm_j3", "L_arm_j4",
+            "L_arm_j5", "L_arm_j6", "L_arm_j7", "L_gripper_joint",
+        ])
+        self.assertFalse(any("ee_" in name for name in features["action"]["names"]))
         self.assertEqual(features["observation.images.head"]["shape"], (240, 320, 3))
+
+        legacy = collector._feature_spec("legacy-cartesian")
+        self.assertEqual(legacy["action"]["shape"], (14,))
+        self.assertEqual(legacy["observation.state"]["shape"], (44,))
+
+    def test_joint_state_is_left_proprioception_only(self):
+        q = np.arange(20, dtype=np.float32)
+        qd = q + 100
+        state = collector._pack_joint_state(q, qd, np.arange(2, 9), 18)
+        np.testing.assert_array_equal(state[:7], np.arange(2, 9))
+        np.testing.assert_array_equal(state[7:14], np.arange(2, 9) + 100)
+        self.assertEqual(state[14], 18)
+
+    def test_joint_command_latch_persists_sparse_targets(self):
+        measured = np.arange(10, dtype=np.float64)
+        first = [None] * 10
+        first[2], first[8] = 20.0, 0.4
+        latch = collector._update_command_latch(None, measured, first)
+        self.assertEqual(latch[2], 20.0)
+        self.assertEqual(latch[8], 0.4)
+        second = [None] * 10
+        second[3] = 30.0
+        latch = collector._update_command_latch(latch, measured + 1000, second)
+        self.assertEqual(latch[2], 20.0)
+        self.assertEqual(latch[3], 30.0)
+        self.assertEqual(latch[8], 0.4)
+        action = collector._pack_joint_action(latch, np.arange(1, 8), 8)
+        np.testing.assert_allclose(action, [1, 20, 30, 4, 5, 6, 7, 0.4])
+
+        second[4] = np.nan
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            collector._update_command_latch(latch, measured, second)
 
     def test_state_order_and_gripper_normalization(self):
         q = np.arange(20, dtype=np.float32)

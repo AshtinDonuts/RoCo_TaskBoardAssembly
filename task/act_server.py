@@ -5,8 +5,11 @@ Length-prefixed pickle protocol over stdin/stdout — same contract as
 lerobot in-process.
 
 Message in : {"cmd":"reset"} OR
-             {"state": (44,) f32, "head"/"left"/"right": (240,320,3) uint8}
-Message out: {"ok":True} OR {"action": (14,) f32}
+             {"state": (15|44,) f32, "head"/"left"/"right": (240,320,3) uint8}
+Message out: {"ok":True} OR {"action": (8|14,) f32}
+
+State/action dims are taken from the checkpoint config (joint 15/8 or
+legacy-cartesian 44/14).
 
 Usage: python act_server.py <checkpoint_pretrained_model_dir>
 """
@@ -37,6 +40,13 @@ DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 policy = ACTPolicy.from_pretrained(CKPT)
 policy.eval().to(DEV)
+
+def _feat_dim(feat):
+    shape = feat.shape if hasattr(feat, "shape") else feat["shape"]
+    return int(shape[0] if len(shape) else shape)
+
+STATE_DIM = _feat_dim(policy.config.input_features["observation.state"])
+ACTION_DIM = _feat_dim(policy.config.output_features["action"])
 # Optional deploy overrides (must satisfy ACTConfig constraints).
 _coeff = os.environ.get("ACT_TEMPORAL_ENSEMBLE_COEFF")
 _n_action = os.environ.get("ACT_N_ACTION_STEPS")
@@ -63,6 +73,7 @@ preprocessor, postprocessor = make_pre_post_processors(
 )
 sys.stderr.write(
     f"[act_server] loaded {CKPT} (+processors) on {DEV} "
+    f"state_dim={STATE_DIM} action_dim={ACTION_DIM} "
     f"chunk_size={policy.config.chunk_size} "
     f"n_action_steps={policy.config.n_action_steps} "
     f"temporal_ensemble_coeff={policy.config.temporal_ensemble_coeff}\n"
@@ -107,15 +118,23 @@ while True:
         _write({"ok": True})
         continue
     obs = {
-        "observation.state": torch.from_numpy(
-            np.asarray(msg["state"], np.float32)
-        ).unsqueeze(0),
+        "observation.state": torch.from_numpy(np.asarray(msg["state"], np.float32)).unsqueeze(0),
         "observation.images.head": _img(msg["head"]),
         "observation.images.left_hand": _img(msg["left"]),
         "observation.images.right_hand": _img(msg["right"]),
     }
+    state = np.asarray(msg["state"], np.float32).reshape(-1)
+    if state.shape != (STATE_DIM,) or not np.isfinite(state).all():
+        raise ValueError(
+            f"invalid ACT state shape/values: got {state.shape}, expected ({STATE_DIM},)"
+        )
     with torch.no_grad():
         obs = preprocessor(obs)
         a = policy.select_action(obs)
         a = postprocessor(a)
-    _write({"action": a.squeeze(0).float().cpu().numpy().tolist()})
+    out = a.squeeze(0).float().cpu().numpy().reshape(-1)
+    if out.shape != (ACTION_DIM,) or not np.isfinite(out).all():
+        raise RuntimeError(
+            f"invalid ACT action shape/values: got {out.shape}, expected ({ACTION_DIM},)"
+        )
+    _write({"action": out.tolist()})

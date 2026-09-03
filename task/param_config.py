@@ -535,7 +535,10 @@ PART_CONFIG = {
 # gears authored at their pick positions so PhysX bakes their SDF colliders
 # at stage-load time. Everything else in part_order spawns at runtime from
 # ../parts/<name>.usdc at the pose recorded in part_init_poses.json.
-part_order = (
+# Canonical full order for contextual evaluation. Keep this separate from
+# ``part_order`` because ROCO_PART_ORDER intentionally overrides the active
+# evaluation subset at import time.
+FULL_PART_ORDER = (
     "gear_60teeth",
     "gear_20teeth",
     "rod_16mm",
@@ -546,6 +549,7 @@ part_order = (
     "battery_size1",
     "battery_size5",
 )
+part_order = FULL_PART_ORDER
 
 _part_order_override = os.getenv("ROCO_PART_ORDER")
 if _part_order_override:

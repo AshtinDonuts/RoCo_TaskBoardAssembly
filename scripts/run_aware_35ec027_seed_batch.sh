@@ -6,9 +6,9 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
 start_seed=0
-seed_count=30
+seed_count=40
 output_dir=""
-sample_fps=10
+sample_fps=30
 repo_id="taskboard/aware_35ec027_full_assembly"
 pruning_strategy="velocity"
 force=0
@@ -29,9 +29,9 @@ Collect randomized 35ec027 rollouts and split per-part subtask episodes.
 Usage: scripts/run_aware_35ec027_seed_batch.sh [options]
 
   --start-seed N   First seed (default: 0)
-  --count N        Number of seeds (default: 30)
+  --count N        Number of seeds (default: 40)
   --output-dir DIR Output root; defaults to an artifacts/lerobot seed range
-  --fps N          LeRobot recording FPS (default: 10)
+  --fps N          LeRobot recording FPS (default: 30; downsample to 10 Hz later)
   --repo-id ID     Local LeRobot repository ID
   --pruning-strategy MODE
                      Derived prefix pruning: none, home, velocity, or waypoint
@@ -87,6 +87,7 @@ cd "${repo_root}"
 export ISAACSIM_HEADLESS="${ISAACSIM_HEADLESS:-1}"
 export TASK_ENABLE_CAMERA_VIEWPORTS="${TASK_ENABLE_CAMERA_VIEWPORTS:-0}"
 export TASK_BASELINE_MOTION_PROFILE="settings35ec027_timeout120"
+export ROCO_PART_ORDER="${ROCO_PART_ORDER:-gear_20teeth,gear_60teeth}"
 # shellcheck source=scripts/roco_isaac_env.sh
 source "${script_dir}/roco_isaac_env.sh"
 
@@ -129,13 +130,25 @@ source, results_dir, summary_path = map(pathlib.Path, sys.argv[1:4])
 start, count = int(sys.argv[4]), int(sys.argv[5])
 requested = set(range(start, start + count))
 rows, errors = [], []
+part_order = None
 for path in sorted(results_dir.glob("seed-*.json")):
     if path.name.endswith(".pending.json"):
         continue
     try:
         row = json.loads(path.read_text(encoding="utf-8"))
-        if row.get("completion_reason") != "complete" or len(row.get("segments", [])) != 9:
-            raise ValueError("result is not a complete nine-part episode")
+        segments = row.get("segments")
+        recorded_parts = row.get("recorded_parts")
+        if row.get("completion_reason") != "complete" or not isinstance(segments, list) or not segments:
+            raise ValueError("result is not a complete recorded episode")
+        names = [str(segment.get("name")) for segment in segments]
+        if recorded_parts is not None and names != [str(name) for name in recorded_parts]:
+            raise ValueError("manifest segments do not match recorded_parts")
+        if any(not name for name in names) or len(set(names)) != len(names):
+            raise ValueError("result contains invalid or duplicate recorded parts")
+        if part_order is None:
+            part_order = names
+        elif names != part_order:
+            raise ValueError(f"inconsistent recorded part order: {names} != {part_order}")
         rows.append(row)
     except Exception as exc:
         errors.append(f"{path}: {exc}")

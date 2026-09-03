@@ -47,6 +47,18 @@ DEFAULT_LEFT_HOME_Q = np.array(
 )
 LEFT_JOINT_SLICE = slice(14, 21)
 LEFT_VELOCITY_SLICE = slice(28, 35)
+JOINT_ONLY_LEFT_JOINT_SLICE = slice(0, 7)
+JOINT_ONLY_LEFT_VELOCITY_SLICE = slice(7, 14)
+
+
+def _left_state_slices(state_width: int) -> tuple[slice, slice]:
+    if state_width == 15:
+        return JOINT_ONLY_LEFT_JOINT_SLICE, JOINT_ONLY_LEFT_VELOCITY_SLICE
+    if state_width >= 44:
+        return LEFT_JOINT_SLICE, LEFT_VELOCITY_SLICE
+    raise ValueError(
+        "observation.state must use the 15-D joint-only or 44-D legacy contract"
+    )
 
 
 def _replace(table: pa.Table, name: str, values: np.ndarray) -> pa.Table:
@@ -145,6 +157,7 @@ def _load_rollout_manifest(path: Path, total_episodes: int) -> dict[int, dict]:
             raise ValueError(f"invalid rollout manifest JSON at {path}:{lineno}: {exc}") from exc
     by_episode: dict[int, dict] = {}
     seeds: set[int] = set()
+    part_order: tuple[str, ...] | None = None
     for row in rows:
         episode = int(row["episode_index"])
         seed = int(row["seed"])
@@ -152,6 +165,20 @@ def _load_rollout_manifest(path: Path, total_episodes: int) -> dict[int, dict]:
             raise ValueError(f"duplicate manifest episode_index {episode}")
         if seed in seeds:
             raise ValueError(f"duplicate manifest seed {seed}")
+        segments = row.get("segments")
+        names = tuple(str(segment.get("name")) for segment in segments) if isinstance(segments, list) else ()
+        declared = row.get("recorded_parts")
+        if declared is not None:
+            declared = tuple(str(name) for name in declared)
+            if names != declared:
+                raise ValueError(f"manifest episode {episode} parts do not match recorded_parts")
+        if part_order is None:
+            part_order = names
+        elif names != part_order:
+            raise ValueError(
+                "rollout manifest uses inconsistent part order: "
+                f"episode {episode} has {list(names)!r}, expected {list(part_order)!r}"
+            )
         by_episode[episode] = row
         seeds.add(seed)
     expected = set(range(total_episodes))
@@ -169,6 +196,16 @@ def _manifest_segments(row: dict, episode_length: int) -> list[dict]:
     if not isinstance(segments, list) or not segments:
         raise ValueError(f"episode {row.get('episode_index')} has no segments")
     seen = set()
+    recorded_parts = row.get("recorded_parts")
+    if recorded_parts is not None:
+        if not isinstance(recorded_parts, list) or not recorded_parts:
+            raise ValueError(f"episode {row.get('episode_index')} has invalid recorded_parts")
+        recorded_parts = [str(name) for name in recorded_parts]
+        if len(set(recorded_parts)) != len(recorded_parts):
+            raise ValueError(f"episode {row.get('episode_index')} has duplicate recorded parts")
+        unknown = set(recorded_parts) - set(PART_BY_NAME)
+        if unknown:
+            raise ValueError(f"unknown recorded part(s): {sorted(unknown)}")
     previous_end = 0
     normalized = []
     for segment in segments:
@@ -248,8 +285,12 @@ def _manifest_segments(row: dict, episode_length: int) -> list[dict]:
         raise ValueError(
             f"episode {row.get('episode_index')} segments end at {previous_end}, expected {episode_length}"
         )
-    if seen != set(PART_BY_NAME):
-        raise ValueError(f"episode {row.get('episode_index')} does not contain all nine parts")
+    manifest_order = [segment["name"] for segment in normalized]
+    if recorded_parts is not None and manifest_order != recorded_parts:
+        raise ValueError(
+            f"episode {row.get('episode_index')} manifest parts do not match recorded_parts: "
+            f"{manifest_order!r} != {recorded_parts!r}"
+        )
     return normalized
 
 
@@ -295,8 +336,9 @@ def _refine_segment(
     begin = original_begin
     evidence: dict = {"kind": strategy}
     local = np.asarray(states[original_begin:original_end], dtype=np.float64)
-    if local.ndim != 2 or local.shape[1] < LEFT_VELOCITY_SLICE.stop:
-        raise ValueError("observation.state does not contain the documented 44-D contract")
+    if local.ndim != 2:
+        raise ValueError("observation.state must be a two-dimensional array")
+    left_joint_slice, left_velocity_slice = _left_state_slices(local.shape[1])
 
     if strategy == "home":
         # The first asset in an episode (currently gear_60teeth in sim
@@ -316,7 +358,7 @@ def _refine_segment(
                 home_source = "rollout_manifest"
             if home.shape != (7,) or not np.all(np.isfinite(home)):
                 raise ValueError("left_arm_home_q must contain seven finite joint values")
-            error = np.max(np.abs(local[:, LEFT_JOINT_SLICE] - home), axis=1)
+            error = np.max(np.abs(local[:, left_joint_slice] - home), axis=1)
             offset = _first_stable_window(error <= home_tolerance_rad, settle_frames)
             if offset is None:
                 raise ValueError(
@@ -340,8 +382,8 @@ def _refine_segment(
                 reason="first_part_has_no_reset_prefix",
             )
         else:
-            max_velocity = np.max(np.abs(local[:, LEFT_VELOCITY_SLICE]), axis=1)
-            measured_q = local[:, LEFT_JOINT_SLICE]
+            max_velocity = np.max(np.abs(local[:, left_velocity_slice]), axis=1)
+            measured_q = local[:, left_joint_slice]
             measured_velocity = np.full(len(measured_q), np.inf, dtype=np.float64)
             if len(measured_q) > 1:
                 measured_velocity[1:] = np.max(
@@ -594,6 +636,14 @@ def split_dataset(
         _load_rollout_manifest(rollout_manifest, total_parents)
         if rollout_manifest is not None else None
     )
+    if manifest is not None:
+        first_row = manifest[min(manifest)]
+        task_names = [str(name) for name in first_row.get("recorded_parts", ())]
+        if not task_names:
+            task_names = [str(segment["name"]) for segment in first_row["segments"]]
+    else:
+        task_names = [part[0] for part in PARTS]
+    task_index_by_name = {name: index for index, name in enumerate(task_names)}
     if successful_parts_only and manifest is None:
         raise ValueError("--successful-parts-only requires a rollout manifest with grading outcomes")
     if pruning_strategy == "waypoint" and manifest is None:
@@ -697,7 +747,7 @@ def split_dataset(
                     begin, end = segment["begin"], segment["end"]
                     episode_idx = int(segment["episode_index"])
                     name = segment["name"]
-                    part_idx = list(PART_BY_NAME).index(name)
+                    part_idx = task_index_by_name[name]
                     length = end - begin
                     frame = np.arange(length, dtype=np.int64)
                     timestamp = frame.astype(np.float32) / fps
@@ -784,8 +834,8 @@ def split_dataset(
             pq.write_table(pa.Table.from_pylist(rows), path, compression="snappy", use_dictionary=True)
 
         task_frame = pd.DataFrame(
-            {"task_index": range(len(PARTS))},
-            index=pd.Index([part[2] for part in PARTS], name="task"),
+            {"task_index": range(len(task_names))},
+            index=pd.Index([PART_BY_NAME[name][1] for name in task_names], name="task"),
         )
         task_frame.to_parquet(temp / "meta/tasks.parquet")
 
@@ -793,7 +843,7 @@ def split_dataset(
         new_info.update(
             total_episodes=len(episode_rows),
             total_frames=next_dataset_index,
-            total_tasks=len(PARTS),
+            total_tasks=len(task_names),
             splits={"train": f"0:{len(episode_rows)}"},
         )
         (temp / "meta/info.json").write_text(json.dumps(new_info, indent=4) + "\n")
@@ -841,7 +891,7 @@ def split_dataset(
             "source_episodes": total_parents,
             "episodes": len(episode_rows),
             "frames": next_dataset_index,
-            "tasks": len(PARTS),
+            "tasks": len(task_names),
             "max_pick_anchor_error_m": max(max_errors, default=0.0),
             "successful_parts_only": successful_parts_only,
             "pruning_strategy": pruning_strategy,

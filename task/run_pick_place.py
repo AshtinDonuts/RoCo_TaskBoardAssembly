@@ -69,6 +69,7 @@ from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.utils.types import ArticulationAction
 from policy_api import EnvInfo, Observation, PartTarget
 from eval_randomization import XYRandomization, resolve_policy_config
+from eval_context import previous_part, successful_target_spec
 
 # Physics material prim authored in the scene USD; bound to every spawned
 # DynamicPart so newly imported parts share the same friction/restitution
@@ -753,6 +754,15 @@ def _parse_args():
              "(unshifted) PartTarget waypoints. Useful to demonstrate that "
              "open-loop experts need privileged XY offsets.",
     )
+    parser.add_argument(
+        "--preplace-previous-success",
+        action="store_true",
+        default=_env_flag("ROCO_PREPLACE_PREVIOUS_SUCCESS"),
+        help="For a single active subtask, place its immediate predecessor "
+             "from the canonical 9-part order at its configured successful "
+             "endpoint before the rollout. The first subtask has no "
+             "predecessor and is rejected.",
+    )
     # SimulationApp consumes argv too; tolerate unknown args so the runner
     # can be launched as ${ISAAC_SIM}/python.sh run_pick_place.py --policy ...
     args = parser.parse_known_args()[0]
@@ -818,6 +828,40 @@ def main():
             "[setup] WARNING: --blind-to-xy-randomization has no effect "
             "without --random-seed"
         )
+
+    preplaced_previous = None
+    if args.preplace_previous_success:
+        active_parts = tuple(
+            name for name in pc.part_order
+            if isinstance(name, str) and not name.startswith("<")
+        )
+        if len(active_parts) != 1:
+            raise ValueError(
+                "--preplace-previous-success requires exactly one active "
+                f"subtask via ROCO_PART_ORDER, got {active_parts!r}"
+            )
+        current_name = active_parts[0]
+        previous_name = previous_part(current_name, pc.FULL_PART_ORDER)
+        if previous_name is None:
+            raise ValueError(
+                f"--preplace-previous-success cannot run for first "
+                f"subtask {current_name!r}; it has no predecessor"
+            )
+        previous_config = pc.get_part_config(previous_name)
+        if randomized_trial is not None:
+            previous_config = randomized_trial.shifted_config(
+                previous_name, previous_config
+            )
+        endpoint = successful_target_spec(previous_config)
+        preplaced_previous = {
+            "part": previous_name,
+            "config": previous_config,
+            "spec": endpoint,
+        }
+        print(
+            f"[setup] contextual evaluation: current={current_name} "
+            f"previous={previous_name} endpoint={endpoint['measure']}"
+        )
     video_recorder = FfmpegVideoRecorder(
         args.record_video,
         fps=args.record_video_fps,
@@ -853,6 +897,7 @@ def main():
                       else randomized_trial.board_offset),
         part_offsets=(None if randomized_trial is None
                       else randomized_trial.part_offsets),
+        preplaced_success_part=preplaced_previous,
     )
 
     # Spawn any pc.part_order entries that aren't already in the loaded scene.
@@ -1101,6 +1146,23 @@ def main():
             "max_parts": args.max_parts,
             "snap_fired_parts": sorted(snap_fired_parts),
         }
+        if preplaced_previous is not None:
+            endpoint = preplaced_previous["spec"]
+            metadata["preplaced_previous_success"] = {
+                "part": preplaced_previous["part"],
+                "measure": endpoint["measure"],
+                "position": [float(x) for x in endpoint["position"]],
+                "rotation": (
+                    None if endpoint["rotation"] is None
+                    else [float(x) for x in endpoint["rotation"]]
+                ),
+                "fixed_joint": bool(endpoint["fixed_joint"]),
+                "joint_path": (
+                    f"/World/_context_success_joint_"
+                    f"{preplaced_previous['part']}"
+                    if endpoint["fixed_joint"] else None
+                ),
+            }
         if randomized_trial is not None:
             metadata["xy_randomization"] = randomized_trial.as_dict()
             metadata["blind_to_xy_randomization"] = bool(
