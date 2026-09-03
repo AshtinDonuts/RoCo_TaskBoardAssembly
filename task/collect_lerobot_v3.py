@@ -137,6 +137,10 @@ def _parse_args():
         default=True,
         help="Append to an existing compatible dataset (default: true).",
     )
+    parser.add_argument(
+        "--schema", choices=("joint", "legacy-cartesian"), default="joint",
+        help="Dataset schema (default: joint; legacy-cartesian preserves the old 44/14 layout).",
+    )
     return parser.parse_args()
 
 
@@ -192,31 +196,25 @@ def _as_rgb(frame):
         return np.asarray(Image.fromarray(arr).resize((IMAGE_WIDTH, IMAGE_HEIGHT)))
 
 
-def _feature_spec():
+def _feature_spec(schema="joint"):
+    if schema == "joint":
+        state = {"dtype": "float32", "shape": (15,), "names":
+                 [f"L_arm_j{i}" for i in range(1, 8)] +
+                 [f"L_arm_qd{i}" for i in range(1, 8)] + ["L_gripper_joint"]}
+        action = {"dtype": "float32", "shape": (8,), "names":
+                  [f"L_arm_j{i}" for i in range(1, 8)] + ["L_gripper_joint"]}
+    else:
+        state = {"dtype": "float32", "shape": (44,), "names": (
+            [f"left_ee_{v}" for v in ("x", "y", "z", "qw", "qx", "qy", "qz")] +
+            [f"right_ee_{v}" for v in ("x", "y", "z", "qw", "qx", "qy", "qz")] +
+            [f"left_joint_{i}" for i in range(7)] + [f"right_joint_{i}" for i in range(7)] +
+            [f"left_joint_velocity_{i}" for i in range(7)] + [f"right_joint_velocity_{i}" for i in range(7)] +
+            ["left_gripper", "right_gripper"])}
+        action = {"dtype": "float32", "shape": (14,), "names": [
+            "left_ee_x", "left_ee_y", "left_ee_z", "left_ee_rx", "left_ee_ry", "left_ee_rz", "left_gripper",
+            "right_ee_x", "right_ee_y", "right_ee_z", "right_ee_rx", "right_ee_ry", "right_ee_rz", "right_gripper"]}
     return {
-        "action": {
-            "dtype": "float32",
-            "shape": (14,),
-            "names": [
-                "left_ee_x", "left_ee_y", "left_ee_z",
-                "left_ee_rx", "left_ee_ry", "left_ee_rz", "left_gripper",
-                "right_ee_x", "right_ee_y", "right_ee_z",
-                "right_ee_rx", "right_ee_ry", "right_ee_rz", "right_gripper",
-            ],
-        },
-        "observation.state": {
-            "dtype": "float32",
-            "shape": (44,),
-            "names": (
-                [f"left_ee_{v}" for v in ("x", "y", "z", "qw", "qx", "qy", "qz")]
-                + [f"right_ee_{v}" for v in ("x", "y", "z", "qw", "qx", "qy", "qz")]
-                + [f"left_joint_{i}" for i in range(7)]
-                + [f"right_joint_{i}" for i in range(7)]
-                + [f"left_joint_velocity_{i}" for i in range(7)]
-                + [f"right_joint_velocity_{i}" for i in range(7)]
-                + ["left_gripper", "right_gripper"]
-            ),
-        },
+        "action": action, "observation.state": state,
         "observation.images.head": {
             "dtype": "video",
             "shape": (IMAGE_HEIGHT, IMAGE_WIDTH, 3),
@@ -249,6 +247,44 @@ def _pack_state(l_pos, l_quat, r_pos, r_quat, q, qd, li, ri, lg, rg):
         np.asarray(qd, dtype=np.float32)[ri],
         np.asarray([_gripper_ratio(q[lg]), _gripper_ratio(q[rg])], dtype=np.float32),
     ]).astype(np.float32)
+
+
+def _pack_joint_state(q, qd, left_indices, gripper_index):
+    """Pack the public left-arm proprioception used by joint-space ACT."""
+    q = np.asarray(q, dtype=np.float32)
+    qd = np.asarray(qd, dtype=np.float32)
+    indices = np.asarray(left_indices, dtype=np.int64)
+    state = np.concatenate([q[indices], qd[indices], [q[gripper_index]]])
+    if state.shape != (15,) or not np.isfinite(state).all():
+        raise ValueError(f"joint state must be finite shape (15,), got {state.shape}")
+    return state.astype(np.float32, copy=False)
+
+
+def _update_command_latch(latch, measured_q, commanded_positions):
+    """Return dense persistent targets after applying one sparse command."""
+    dense = (np.asarray(measured_q, dtype=np.float64).copy()
+             if latch is None else np.asarray(latch, dtype=np.float64).copy())
+    if commanded_positions is not None:
+        if len(commanded_positions) != len(dense):
+            raise ValueError(
+                f"command length {len(commanded_positions)} does not match {len(dense)} DOFs"
+            )
+        for index, value in enumerate(commanded_positions):
+            if value is not None:
+                value = float(value)
+                if not np.isfinite(value):
+                    raise ValueError(f"non-finite joint command at index {index}: {value}")
+                dense[index] = value
+    return dense
+
+
+def _pack_joint_action(command_latch, left_indices, gripper_index):
+    dense = np.asarray(command_latch, dtype=np.float64)
+    values = [dense[index] for index in left_indices] + [dense[gripper_index]]
+    action = np.asarray(values, dtype=np.float32)
+    if action.shape != (8,) or not np.isfinite(action).all():
+        raise ValueError(f"joint action must be finite shape (8,), got {action.shape}")
+    return action
 
 
 def _part_segments(frame_parts, part_order):
@@ -397,7 +433,7 @@ def main():
     sample_fps = recording_cfg["sample_fps"]
     effective_max_parts = len(rp.pc.part_order) if args.max_parts == 0 else int(args.max_parts)
     effective_max_frames = None if args.max_recorded_frames == 0 else int(args.max_recorded_frames)
-    expected_features = _feature_spec()
+    expected_features = _feature_spec(args.schema)
     if output_root.exists():
         if not args.append:
             raise FileExistsError(f"output root already exists: {output_root}")
@@ -419,7 +455,11 @@ def main():
             if actual is None:
                 mismatches.append(f"missing feature {key}")
                 continue
-            if actual.get("dtype") != spec["dtype"] or tuple(actual.get("shape", ())) != tuple(spec["shape"]):
+            if (
+                actual.get("dtype") != spec["dtype"]
+                or tuple(actual.get("shape", ())) != tuple(spec["shape"])
+                or list(actual.get("names", ())) != list(spec.get("names", ()))
+            ):
                 mismatches.append(f"incompatible feature {key}: {actual}")
         extra = set(info.get("features", {})) - set(expected_features) - {
             "timestamp", "frame_index", "episode_index", "index", "task_index"
@@ -572,6 +612,8 @@ def main():
     part_activation_count = 0
     recorded_frames = 0
     policy_action_ready = False
+    last_command = None
+    command_latch = None
     last_recorded_step = None
     next_record_time_s = 0.0
     record_time_origin_s = None
@@ -603,7 +645,7 @@ def main():
 
     def _camera_payload():
         rgb = {"head": None, "L_wrist": None, "R_wrist": None}
-        for key, cam in (("head", head_depth_camera), ("L_wrist", l_wrist_camera), ("R_wrist", r_wrist_camera)):
+        for key, cam in (("head", head_depth_camera), ("L_wrist", l_wrist_camera)):
             if cam is None:
                 continue
             try:
@@ -701,7 +743,7 @@ def main():
 
     def _restart_iteration():
         nonlocal parts_iter, current_part, last_recorded_step, next_record_time_s
-        nonlocal policy_action_ready, record_time_origin_s
+        nonlocal policy_action_ready, record_time_origin_s, last_command, command_latch
         _clear_snap_state()
         snap_fired_parts.clear()
         pending_record_queue.clear()
@@ -709,6 +751,8 @@ def main():
         next_record_time_s = 0.0
         record_time_origin_s = None
         policy_action_ready = False
+        last_command = None
+        command_latch = None
         if stage is not None:
             for name in rp.pc.PART_CONFIG.keys():
                 joint_path = f"/World/_snap_joint_{name}"
@@ -727,7 +771,7 @@ def main():
             next_record_time_s = 0.0
             record_time_origin_s = None
 
-        if run_complete or current_part is None or not policy_action_ready:
+        if run_complete or current_part is None or not policy_action_ready or last_command is None:
             return
         if warmup_steps > 0 and step_idx < warmup_steps:
             return
@@ -742,29 +786,41 @@ def main():
         if record_time_origin_s is None:
             record_time_origin_s = sim_time_s
 
-        obs = _build_observation(step_idx_override=step_idx)
+        obs, _issued = last_command
         l_pos, l_orn = obs.ee_pose_L
         r_pos, r_orn = _actual_ee_pose(r_controller)
         full_q = np.asarray(obs.joint_positions, dtype=np.float32)
         full_qd = np.asarray(obs.joint_velocities, dtype=np.float32)
-        current_cfg = _policy_config(current_part) if current_part is not None else {}
-        l_target_pos, l_target_orn, l_grip_cmd = _left_action_target(policy, obs, current_cfg)
-        r_grip = float(full_q[r_gripper_dof_index])
-
-        left_action = _pack_cartesian_action(
-            l_target_pos, l_target_orn, _gripper_ratio(l_grip_cmd)
+        left_cmd = _pack_joint_action(
+            command_latch, l_arm_dof_indices, l_gripper_dof_index
         )
-        right_action = _pack_cartesian_action(
-            r_pos, r_orn, _gripper_ratio(r_grip)
-        )
-        frame = {
-            "action": np.concatenate([left_action, right_action]).astype(np.float32),
-            "observation.state": _pack_state(
-                l_pos, l_orn, r_pos, r_orn,
-                full_q, full_qd,
+        if args.schema == "legacy-cartesian":
+            current_cfg = _policy_config(current_part)
+            target_pos, target_orn, target_grip = _left_action_target(
+                policy, obs, current_cfg
+            )
+            action = np.concatenate([
+                _pack_cartesian_action(
+                    target_pos, target_orn, _gripper_ratio(target_grip)
+                ),
+                _pack_cartesian_action(
+                    r_pos, r_orn,
+                    _gripper_ratio(float(full_q[r_gripper_dof_index])),
+                ),
+            ]).astype(np.float32)
+            state = _pack_state(
+                l_pos, l_orn, r_pos, r_orn, full_q, full_qd,
                 l_arm_dof_indices, r_arm_dof_indices,
                 l_gripper_dof_index, r_gripper_dof_index,
-            ),
+            )
+        else:
+            action = left_cmd
+            state = _pack_joint_state(
+                full_q, full_qd, l_arm_dof_indices, l_gripper_dof_index
+            )
+        frame = {
+            "action": action,
+            "observation.state": state,
             "observation.images.head": _as_rgb(obs.rgb.get("head")),
             "observation.images.left_hand": _as_rgb(obs.rgb.get("L_wrist")),
             "observation.images.right_hand": _as_rgb(obs.rgb.get("R_wrist")),
@@ -820,7 +876,15 @@ def main():
         "seed": args.random_seed,
         "xy_randomization": randomized_trial.as_dict(),
         "joint_dof_per_arm": 7,
-        "action_encoding": "absolute_cartesian_target_xyz_rotvec_normalized_gripper",
+        "state_encoding": (
+            "left_joint_position_velocity_raw_gripper"
+            if args.schema == "joint" else "legacy_mixed_44d"
+        ),
+        "action_encoding": (
+            "absolute_left_joint_targets_raw_gripper"
+            if args.schema == "joint"
+            else "absolute_cartesian_target_xyz_rotvec_normalized_gripper"
+        ),
         "notes": [
             "right arm is held at its initial pose by the current runner",
             "frames are selected from physics-step callbacks instead of the outer control loop",
@@ -977,6 +1041,11 @@ def main():
                 r_action_positions[j_idx] = float(val)
             r_action = ArticulationAction(joint_positions=r_action_positions)
             merged = rp.merge_bimanual_actions(l_action, r_action, dof_names)
+            issued_positions = getattr(merged, "joint_positions", None)
+            command_latch = _update_command_latch(
+                command_latch, obs.joint_positions, issued_positions
+            )
+            last_command = (obs, merged)
             articulation_controller.apply_action(merged)
             part_step_count += 1
 
@@ -984,7 +1053,7 @@ def main():
             raise RuntimeError("no frames were recorded")
         _flush_record_queue()
         if effective_max_parts != len(evaluated_parts):
-            raise RuntimeError("only full nine-part episodes may be committed to the batch dataset")
+            raise RuntimeError("only complete requested-part episodes may be committed")
 
         segments = _part_segments(recorded_frame_parts, evaluated_parts)
         waypoint_annotations_complete = _attach_phase_segments(

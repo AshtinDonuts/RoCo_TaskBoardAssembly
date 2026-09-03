@@ -133,19 +133,19 @@ timestamp="$(date +%Y%m%d_%H%M%S)"
 output_dir="${ACT_OUTPUT_DIR:-${lerobot_root}/outputs/roco_act_aware100-199_${selector}_${timestamp}}"
 job_name="${ACT_JOB_NAME:-roco_act_aware100-199_${selector}}"
 
-chunk_size="${ACT_CHUNK_SIZE:-9}"
-n_action_steps="${ACT_N_ACTION_STEPS:-${chunk_size}}"
-batch_size="${ACT_BATCH_SIZE:-64}"
-num_workers="${ACT_NUM_WORKERS:-8}"
-steps="${ACT_STEPS:-15000}"
+chunk_size="${ACT_CHUNK_SIZE:-5}"
+n_action_steps="${ACT_N_ACTION_STEPS:-1}"
+batch_size="${ACT_BATCH_SIZE:-32}"
+num_workers="${ACT_NUM_WORKERS:-4}"
+steps="${ACT_STEPS:-8000}"
 # Stock LeRobot uses env rollout eval via eval_freq. Offline holdout flags
 # (dataset.eval_split / eval_steps / max_eval_samples / env_eval_freq) require
 # the feat/offline-validation branch and are not passed here.
 eval_freq="${ACT_EVAL_FREQ:-0}"
-save_freq="${ACT_SAVE_FREQ:-5000}"
+save_freq="${ACT_SAVE_FREQ:-1500}"
 log_freq="${ACT_LOG_FREQ:-100}"
+seed="${ACT_SEED:-1000}"
 use_amp="${ACT_USE_AMP:-true}"
-wandb_enable="${ACT_WANDB_ENABLE:-false}"
 
 export CUDA_VISIBLE_DEVICES="${ACT_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
@@ -184,20 +184,25 @@ train_args=(
   --batch_size="${batch_size}"
   --num_workers="${num_workers}"
   --steps="${steps}"
+  --seed="${seed}"
   --eval_freq="${eval_freq}"
   --save_freq="${save_freq}"
   --log_freq="${log_freq}"
-  --wandb.enable="${wandb_enable}"
-  --wandb.project="${ACT_WANDB_PROJECT:-roco}"
+  --wandb.enable=false
   --job_name="${job_name}"
   --output_dir="${output_dir}"
 )
-if [[ -n "${ACT_WANDB_ENTITY:-}" ]]; then
-  train_args+=(--wandb.entity="${ACT_WANDB_ENTITY}")
-fi
 train_args+=("${extra_args[@]}")
 
-command=("${train_python[@]}" -m lerobot.scripts.lerobot_train "${train_args[@]}")
+# Episode-filtered subtask datasets use absolute frame indices; the repository
+# shim maps those indices to the filtered reader. Keep this as an override so
+# callers can explicitly select a matching LeRobot entrypoint when needed.
+trainer="${ACT_TRAINER:-${script_dir}/lerobot_train_act_patched.py}"
+if [[ ! -f "${trainer}" ]]; then
+  echo "ACT trainer shim not found: ${trainer}" >&2
+  exit 2
+fi
+command=("${train_python[@]}" "${trainer}" "${train_args[@]}")
 echo "LeRobot: ${lerobot_root}"
 echo "Dataset: ${dataset_root}"
 echo "Output:   ${output_dir}"

@@ -3,6 +3,10 @@
 Mirrors ``diffusion_lerobot.py``: ACT runs in a separate lerobot venv process
 (``act_server.py``) and this adapter talks over a stdin/stdout pickle pipe.
 
+Supports two checkpoint contracts, auto-detected from ``config.json``:
+  * joint (15-D state / 8-D action) — current RoCo joint ACT
+  * legacy-cartesian (44-D state / 14-D action) — original action-state ACT
+
 Env:
   ACT_CKPT         path to the checkpoint pretrained_model dir (required)
   ACT_SERVER_PY    python for the model's venv (required)
@@ -11,9 +15,11 @@ Env:
   ACT_CUDA_VISIBLE_DEVICES  optional GPU id(s) for the sidecar
   ACT_N_ACTION_STEPS  optional override for closed-loop action horizon
   ACT_TEMPORAL_ENSEMBLE_COEFF  optional ACT temporal ensembling coeff
+  ACT_SCHEMA       optional force: ``joint`` or ``legacy-cartesian``
 """
 from __future__ import annotations
 
+import json
 import os
 import pickle
 import struct
@@ -28,6 +34,12 @@ _TASK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 GRIPPER_OPEN_LIMIT = 0.6649704
 _IMG_H, _IMG_W = 240, 320
+ACT_INFER_PERIOD = 20  # 10 Hz policy in the 200 Hz physics loop
+
+JOINT_STATE_DIM = 15
+JOINT_ACTION_DIM = 8
+LEGACY_STATE_DIM = 44
+LEGACY_ACTION_DIM = 14
 
 
 def _resize_rgb(img):
@@ -65,6 +77,26 @@ def _rotvec_to_quat_wxyz(rx, ry, rz):
     return np.array([w, x, y, z], dtype=np.float64)
 
 
+def _detect_schema(ckpt: str) -> str:
+    forced = os.environ.get("ACT_SCHEMA", "").strip().lower()
+    if forced in ("joint", "legacy-cartesian", "legacy"):
+        return "joint" if forced == "joint" else "legacy-cartesian"
+    cfg_path = os.path.join(ckpt, "config.json")
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    state_shape = cfg["input_features"]["observation.state"]["shape"]
+    action_shape = cfg["output_features"]["action"]["shape"]
+    state_dim = int(state_shape[0] if isinstance(state_shape, list) else state_shape)
+    action_dim = int(action_shape[0] if isinstance(action_shape, list) else action_shape)
+    if state_dim == JOINT_STATE_DIM and action_dim == JOINT_ACTION_DIM:
+        return "joint"
+    if state_dim == LEGACY_STATE_DIM and action_dim == LEGACY_ACTION_DIM:
+        return "legacy-cartesian"
+    raise ValueError(
+        f"unsupported ACT contract state={state_dim} action={action_dim} in {cfg_path}"
+    )
+
+
 class ACTLeRobotPolicy(Policy):
     def __init__(self, env_info: EnvInfo) -> None:
         super().__init__(env_info)
@@ -90,6 +122,11 @@ class ACTLeRobotPolicy(Policy):
         server_script = os.environ.get(
             "ACT_SERVER", os.path.join(_TASK_DIR, "act_server.py")
         )
+
+        self._schema = _detect_schema(ckpt)
+        self._state_dim = JOINT_STATE_DIM if self._schema == "joint" else LEGACY_STATE_DIM
+        self._action_dim = JOINT_ACTION_DIM if self._schema == "joint" else LEGACY_ACTION_DIM
+        print(f"[act] schema={self._schema} state={self._state_dim} action={self._action_dim}", flush=True)
 
         keep = (
             "HOME",
@@ -141,6 +178,7 @@ class ACTLeRobotPolicy(Policy):
                 f"see {log_path}"
             )
         self._last_action = None
+        self._next_infer_step = 0
 
     def _send(self, obj):
         b = pickle.dumps(obj)
@@ -163,8 +201,20 @@ class ACTLeRobotPolicy(Policy):
     def reset(self, obs: Observation, target: PartTarget) -> None:
         self._send({"cmd": "reset"})
         self._recv()
+        self._last_action = None
+        self._next_infer_step = int(getattr(obs, "step_idx", 0))
 
     def _build_state(self, obs: Observation) -> np.ndarray:
+        if getattr(self, "_schema", "joint") == "legacy-cartesian":
+            return self._build_legacy_state(obs)
+        q = np.asarray(obs.joint_positions, np.float64)
+        qd = np.asarray(obs.joint_velocities, np.float64)
+        state = np.concatenate([q[self._Li], qd[self._Li], [q[self._Lg]]]).astype(np.float32)
+        if state.shape != (JOINT_STATE_DIM,) or not np.isfinite(state).all():
+            raise ValueError(f"ACT state must be finite shape ({JOINT_STATE_DIM},), got {state.shape}")
+        return state
+
+    def _build_legacy_state(self, obs: Observation) -> np.ndarray:
         q = np.asarray(obs.joint_positions, np.float64)
         qd = np.asarray(obs.joint_velocities, np.float64)
         if self.L is not None:
@@ -179,7 +229,7 @@ class ACTLeRobotPolicy(Policy):
         def ratio(v):
             return float(np.clip(v / GRIPPER_OPEN_LIMIT, 0, 1))
 
-        return np.concatenate(
+        state = np.concatenate(
             [
                 np.asarray(Lp).reshape(-1)[:3],
                 np.asarray(Lq).reshape(-1)[:4],
@@ -193,22 +243,66 @@ class ACTLeRobotPolicy(Policy):
                 [ratio(q[self._Rg]) if self._Rg is not None else 0.0],
             ]
         ).astype(np.float32)
+        if state.shape != (LEGACY_STATE_DIM,) or not np.isfinite(state).all():
+            raise ValueError(
+                f"ACT legacy state must be finite shape ({LEGACY_STATE_DIM},), got {state.shape}"
+            )
+        return state
 
     def act(self, obs: Observation):
+        step = int(getattr(obs, "step_idx", 0))
+        if self._last_action is not None and step < self._next_infer_step:
+            return self._apply_action(self._last_action)
         state = self._build_state(obs)
+        if self._schema == "joint":
+            right = np.zeros((_IMG_H, _IMG_W, 3), dtype=np.uint8)
+        else:
+            right = _resize_rgb(obs.rgb.get("R_wrist"))
         self._send(
             {
                 "state": state,
                 "head": _resize_rgb(obs.rgb.get("head")),
                 "left": _resize_rgb(obs.rgb.get("L_wrist")),
-                "right": _resize_rgb(obs.rgb.get("R_wrist")),
+                "right": right,
             }
         )
-        a = np.asarray(self._recv()["action"], np.float64)
+        a = np.asarray(self._recv()["action"], np.float64).reshape(-1)
+        if a.shape != (self._action_dim,) or not np.isfinite(a).all():
+            raise RuntimeError(
+                f"ACT action must be finite shape ({self._action_dim},), got {a.shape}"
+            )
         self._last_action = a
-        pos = a[:3]
-        quat = _rotvec_to_quat_wxyz(a[3], a[4], a[5])
-        grip = float(np.clip(a[6], 0, 1)) * GRIPPER_OPEN_LIMIT
+        self._next_infer_step = step + ACT_INFER_PERIOD
+        return self._apply_action(a)
+
+    def _apply_action(self, action):
+        if self._schema == "joint":
+            return self._joint_action(action)
+        return self._legacy_cartesian_action(action)
+
+    def _joint_action(self, action):
+        action = np.asarray(action, dtype=np.float64).reshape(-1)
+        if action.shape != (JOINT_ACTION_DIM,) or not np.isfinite(action).all():
+            raise ValueError(
+                f"ACT action must be finite shape ({JOINT_ACTION_DIM},), got {action.shape}"
+            )
+        from omni.isaac.core.utils.types import ArticulationAction
+
+        positions = [None] * len(self.env_info.dof_names)
+        for i, value in zip(self._Li, action[:7]):
+            positions[i] = float(value)
+        positions[self._Lg] = float(action[7])
+        return ArticulationAction(joint_positions=positions)
+
+    def _legacy_cartesian_action(self, action):
+        action = np.asarray(action, dtype=np.float64).reshape(-1)
+        if action.shape != (LEGACY_ACTION_DIM,) or not np.isfinite(action).all():
+            raise ValueError(
+                f"ACT legacy action must be finite shape ({LEGACY_ACTION_DIM},), got {action.shape}"
+            )
+        pos = action[:3]
+        quat = _rotvec_to_quat_wxyz(action[3], action[4], action[5])
+        grip = float(np.clip(action[6], 0, 1)) * GRIPPER_OPEN_LIMIT
         return self.L.forward(pos, quat, grip)
 
     def is_done(self, obs: Observation) -> bool:

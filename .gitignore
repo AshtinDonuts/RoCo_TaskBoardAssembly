@@ -26,3 +26,7 @@ task/demo.mp4
 robot/sharpa_north/
 
 .hf-cache/
+
+checkpoints_act_chunk5/
+
+derived_subtasks_15hz/

@@ -306,6 +306,147 @@ def apply_xy_randomization(board_offset=None, part_offsets=None):
         )
 
 
+def _find_part_mesh(prim, deepest=False):
+    """Return the first (or deepest) Mesh descendant below ``prim``."""
+    selected = None
+    selected_depth = -1
+    if prim and prim.GetTypeName() == "Mesh":
+        selected = prim
+        selected_depth = prim.GetPath().pathString.count("/")
+    if not prim:
+        return None
+    for desc in Usd.PrimRange(prim):
+        if desc == prim or desc.GetTypeName() != "Mesh":
+            continue
+        if not deepest:
+            return desc
+        depth = desc.GetPath().pathString.count("/")
+        if depth > selected_depth:
+            selected = desc
+            selected_depth = depth
+    return selected
+
+
+def _world_xform(stage, prim_path):
+    cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+    return cache.GetLocalToWorldTransform(stage.GetPrimAtPath(Sdf.Path(prim_path)))
+
+
+def preplace_part_at_success_target(stage, placement):
+    """Place one predecessor part at its successful post-placement state.
+
+    ``placement`` is prepared by ``run_pick_place`` and contains the part
+    name, its randomized runtime config, and the pure endpoint specification.
+    This runs after scene randomization but before the initial xform snapshot,
+    so the contextual part is restored to this state on every iteration reset.
+    """
+    if not placement:
+        return None
+    part_name = placement["part"]
+    config = placement["config"]
+    spec = placement["spec"]
+    snap = config.get("snap") or {}
+    movable_path = snap.get("movable_path", f"/World/parts/{part_name}")
+    root = stage.GetPrimAtPath(Sdf.Path(movable_path))
+    if not root or not root.IsValid():
+        raise RuntimeError(
+            f"cannot pre-place predecessor {part_name!r}: "
+            f"missing prim {movable_path}"
+        )
+
+    from snap_attach import (
+        author_fixed_joint,
+        build_world_matrix,
+        resolve_rigid_body,
+        snap_to_pose,
+    )
+
+    body_path = resolve_rigid_body(stage, movable_path)
+    if not body_path:
+        raise RuntimeError(
+            f"cannot pre-place predecessor {part_name!r}: no rigid body "
+            f"under {movable_path}"
+        )
+    mesh_path = spec.get("mesh_path")
+    mesh = (stage.GetPrimAtPath(Sdf.Path(mesh_path))
+            if mesh_path else _find_part_mesh(root))
+    if not mesh or not mesh.IsValid() or mesh.GetTypeName() != "Mesh":
+        raise RuntimeError(
+            f"cannot pre-place predecessor {part_name!r}: no Mesh "
+            f"descendant under {movable_path}"
+        )
+
+    m_body_cur = _world_xform(stage, body_path)
+    m_mesh_cur = _world_xform(stage, str(mesh.GetPath()))
+    mesh_local_in_body = m_mesh_cur * m_body_cur.GetInverse()
+    target_position = Gf.Vec3d(*spec["position"])
+
+    if spec["measure"] == "mesh_pose":
+        m_mesh_target = build_world_matrix(
+            spec["position"], spec["rotation"]
+        )
+        m_body_target = mesh_local_in_body.GetInverse() * m_mesh_target
+    elif spec["measure"] == "aabb_midpoint":
+        deepest_mesh = _find_part_mesh(root, deepest=True)
+        if not deepest_mesh:
+            raise RuntimeError(
+                f"cannot pre-place predecessor {part_name!r}: no deepest Mesh"
+            )
+        bbox_cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_]
+        )
+        aabb = bbox_cache.ComputeWorldBound(deepest_mesh).ComputeAlignedRange()
+        current_midpoint = aabb.GetMidpoint()
+        delta = target_position - current_midpoint
+        m_body_target = Gf.Matrix4d(m_body_cur)
+        current_body_position = m_body_cur.ExtractTranslation()
+        m_body_target.SetTranslateOnly(
+            current_body_position + Gf.Vec3d(delta[0], delta[1], delta[2])
+        )
+    elif spec["measure"] == "mesh_translation":
+        # Open-part grade_pos/place_pos is a mesh translation target. Preserve
+        # the existing orientation, matching the position-only grader.
+        m_mesh_target = Gf.Matrix4d(m_mesh_cur)
+        m_mesh_target.SetTranslateOnly(target_position)
+        m_body_target = mesh_local_in_body.GetInverse() * m_mesh_target
+    else:
+        raise ValueError(
+            f"unknown successful endpoint measure {spec['measure']!r} "
+            f"for {part_name!r}"
+        )
+
+    snap_to_pose(stage, body_path, m_body_target, set_kinematic=False)
+    joint_path = f"/World/_context_success_joint_{part_name}"
+    if spec["fixed_joint"]:
+        joint, _, _ = author_fixed_joint(
+            stage,
+            body_path,
+            spec.get("parent_body_path", ""),
+            m_body_target,
+            joint_path,
+        )
+        if joint is None:
+            raise RuntimeError(
+                f"failed to author contextual fixed joint for {part_name!r}"
+            )
+
+    print(
+        f"[setup] preplaced previous part {part_name} at successful "
+        f"{spec['measure']} target=({target_position[0]:+.5f}, "
+        f"{target_position[1]:+.5f}, {target_position[2]:+.5f})"
+        + (f" joint={joint_path}" if spec["fixed_joint"] else ""),
+        flush=True,
+    )
+    return {
+        "part": part_name,
+        "measure": spec["measure"],
+        "fixed_joint": bool(spec["fixed_joint"]),
+        "joint_path": joint_path if spec["fixed_joint"] else None,
+        "body_path": body_path,
+        "mesh_path": str(mesh.GetPath()),
+    }
+
+
 # Snapshot of every scene-resident part's xformOp values, captured ONCE
 # before the first physics step. Used by restore_scene_part_xforms() to
 # undo the moved-by-PhysX poses on each iteration restart — without this,
@@ -360,7 +501,9 @@ def restore_scene_part_xforms():
         n_restored += 1
 
 
-def open_scene_and_world(board_offset=None, part_offsets=None):
+def open_scene_and_world(
+    board_offset=None, part_offsets=None, preplaced_success_part=None
+):
     """Open scene_base.usd into a fresh stage and create the World."""
     scene_path = _resolve_scene_path()
     if not os.path.isfile(scene_path):
@@ -381,6 +524,10 @@ def open_scene_and_world(board_offset=None, part_offsets=None):
     # Apply evaluation-time offsets after nominal pose verification but before
     # any World/task wrapper snapshots the initial transforms.
     apply_xy_randomization(board_offset, part_offsets)
+    # Optional contextual evaluation setup: place the immediate predecessor
+    # at its successful endpoint before capturing the reset snapshot.
+    preplace_part_at_success_target(stage=omni.usd.get_context().get_stage(),
+                                    placement=preplaced_success_part)
     # Snapshot scene-resident part xforms NOW, before physics starts.
     # restore_scene_part_xforms() uses this snapshot on each stop+play
     # so parts don't carry over their last-known PhysX-overwritten pose.
@@ -608,11 +755,14 @@ def setup_pick_place_sim(
     base_translation_offset=None,
     board_offset=None,
     part_offsets=None,
+    preplaced_success_part=None,
 ):
     """Build the 2-part bimanual pick-and-place world from the pre-built scene.
 
     ``board_offset`` and ``part_offsets`` are optional trial-level XY shifts;
     when provided they are applied before World snapshots the initial poses.
+    ``preplaced_success_part`` optionally describes the immediate predecessor
+    part and is placed at its successful endpoint before that snapshot.
 
     Returns
     -------
@@ -627,7 +777,9 @@ def setup_pick_place_sim(
     reset_needed : bool, always False on first call.
     """
     my_world = open_scene_and_world(
-        board_offset=board_offset, part_offsets=part_offsets
+        board_offset=board_offset,
+        part_offsets=part_offsets,
+        preplaced_success_part=preplaced_success_part,
     )
 
     my_task = PickPlaceTask_scene_bimanual(

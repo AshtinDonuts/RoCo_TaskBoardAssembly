@@ -349,6 +349,9 @@ CLI flags:
   and closes any video recorder before exiting.
 - `--random-seed <n>` — enables deterministic fairness XY randomization
   (uniform ±1 cm); omit it for the nominal scene.
+- `--preplace-previous-success` — in a single-subtask run, place the
+  immediate predecessor from the canonical 9-subtask order at its successful
+  endpoint before rollout. Results JSON records the contextual part/target.
 
 Edit `task/param_config.py::part_order` to run a subset for debugging.
 See `task/README.md` for the per-runner gotchas (scene drive targets,

@@ -35,6 +35,8 @@ uv run python task/run_pick_place.py --policy policies.my_team.MyPolicy
 uv run python task/run_pick_place.py --results-json out/results.json  # dump per-part pass/fail
 uv run python task/run_pick_place.py --record-video artifacts/head.mp4 # record an MP4 rollout
 uv run python task/run_pick_place.py --random-seed 0              # fairness XY trial
+ROCO_PART_ORDER=hdmi uv run python task/run_pick_place.py \
+  --preplace-previous-success --max-steps 100                 # contextual single-part trial
 ```
 
 A standalone Omniverse-launcher Isaac Sim still works:
@@ -56,6 +58,22 @@ Edit `pc.part_order` to choose which parts to run. All 9 parts are
 pre-resident in `scene_init.usd`; any `part_order` entry that *isn't* in
 the loaded scene would be spawned at runtime from `../parts/<name>.usdc`
 at the pose recorded in `part_init_poses.json`.
+
+For an isolated contextual trial, set `ROCO_PART_ORDER` to one subtask and
+pass `--preplace-previous-success` (or set
+`ROCO_PREPLACE_PREVIOUS_SUCCESS=1`). The runner looks up the immediate
+predecessor in the canonical 9-part order, moves it to its configured
+successful endpoint, and includes that state in the reset snapshot. Snap
+predecessors are fixed-joint anchored; open predecessors use their settled
+grading target. The first subtask has no predecessor and is rejected.
+
+The trained 15 Hz ACT batch helper runs the available contextual policies on
+seeds 0–9, with 100 task-control steps, temporal aggregation, JSON results,
+and head-camera MP4s:
+
+```bash
+scripts/eval_act_15hz_previous_context.sh
+```
 
 ## Policy contract (quick reference)
 

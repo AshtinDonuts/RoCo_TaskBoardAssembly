@@ -16,6 +16,39 @@ import split_lerobot_subtasks as splitter
 
 
 class SplitLeRobotSubtasksTest(unittest.TestCase):
+    def test_manifest_accepts_ordered_two_part_episode(self):
+        row = {
+            "episode_index": 0,
+            "recorded_parts": ["gear_20teeth", "gear_60teeth"],
+            "segments": [
+                {"name": "gear_20teeth", "begin": 0, "end": 4, "pass": True},
+                {"name": "gear_60teeth", "begin": 4, "end": 9, "pass": False},
+            ],
+        }
+        segments = splitter._manifest_segments(row, 9)
+        self.assertEqual([segment["name"] for segment in segments], row["recorded_parts"])
+
+    def test_manifest_rejects_declared_part_order_mismatch(self):
+        row = {
+            "episode_index": 0,
+            "recorded_parts": ["gear_60teeth", "gear_20teeth"],
+            "segments": [
+                {"name": "gear_20teeth", "begin": 0, "end": 4, "pass": True},
+                {"name": "gear_60teeth", "begin": 4, "end": 9, "pass": True},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "do not match recorded_parts"):
+            splitter._manifest_segments(row, 9)
+
+    def test_joint_only_state_uses_leading_joint_and_velocity_slices(self):
+        segment = {"name": "gear_60teeth", "begin": 0, "end": 12, "pass": True}
+        states = np.zeros((12, 15), dtype=np.float64)
+        states[:, 7:14] = 0.01
+        refined = splitter._refine_segment(
+            segment, {}, states, "velocity", 2, 0.03, 3, 0.5, fps=10,
+        )
+        self.assertEqual(refined["begin"], 0)
+
     def test_manifest_validation_rejects_gaps(self):
         row = {
             "episode_index": 0,
