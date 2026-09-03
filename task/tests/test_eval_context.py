@@ -1,7 +1,7 @@
 import unittest
 
 from task.param_config import FULL_PART_ORDER
-from task.eval_context import previous_part, successful_target_spec
+from task.eval_context import preceding_parts, previous_part, successful_target_spec
 
 
 class EvalContextTests(unittest.TestCase):
@@ -20,6 +20,18 @@ class EvalContextTests(unittest.TestCase):
     def test_previous_part_rejects_unknown_part(self):
         with self.assertRaisesRegex(ValueError, "not present"):
             previous_part("unknown", self.ORDER)
+
+    def test_preceding_parts_returns_complete_ordered_prefix(self):
+        self.assertEqual(preceding_parts("gear_60teeth", self.ORDER), ())
+        self.assertEqual(
+            preceding_parts("usb_a", self.ORDER),
+            ("gear_60teeth", "gear_20teeth", "rod_16mm", "bolt_8mm"),
+        )
+        self.assertEqual(preceding_parts("battery_size5", self.ORDER), self.ORDER[:-1])
+
+    def test_preceding_parts_rejects_unknown_part(self):
+        with self.assertRaisesRegex(ValueError, "not present"):
+            preceding_parts("unknown", self.ORDER)
 
     def test_snap_success_uses_final_connect_pose(self):
         spec = successful_target_spec({

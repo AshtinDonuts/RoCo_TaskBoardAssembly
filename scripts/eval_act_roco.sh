@@ -17,8 +17,8 @@ Env overrides:
   ACT_BLIND_XY                 1/0; blind policy to offsets (default: 1)
   ACT_NOMINAL                  1/0; omit all XY randomization (default: 0)
   ACT_PREPLACE_PREVIOUS_SUCCESS
-                                1/0; place the predecessor at its successful
-                                endpoint before this isolated rollout (default: 0)
+                                1/0; place all earlier canonical parts at their
+                                successful endpoints before this rollout (default: 0)
   ACT_EVAL_RESULTS / ACT_EVAL_VIDEO
   ACT_CUDA_VISIBLE_DEVICES     GPU for ACT sidecar (default: 0)
   ISAACSIM_*                   passed through to run_roco.sh

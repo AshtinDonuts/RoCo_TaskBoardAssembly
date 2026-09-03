@@ -27,6 +27,19 @@ def previous_part(current_part: str, ordered_parts: Sequence[str]):
     return parts[index - 1] if index else None
 
 
+def preceding_parts(current_part: str, ordered_parts: Sequence[str]):
+    """Return every part before ``current_part`` in canonical order."""
+    parts = tuple(ordered_parts)
+    try:
+        index = parts.index(current_part)
+    except ValueError as exc:
+        raise ValueError(
+            f"current part {current_part!r} is not present in the ordered "
+            f"task list {parts!r}"
+        ) from exc
+    return parts[:index]
+
+
 def _first_present(mapping: Mapping, *keys):
     for key in keys:
         value = mapping.get(key)

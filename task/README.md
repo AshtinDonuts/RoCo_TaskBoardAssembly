@@ -62,10 +62,10 @@ at the pose recorded in `part_init_poses.json`.
 For an isolated contextual trial, set `ROCO_PART_ORDER` to one subtask and
 pass `--preplace-previous-success` (or set
 `ROCO_PREPLACE_PREVIOUS_SUCCESS=1`). The runner looks up the immediate
-predecessor in the canonical 9-part order, moves it to its configured
-successful endpoint, and includes that state in the reset snapshot. Snap
-predecessors are fixed-joint anchored; open predecessors use their settled
-grading target. The first subtask has no predecessor and is rejected.
+predecessor and every other earlier part in the canonical 9-part order, moves
+each to its configured successful endpoint, and includes those states in the
+reset snapshot. Snap predecessors are fixed-joint anchored; open predecessors
+use their settled grading targets. The first subtask simply has an empty prefix.
 
 The trained 15 Hz ACT batch helper runs the available contextual policies on
 seeds 0–9, with 100 task-control steps, temporal aggregation, JSON results,

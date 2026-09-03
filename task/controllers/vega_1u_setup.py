@@ -333,7 +333,7 @@ def _world_xform(stage, prim_path):
 
 
 def preplace_part_at_success_target(stage, placement):
-    """Place one predecessor part at its successful post-placement state.
+    """Place one earlier part at its successful post-placement state.
 
     ``placement`` is prepared by ``run_pick_place`` and contains the part
     name, its randomized runtime config, and the pure endpoint specification.
@@ -431,7 +431,7 @@ def preplace_part_at_success_target(stage, placement):
             )
 
     print(
-        f"[setup] preplaced previous part {part_name} at successful "
+        f"[setup] preplaced prior part {part_name} at successful "
         f"{spec['measure']} target=({target_position[0]:+.5f}, "
         f"{target_position[1]:+.5f}, {target_position[2]:+.5f})"
         + (f" joint={joint_path}" if spec["fixed_joint"] else ""),
@@ -502,7 +502,7 @@ def restore_scene_part_xforms():
 
 
 def open_scene_and_world(
-    board_offset=None, part_offsets=None, preplaced_success_part=None
+    board_offset=None, part_offsets=None, preplaced_success_parts=None
 ):
     """Open scene_base.usd into a fresh stage and create the World."""
     scene_path = _resolve_scene_path()
@@ -524,10 +524,12 @@ def open_scene_and_world(
     # Apply evaluation-time offsets after nominal pose verification but before
     # any World/task wrapper snapshots the initial transforms.
     apply_xy_randomization(board_offset, part_offsets)
-    # Optional contextual evaluation setup: place the immediate predecessor
-    # at its successful endpoint before capturing the reset snapshot.
-    preplace_part_at_success_target(stage=omni.usd.get_context().get_stage(),
-                                    placement=preplaced_success_part)
+    # Optional contextual evaluation setup: place all earlier canonical parts
+    # at their successful endpoints before capturing the reset snapshot.
+    for placement in preplaced_success_parts or ():
+        preplace_part_at_success_target(
+            stage=omni.usd.get_context().get_stage(), placement=placement
+        )
     # Snapshot scene-resident part xforms NOW, before physics starts.
     # restore_scene_part_xforms() uses this snapshot on each stop+play
     # so parts don't carry over their last-known PhysX-overwritten pose.
@@ -755,14 +757,14 @@ def setup_pick_place_sim(
     base_translation_offset=None,
     board_offset=None,
     part_offsets=None,
-    preplaced_success_part=None,
+    preplaced_success_parts=None,
 ):
     """Build the 2-part bimanual pick-and-place world from the pre-built scene.
 
     ``board_offset`` and ``part_offsets`` are optional trial-level XY shifts;
     when provided they are applied before World snapshots the initial poses.
-    ``preplaced_success_part`` optionally describes the immediate predecessor
-    part and is placed at its successful endpoint before that snapshot.
+    ``preplaced_success_parts`` optionally describes all earlier canonical
+    parts, which are placed at their successful endpoints before that snapshot.
 
     Returns
     -------
@@ -779,7 +781,7 @@ def setup_pick_place_sim(
     my_world = open_scene_and_world(
         board_offset=board_offset,
         part_offsets=part_offsets,
-        preplaced_success_part=preplaced_success_part,
+        preplaced_success_parts=preplaced_success_parts,
     )
 
     my_task = PickPlaceTask_scene_bimanual(

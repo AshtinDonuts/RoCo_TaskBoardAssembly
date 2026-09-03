@@ -69,7 +69,7 @@ from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.utils.types import ArticulationAction
 from policy_api import EnvInfo, Observation, PartTarget
 from eval_randomization import XYRandomization, resolve_policy_config
-from eval_context import previous_part, successful_target_spec
+from eval_context import preceding_parts, successful_target_spec
 
 # Physics material prim authored in the scene USD; bound to every spawned
 # DynamicPart so newly imported parts share the same friction/restitution
@@ -758,10 +758,9 @@ def _parse_args():
         "--preplace-previous-success",
         action="store_true",
         default=_env_flag("ROCO_PREPLACE_PREVIOUS_SUCCESS"),
-        help="For a single active subtask, place its immediate predecessor "
-             "from the canonical 9-part order at its configured successful "
-             "endpoint before the rollout. The first subtask has no "
-             "predecessor and is rejected.",
+        help="For a single active subtask, place every earlier part from the "
+             "canonical 9-part order at its configured successful endpoint "
+             "before the rollout.",
     )
     # SimulationApp consumes argv too; tolerate unknown args so the runner
     # can be launched as ${ISAAC_SIM}/python.sh run_pick_place.py --policy ...
@@ -829,7 +828,7 @@ def main():
             "without --random-seed"
         )
 
-    preplaced_previous = None
+    preplaced_priors = []
     if args.preplace_previous_success:
         active_parts = tuple(
             name for name in pc.part_order
@@ -841,26 +840,22 @@ def main():
                 f"subtask via ROCO_PART_ORDER, got {active_parts!r}"
             )
         current_name = active_parts[0]
-        previous_name = previous_part(current_name, pc.FULL_PART_ORDER)
-        if previous_name is None:
-            raise ValueError(
-                f"--preplace-previous-success cannot run for first "
-                f"subtask {current_name!r}; it has no predecessor"
-            )
-        previous_config = pc.get_part_config(previous_name)
-        if randomized_trial is not None:
-            previous_config = randomized_trial.shifted_config(
-                previous_name, previous_config
-            )
-        endpoint = successful_target_spec(previous_config)
-        preplaced_previous = {
-            "part": previous_name,
-            "config": previous_config,
-            "spec": endpoint,
-        }
+        prior_names = preceding_parts(current_name, pc.FULL_PART_ORDER)
+        for prior_name in prior_names:
+            prior_config = pc.get_part_config(prior_name)
+            if randomized_trial is not None:
+                prior_config = randomized_trial.shifted_config(
+                    prior_name, prior_config
+                )
+            endpoint = successful_target_spec(prior_config)
+            preplaced_priors.append({
+                "part": prior_name,
+                "config": prior_config,
+                "spec": endpoint,
+            })
         print(
             f"[setup] contextual evaluation: current={current_name} "
-            f"previous={previous_name} endpoint={endpoint['measure']}"
+            f"completed_priors={list(prior_names)!r}"
         )
     video_recorder = FfmpegVideoRecorder(
         args.record_video,
@@ -897,7 +892,7 @@ def main():
                       else randomized_trial.board_offset),
         part_offsets=(None if randomized_trial is None
                       else randomized_trial.part_offsets),
-        preplaced_success_part=preplaced_previous,
+        preplaced_success_parts=preplaced_priors,
     )
 
     # Spawn any pc.part_order entries that aren't already in the loaded scene.
@@ -1146,23 +1141,24 @@ def main():
             "max_parts": args.max_parts,
             "snap_fired_parts": sorted(snap_fired_parts),
         }
-        if preplaced_previous is not None:
-            endpoint = preplaced_previous["spec"]
-            metadata["preplaced_previous_success"] = {
-                "part": preplaced_previous["part"],
-                "measure": endpoint["measure"],
-                "position": [float(x) for x in endpoint["position"]],
-                "rotation": (
-                    None if endpoint["rotation"] is None
-                    else [float(x) for x in endpoint["rotation"]]
-                ),
-                "fixed_joint": bool(endpoint["fixed_joint"]),
-                "joint_path": (
-                    f"/World/_context_success_joint_"
-                    f"{preplaced_previous['part']}"
-                    if endpoint["fixed_joint"] else None
-                ),
-            }
+        if args.preplace_previous_success:
+            metadata["preplaced_prior_successes"] = []
+            for placement in preplaced_priors:
+                endpoint = placement["spec"]
+                metadata["preplaced_prior_successes"].append({
+                    "part": placement["part"],
+                    "measure": endpoint["measure"],
+                    "position": [float(x) for x in endpoint["position"]],
+                    "rotation": (
+                        None if endpoint["rotation"] is None
+                        else [float(x) for x in endpoint["rotation"]]
+                    ),
+                    "fixed_joint": bool(endpoint["fixed_joint"]),
+                    "joint_path": (
+                        f"/World/_context_success_joint_{placement['part']}"
+                        if endpoint["fixed_joint"] else None
+                    ),
+                })
         if randomized_trial is not None:
             metadata["xy_randomization"] = randomized_trial.as_dict()
             metadata["blind_to_xy_randomization"] = bool(
